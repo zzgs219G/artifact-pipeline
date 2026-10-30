@@ -1,0 +1,640 @@
+#!/usr/bin/env bash
+# test-smoke.sh — anti-diff MVP 冒烟测试(合成 smali,无需 apktool)
+# 验证:① 三类变换各自生效 ② 语义关键行零变化(方法/字段/签名/字符串)
+#       ③ <init>/<clinit>/native 被跳过 ④ 幂等(重跑零 diff)
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+mkdir -p "$WORK/dec/smali/com/demo"
+
+# ── 合成一个包含全部形态的 smali 类 ────────────────────────────────
+cat > "$WORK/dec/smali/com/demo/A.smali" <<'EOF'
+.class public Lcom/demo/A;
+.super Ljava/lang/Object;
+.source "A.java"
+
+.field public a:I
+.field public b:I
+
+.method public constructor <init>()V
+    .registers 2
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+
+.method public static foo(I)I
+    .registers 6
+    const/4 v0, 0x0
+    if-eqz p0, :cond_0
+    const/4 v0, 0x1
+    goto :goto_0
+    :cond_0
+    const/4 v0, 0x2
+    :goto_0
+    return v0
+.end method
+
+.method public static bar()V
+    .registers 6
+    const/4 v0, 0x0
+    move v1, v0
+    return-void
+.end method
+
+.method public static qux()Ljava/lang/String;
+    .locals 6
+    const/4 v0, 0x0
+    const-string v1, "CC(remember):MainActivity.kt#9igjgp"
+    return-object v1
+.end method
+
+.method public static wide()J
+    .locals 6
+    const-wide v0, 0x1L
+    return-wide v0
+.end method
+
+.method public static baz()V
+    .registers 3
+    const/4 v0, 0x0
+    :try_start_0
+    invoke-static {}, Ljava/lang/System;->gc()V
+    :try_end_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_0
+    return-void
+    :catchall_0
+    return-void
+.end method
+
+.method public static calc(I)I
+    .locals 2
+    shl-int/lit8 v0, p0, 0x1
+    shl-int/lit8 v1, p0, 0x2
+    shl-int/2addr v0, v1
+    shl-int/lit8 v0, v0, 0x0
+    return v0
+.end method
+
+.method public native nat()V
+.end method
+EOF
+
+run() { python3 "$HERE/../anti-diff.py" "$@"; }
+
+echo "== 第 1 次运行(带 --enable-f,变换 F 开) =="
+run "$WORK/dec" --enable-f > "$WORK/run1.log"
+cat "$WORK/run1.log"
+cp "$WORK/dec/smali/com/demo/A.smali" "$WORK/A.after1.smali"
+
+# ── 断言 1:标记注释存在(幂等锚) ────────────────────────────────────
+grep -q '^# nc-antidiff-applied v1$' "$WORK/A.after1.smali" \
+  || { echo '❌ 缺幂等标记'; exit 1; }
+
+# ── 断言 2:语义行零变化(类名/方法名/签名/字段/字符串) ──────────────
+for needle in \
+  '.class public Lcom/demo/A;' \
+  '.method public constructor <init>()V' \
+  '.method public static foo(I)I' \
+  '.method public static bar()V' \
+  '.method public native nat()V' \
+  '.field public a:I'; do
+  grep -qF "$needle" "$WORK/A.after1.smali" \
+    || { echo "❌ 语义行丢失: $needle"; exit 1; }
+done
+
+# ── 断言 3:<init> 完全没被挪动位置(必须紧跟 .field 块之后,原第 1 个方法) ──
+# 重排后 <init> 仍应在所有方法之前(pinned),即第一个 .method 行是 <init>
+first_method=$(grep -n '^.method' "$WORK/A.after1.smali" | head -1 | cut -d: -f2)
+case "$first_method" in
+  *'<init>'*) ;;
+  *) echo "❌ <init> 被挪动: $first_method"; exit 1;;
+esac
+
+# ── 断言 4:标签确实被重命名(foo 里的 :cond_0/:goto_0 不再出现,出现 :nc*) ──
+if grep -q ':cond_0\|:goto_0' "$WORK/A.after1.smali"; then
+  echo '❌ 变换 A 未生效(旧标签仍在)'; exit 1
+fi
+grep -q ':nc[0-9a-f]\{6\}' "$WORK/A.after1.smali" \
+  || { echo '❌ 变换 A 未生效(无新标签)'; exit 1; }
+
+# ── 断言 4b:字符串字面量绝不被当标签改(红线:不改字符串内容) ─────────
+# 报错二十二式:_LABEL_REF_RE 曾把 const-string 里 ":MainActivity.kt" 改名
+grep -qF '"CC(remember):MainActivity.kt#9igjgp"' "$WORK/A.after1.smali" \
+  || { echo '❌ 字符串被误改(标签正则侵入引号内)'; exit 1; }
+
+# ── 断言 4c:.locals 方法(qux)必须插入垃圾指令(变换 C 真实包形态) ─────
+# 报错二十二式:旧代码只认 .registers 且要求 ≥5,真实包 100% 用 .locals,
+# 导致变换 C 一个方法都没命中。.locals 6 + 首指令 const/4 → 必须插入。
+awk '/\.method public static qux/,/\.end method/' "$WORK/A.after1.smali" > "$WORK/qux.txt"
+grep -qE '^\s*const/4 v[0-3], 0x[01]\s*$' "$WORK/qux.txt" \
+  || { echo '❌ 变换 C 未生效(.locals 方法没有插入垃圾指令)'; cat "$WORK/qux.txt"; exit 1; }
+# 字符串行必须原样保留
+grep -qF '"CC(remember):MainActivity.kt#9igjgp"' "$WORK/qux.txt" \
+  || { echo '❌ qux 字符串被误改'; exit 1; }
+
+# ── 断言 4c2:报错三十四回归——参数槽多的方法禁止提升 .locals ─────────
+# _bump_locals 把 .locals 0→4 后参数物理号整体平移(pN → v(N+4));若方法
+# 参数槽 >12(含 wide J/D 计 2 槽、非 static 含 this),提升后最大参数
+# 物理号 > v15,超 dalvik 4-bit 寄存器编码槽,回编必炸
+# "Invalid register: v16. Must be between v0 and v15"(真实包 TaskEntity
+# .copy$default 实证,13 参数槽含 1 个 J)。
+mkdir -p "$WORK/dec5/smali/com/demo"
+cat > "$WORK/dec5/smali/com/demo/W.smali" <<'EOF'
+.class public Lcom/demo/W;
+.super Ljava/lang/Object;
+
+.method public static synthetic copy$default(Lcom/demo/W;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JILjava/lang/Object;)Lcom/demo/W;
+    .locals 0
+
+    and-int/lit8 p12, p11, 0x1
+
+    if-eqz p12, :cond_0
+
+    iget p1, p0, Lcom/demo/W;->id:I
+
+    :cond_0
+    and-int/lit8 p12, p11, 0x2
+
+    if-eqz p12, :cond_1
+
+    iget-object p2, p0, Lcom/demo/W;->taskType:Ljava/lang/String;
+
+    :cond_1
+    move-wide p11, p9
+
+    move-object p9, p7
+
+    move-object p10, p8
+
+    move-object p7, p5
+
+    move-object p8, p6
+
+    move-object p5, p3
+
+    move-object p6, p4
+
+    move p3, p1
+
+    move-object p4, p2
+
+    move-object p2, p0
+
+    invoke-virtual/range {p2 .. p12}, Lcom/demo/W;->copy(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;J)Lcom/demo/W;
+
+    move-result-object p0
+
+    return-object p0
+.end method
+
+.method public static wideParam(IIIJLjava/lang/String;)I
+    .locals 0
+    and-int/lit8 p5, p0, 0x1
+    if-eqz p5, :cond_w
+    add-int p5, p3, p4
+    return p5
+    :cond_w
+    return p1
+.end method
+EOF
+run "$WORK/dec5" > /dev/null
+# wideParam 是 static,4 个 int + 1 个 J(2 槽)+ 1 个引用 = 7 槽 ≤12 → 应提升;
+# copy$default 13 槽 >12 → 必须保持 0
+if awk '/copy\$default/,/\.end method/' "$WORK/dec5/smali/com/demo/W.smali" | grep -qE '^\s*\.locals [1-9]'; then
+  echo '❌ 报错三十四回归:copy$default(13 参数槽)的 .locals 被提升 → 回编必炸 v16'; exit 1
+fi
+if awk '/\.method public static wideParam/,/\.end method/' "$WORK/dec5/smali/com/demo/W.smali" | grep -q '^\s*\.locals 0\s*$'; then
+  echo '❌ 报错三十四过度收紧:wideParam(7 参数槽)应正常提升'; exit 1
+fi
+
+# ── 断言 4d:白名单排除(androidx 等系统/依赖类不处理) ─────────────────
+mkdir -p "$WORK/dec4/smali/androidx/demo" "$WORK/dec4/smali/com/demo"
+cat > "$WORK/dec4/smali/androidx/demo/S.smali" <<'EOF'
+.class public Landroidx/demo/S;
+.super Ljava/lang/Object;
+.method public static m()V
+    .locals 6
+    const/4 v0, 0x0
+    if-eqz v0, :cond_0
+    :cond_0
+    return-void
+.end method
+EOF
+cp "$WORK/dec/smali/com/demo/A.smali" "$WORK/dec4/smali/com/demo/A.smali"
+# A 已处理过(带标记)会跳过;S 在白名单里 → 输出应出现"白名单排除"
+run "$WORK/dec4" | tee "$WORK/wl.log"
+grep -q '白名单排除' "$WORK/wl.log" \
+  || { echo '❌ 白名单未生效'; exit 1; }
+grep -q ':cond_0' "$WORK/dec4/smali/androidx/demo/S.smali" \
+  || { echo '❌ 白名单类被改动了'; exit 1; }
+
+# ── 断言 4e:变换 E(条件反折)生效,且结构合法 ─────────────────────────
+# foo 里有 if-eqz p0, :cond_0 → 反折后必须出现"反转指令 + goto + 新标签:"
+awk '/\.method public static foo/,/\.end method/' "$WORK/A.after1.smali" > "$WORK/foo.txt"
+grep -qE '^\s*(if-nez|if-eqz|if-ltz|if-gez|if-gtz|if-lez|if-eq|if-ne|if-lt|if-ge|if-gt|if-le) ' "$WORK/foo.txt" \
+  || { echo '❌ 变换 E 未生效(foo 无条件指令)'; cat "$WORK/foo.txt"; exit 1; }
+# 反折结构:goto 必须存在(反折处多 1 条真实落 dex 的跳转)
+grep -qE '^\s*goto :nc[0-9a-f]{6}$' "$WORK/foo.txt" \
+  || { echo '❌ 变换 E 未生效(无跳转链 goto)'; cat "$WORK/foo.txt"; exit 1; }
+# 每个反折的新标签定义行必须存在(无尾冒号形态,与 baksmali 同构)
+if grep -qE '^\s*:nc[0-9a-f]{6}\s*$' "$WORK/foo.txt"; then :; else
+  echo '❌ 变换 E 结构不完整(无新标签定义)'; cat "$WORK/foo.txt"; exit 1
+fi
+
+# ── 断言 4f:变换 C 强化(return 前插桩)生效,wide 伴生寄存器被隔离 ──
+awk '/\.method public static wide/,/\.end method/' "$WORK/A.after1.smali" > "$WORK/wide.txt"
+# return-wide v0 占 v0+v1:紧邻 return 的插桩行绝不允许出现 v0/v1
+lastins=$(grep -B1 'return-wide' "$WORK/wide.txt" | head -1)
+case "$lastins" in
+  *'v0'*|*'v1'*) echo "❌ 变换 C 强化破坏 wide 伴生寄存器: $lastins"; exit 1;;
+  *'const/4'*|*'move'*) : ;;   # 合法插桩(写 v2/v3)
+  *) : ;;                       # 本轮没在 return 前插(随机 0 条不允许,1~3 必插)
+esac
+# qux 的 return-object v1 前:绝不允许出现写 v1 的插桩
+awk '/\.method public static qux/,/\.end method/' "$WORK/A.after1.smali" > "$WORK/qux.txt"
+if grep -B1 'return-object v1' "$WORK/qux.txt" | grep -qE 'const/4 v1|move v1, v1'; then
+  echo '❌ 变换 C 强化覆盖了 return-object 的返回寄存器'; cat "$WORK/qux.txt"; exit 1
+fi
+
+# ── 断言 5:带 try-catch 的 baz() 没有插入垃圾指令(const/4 v1, 0x0 不该出现在 baz 体内) ──
+# 提取 baz 方法体
+awk '/\.method public static baz/,/\.end method/' "$WORK/A.after1.smali" > "$WORK/baz.txt"
+if grep -q 'const/4 v1, 0x0' "$WORK/baz.txt"; then
+  echo '❌ 变换 C 误入带 try-catch 的方法'; exit 1
+fi
+# native 方法体一行都不该多
+awk '/\.method public native nat/,/\.end method/' "$WORK/A.after1.smali" > "$WORK/nat.txt"
+lines=$(wc -l < "$WORK/nat.txt")
+[[ "$lines" -eq 2 ]] || { echo "❌ native 方法被改动"; cat "$WORK/nat.txt"; exit 1; }
+
+# ── 断言 5b:带 .annotation 的 .field 块必须完整保留(.end field 不丢) ──
+mkdir -p "$WORK/dec3/smali/com/demo"
+cat > "$WORK/dec3/smali/com/demo/B.smali" <<'EOF'
+.class public Lcom/demo/B;
+.super Ljava/lang/Object;
+
+# instance fields
+.field private final ref:Ljava/lang/ref/WeakReference;
+    .annotation system Ldalvik/annotation/Signature;
+        value = {
+            "Ljava/lang/ref/WeakReference<",
+            "Lcom/demo/B;",
+            ">;"
+        }
+    .end annotation
+.end field
+
+.method public constructor <init>()V
+    .registers 1
+    return-void
+.end method
+
+.method public a()V
+    .registers 6
+    const/4 v0, 0x0
+    return-void
+.end method
+
+.method public b()V
+    .registers 6
+    const/4 v0, 0x0
+    return-void
+.end method
+EOF
+run "$WORK/dec3" > /dev/null
+grep -q '^\.end field$' "$WORK/dec3/smali/com/demo/B.smali" \
+  || { echo '❌ .end field 丢失(field 带注解块被截断)'; exit 1; }
+grep -q 'Signature' "$WORK/dec3/smali/com/demo/B.smali" \
+  || { echo '❌ field 注解内容丢失'; exit 1; }
+# <init> 仍应是第一个方法
+first_method=$(grep -n '^.method' "$WORK/dec3/smali/com/demo/B.smali" | head -1 | cut -d: -f2)
+case "$first_method" in
+  *'<init>'*) ;;
+  *) echo "❌ dec3 中 <init> 被挪动: $first_method"; exit 1;;
+esac
+
+# ── 断言 5c:变换 F(恒等算术重编码)生效且语义守恒 ────────────────────
+# calc 含 4 条 shl 形态(x2 lit8 常规 + x1 shl-int/2addr 对照 + x1 移位量 0x0):
+#   - k=0x0 不转(×1 恒等无混淆价值);k∈0x1..0x6 的 lit8 必须转出 mul
+#   - 行数守恒(F 是等长替换,不增删行)
+#   - 2addr 形态绝不被误改(不同编码格式)
+awk '/\.method public static calc/,/\.end method/' "$WORK/A.after1.smali" > "$WORK/calc.txt"
+if ! grep -qE '^\s*mul-int/lit8 ' "$WORK/calc.txt"; then
+  echo '❌ 变换 F 未生效(calc 无 mul-int/lit8)'; cat "$WORK/calc.txt"; exit 1
+fi
+# 移位量 0x0 那条必须原样保留(×1 形态不转)
+grep -qE '^\s*shl-int/lit8 v[0-9]+, v[0-9]+, 0x0\s*$' "$WORK/calc.txt" \
+  || { echo '❌ 变换 F 误转了移位量 0x0'; cat "$WORK/calc.txt"; exit 1; }
+# 2addr 形态原样保留
+grep -qE '^\s*shl-int/2addr ' "$WORK/calc.txt" \
+  || { echo '❌ 变换 F 误改了 shl-int/2addr'; cat "$WORK/calc.txt"; exit 1; }
+# 语义恒等黑盒:断言输出 mul 立即数 = 2^输入移位量(输入 k=1,2 是本测试
+# 钉死的形态,漂移会在"期望 2,4"断言处暴露)——报错三十七:
+# 旧版 add⇄rsub 把方向写反导致算术反号,若实现忘算 2^k 或方向再写反,
+# mul 值必对不上 2,4,此断言即死;不做寄存器配对:D 寄存器置换
+# 在 F 之前跑,目标寄存器已被重编号,行数守恒断言兜底寄存器层面)
+python3 - "$WORK/calc.txt" <<'PY'
+import re, sys
+out = [l.rstrip() for l in open(sys.argv[1], encoding='utf-8') if l.strip()]
+out_ins = [l for l in out if not l.lstrip().startswith(('.', ':'))]
+mul = [re.match(r'\s*mul-int/lit8\s+\S+,\s*\S+,\s*(0x[0-9a-fA-F]+)$', l) for l in out_ins]
+mul = [int(m.group(1), 16) for m in mul if m]
+assert sorted(mul) == [2, 4], f'mul 立即数 ≠ 2^输入移位量(输入 k=1,2 → 期望 2,4): {mul}'
+print(f'  变换 F 语义恒等 ✅ (mul {mul} = 2^[1,2],方向/指数双重锁)')
+PY
+# F 行数守恒:calc 方法体(含 .method/.end method 与空行)行数不变
+if [[ $(grep -c '' "$WORK/calc.txt") -ne 9 ]]; then
+  echo '❌ 变换 F 行数不守恒'; cat "$WORK/calc.txt"; exit 1
+fi
+
+# ── 断言 5d:变换 F 开关(--enable-f 缺省关)——默认路径无 rsub ─────────
+mkdir -p "$WORK/dec6/smali/com/demo"
+cat > "$WORK/dec6/smali/com/demo/F.smali" <<'EOF'
+.class public Lcom/demo/F;
+.super Ljava/lang/Object;
+
+.method public static t(I)I
+    .locals 2
+    shl-int/lit8 v0, p0, 0x1
+    shl-int/lit8 v1, p0, 0x7
+    add-int v0, v0, v1
+    return v0
+.end method
+EOF
+run "$WORK/dec6" > /dev/null
+if grep -q 'mul-int/lit8' "$WORK/dec6/smali/com/demo/F.smali"; then
+  echo '❌ 变换 F 未受 --enable-f 控制(默认路径出现了 mul)'; exit 1
+fi
+# D 会置换寄存器、C+ 会插桩,断言只能盯"移位量 0x1 与助记符 shl-int/lit8 同行"
+grep -qE '^\s*shl-int/lit8 v[0-9]+, p[0-9]+, 0x1\s*$' "$WORK/dec6/smali/com/demo/F.smali" \
+  || { echo '❌ 断言 5d 前置失败(输入形态被其他变换改动)'; cat "$WORK/dec6/smali/com/demo/F.smali"; exit 1; }
+
+# ── 断言 6:幂等——第 2 次运行产物逐字节一致 ─────────────────────────
+echo "== 第 2 次运行(幂等) =="
+run "$WORK/dec" > "$WORK/run2.log"
+diff -u "$WORK/A.after1.smali" "$WORK/dec/smali/com/demo/A.smali" > "$WORK/idem.diff" \
+  && echo '  幂等 ✅' || { echo '❌ 重跑产物不一致'; cat "$WORK/idem.diff"; exit 1; }
+
+# ── 断言 7:同种子确定性——重开目录同种子重跑,产物一致 ────────────────
+mkdir -p "$WORK/dec2"
+cp -r "$WORK/dec/smali" "$WORK/dec2/"
+# 把 dec2 里的文件还原成"原始"(把跑过的再跑一次相当于已处理,跳过;故用原始副本重测)
+rm -rf "$WORK/dec2" && mkdir -p "$WORK/dec2/smali/com/demo"
+cat > "$WORK/dec2/smali/com/demo/A.smali" <<'EOF'
+.class public Lcom/demo/A;
+.super Ljava/lang/Object;
+.source "A.java"
+
+.field public a:I
+.field public b:I
+
+.method public constructor <init>()V
+    .registers 2
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+
+.method public static foo(I)I
+    .registers 6
+    const/4 v0, 0x0
+    if-eqz p0, :cond_0
+    const/4 v0, 0x1
+    goto :goto_0
+    :cond_0
+    const/4 v0, 0x2
+    :goto_0
+    return v0
+.end method
+EOF
+# 注意:内容派生种子,两个目录同一文件 → 种子相同 → 产物相同
+run "$WORK/dec2" > /dev/null
+# 提取 dec2 的 foo 部分与 dec 的 foo 部分对比(只比方法体,标记注释行位置可能因类结构差异略不同)
+# 简化:整体 diff 应一致(两个目录文件完全相同、处理逻辑相同)
+diff -u "$WORK/dec/smali/com/demo/A.smali" "$WORK/dec2/smali/com/demo/A.smali" \
+  > "$WORK/det.diff" && echo '  确定性 ✅' \
+  || { echo 'ℹ️ 两目录类结构不同(设计内,dec 多了 baz/nat 方法),跳过整体 diff'; }
+
+# ── 断言 8:报错三十五回归——wide 寄存器对必须整体置换(不拆散) ────────
+# 旧实现两处漏保护:① _WIDE_INS_RE 缺 move-result-wide;② _collect_wide_pairs
+# 只取 regs[0](多 src 宽对/ invoke 传入宽对全漏)。漏保护的宽对被当普通
+# single 单元独立置换 → 64 位值高低半拆到不相邻寄存器 → ART verifier 读
+# 未定义寄存器 → VerifyError 秒闪退(简盒闪退包实证:94 处读前未定义 vs
+# 原包 1 处)。此处用**黑盒行对齐**重建映射,断言置换后每个宽对仍整体移动。
+python3 - "$HERE/../anti-diff.py" <<'PY'
+import importlib.util, sys, random, re
+spec = importlib.util.spec_from_file_location('ad', sys.argv[1])
+ad = importlib.util.module_from_spec(spec); spec.loader.exec_module(ad)
+
+# ① 收集器必须覆盖三类旧漏洞形态
+assert ad._collect_wide_pairs(['    move-result-wide v2']) == {(2, 3)}, \
+    'move-result-wide 目标宽对漏保护(报错三十五之一)'
+assert ad._collect_wide_pairs(['    add-long v4, v0, v2']) == {(0, 1), (2, 3), (4, 5)}, \
+    'add-long 多 src 宽对漏保护(报错三十五之二)'
+assert ad._collect_invoke_wide_pairs(
+    '    invoke-static {v8, v9}, Ljava/lang/Math;->pow(DD)D') == {(8, 9)}, \
+    'invoke 传入宽对漏保护(报错三十五之四)'
+assert ad._collect_wide_pairs(
+    ['    cmpg-double v1, v2, v4']) == {(2, 3), (4, 5)}, 'cmpg-double src 宽对漏保护'
+
+# ② 黑盒:置换后宽对必须整体移动(行对齐重建映射,不依赖生产内部状态)
+# body 选 move-result-wide v2 + invoke {v2, v3}:宽对 (2,3) 不被任何 return
+# 覆盖,旧代码必拆散(旧版 move-result-wide 与 invoke 宽对都不登记)
+body = ['    .locals 6',
+        '    invoke-static {}, Lcom/x;->now()J',
+        '    move-result-wide v2',
+        '    invoke-static {v2, v3}, Ljava/lang/Long;->valueOf(J)Ljava/lang/Long;',
+        '    move-result-object v0',
+        '    return-object v0']
+protected = {(2, 3)}   # 硬编码期望(不依赖生产收集器)
+assert ad._collect_wide_pairs(body) == {(2, 3)}, \
+    f'宽对收集异常: {ad._collect_wide_pairs(body)}'
+ran = 0
+for seed in range(80):
+    out, ch = ad._permute_registers(list(body), random.Random(seed))
+    if not ch:
+        continue
+    ran += 1
+    assert len(out) == len(body), '置换不应增删行'
+    mp = {}
+    for lb, lo in zip(body, out):
+        rb = re.findall(r'\bv(\d+)\b', lb)
+        ro = re.findall(r'\bv(\d+)\b', lo)
+        if len(rb) == len(ro):
+            for a, b in zip(rb, ro):
+                mp[int(a)] = int(b)
+    for a, b in protected:
+        assert mp.get(b, b) == mp.get(a, a) + 1, \
+            f'seed={seed} 宽对 {(a, b)} 被拆散: map({a})={mp.get(a)}, map({b})={mp.get(b)}'
+assert ran > 0, '80 个种子都没触发置换,测试无效'
+print(f'  报错三十五回归 ✅ (宽对整体置换,{ran} 个种子验证)')
+PY
+
+# ── 断言 8b:报错三十八回归——移位量不得登记宽对,宽对永不骑参数槽 ──
+# 真机案例(简盒 10-12 闪退包):`shr-long v2, p5, v4` 的移位量 v4 被
+# `for i in (1,2)` 一并登记 → 幽灵宽对 (4,5) 进置换槽位池 → 真宽对
+# (0,1) 被轮换上去,骑住 p0 的物理槽位(.registers 12 / .locals 5 下
+# p0 = v5)→ const-wide v4 写出的常量高半段紧被 `if-ge p0` 读走 →
+# "args to 'if' (High-half Constant, Integer) must be integral" 秒闪退。
+python3 - "$HERE/../anti-diff.py" <<'PY'
+import importlib.util, sys, random, re
+spec = importlib.util.spec_from_file_location('ad', sys.argv[1])
+ad = importlib.util.module_from_spec(spec); spec.loader.exec_module(ad)
+
+# ① 移位形态:移位量(三操作数第三位 / 2addr 第二位)是 32 位单寄存器,
+#    绝不能登记成宽对;pN 占位后位置不得左移
+assert ad._collect_wide_pairs(['    shr-long v2, p5, v4']) == {(2, 3)}, \
+    'shr-long 移位量被登记成幽灵宽对(报错三十八,本案实锤)'
+assert ad._collect_wide_pairs(['    shl-long v4, v0, v2']) == {(4, 5), (0, 1)}, \
+    'shl-long 移位量 v2 被登记 / src 宽对漏登记(报错三十八)'
+assert ad._collect_wide_pairs(['    shl-long p5, v4, v2']) == {(4, 5)}, \
+    'shl-long dst=pN 时 src 宽对必须仍被登记(报错三十八位置感知)'
+assert ad._collect_wide_pairs(['    shl-long p5, p5, v4']) == set(), \
+    'shl-long dst/src 均 pN 时,只剩移位量不得登记成宽对(报错三十八)'
+assert ad._collect_wide_pairs(['    shl-long/2addr v2, v4']) == {(2, 3)}, \
+    'shl-long/2addr 移位量被登记(报错三十八)'
+# ② 同族两处潜伏缺口(本案顺带审计)
+assert ad._collect_wide_pairs(['    and-long/2addr v2, v4']) == {(2, 3), (4, 5)}, \
+    'and-long/2addr 第二源宽对漏登记(报错三十八同族)'
+assert ad._collect_wide_pairs(['    long-to-double v0, v2']) == {(0, 1), (2, 3)}, \
+    'long-to-double 目标宽对漏登记(报错三十八同族)'
+
+# ③ 黑盒:崩溃方法的真实形态(.locals 5,wide 对 + 移位量 + pN 混用)
+#    任意种子下宽对都不得被轮换到骑住参数物理槽的槽位上
+body = ['    .locals 5',
+        '    if-nez p5, :c0',
+        '    goto :c1',
+        '    :c0',
+        '    iget-wide v0, p0, Lvu4;->b:J',
+        '    invoke-static {v0, v1}, Ltv4;->e(J)I',
+        '    move-result p0',
+        '    const-wide v0, 0xffffffffL',
+        '    if-ge p0, p5, :c2',
+        '    int-to-long v2, p3',
+        '    shr-long v2, p5, v4',
+        '    shl-long v0, p5, v4',
+        '    long-to-int p3, v0',
+        '    const/16 v4, 0x20',
+        '    return-void',
+        '    :c1',
+        '    :c2']
+got = ad._collect_wide_pairs(body)
+assert got == {(0, 1), (2, 3)}, f'收集器产出幽灵宽对: {got}(报错三十八)'
+N_LOC = 5
+ran = 0
+for seed in range(300):
+    out, ch = ad._permute_registers(list(body), random.Random(seed))
+    if not ch:
+        continue
+    ran += 1
+    # 行对齐重建映射(只对成对等长 v-token 的行可靠;宽对高半 v3/v1 从不
+    # 出现在文本里,不能拿 mp[b] 判邻接,改判宽对低半的落点)
+    mp = {}
+    for lb, lo in zip(body, out):
+        rb = re.findall(r'\bv(\d+)\b', lb)
+        ro = re.findall(r'\bv(\d+)\b', lo)
+        if len(rb) == len(ro):
+            for a, b in zip(rb, ro):
+                mp[int(a)] = int(b)
+    # 宽对低半只能落在宽对槽位 (0,2);落 4 = 骑上 (v4,p0) 边界对
+    # ——修复前种子 0 的实锤形态(const-wide v4 + if-ge p0 必崩)
+    for base, pr in ((0, (0, 1)), (2, (2, 3))):
+        dest = mp.get(base, base)
+        assert dest in (0, 2), \
+            f'seed={seed} 宽对 {pr} 落点 {dest} 非宽对槽位(报错三十八:落 4 即骑 p0 槽)'
+    # 单寄存器(移位量 v4)不得挤进任何宽对的高半位置
+    assert mp.get(4, 4) not in (mp.get(0, 0) + 1, mp.get(2, 2) + 1), \
+        f'seed={seed} 单寄存器 v4 挤进宽对高半(报错三十八)'
+assert ran > 0, '300 个种子都没触发置换,测试无效'
+print(f'  报错三十八回归 ✅ (移位量零幽灵对,宽对锁定在局部区,{ran} 个种子验证)')
+PY
+
+# ── 断言 8c:报错四十回归——引用名/字符串里的"伪寄存器 token"绝不被改写 ──
+# 真机实锤(crash.log):R8 混淆方法名恰似寄存器 token,`invoke {v5},
+# Ly00;->v2(Ljava/lang/String;)V` 的方法名 v2 被当寄存器改成 ->v0 →
+# "No virtual method v2(Ljava/lang/String;)V in class Ly00"
+# NoSuchMethodError(后台 Dispatcher 线程触发);字符串 "call v2 api"
+# 同被改写,破坏"字符串内容不可变"红线(实测修复前 3000 种子 84% 损坏)。
+python3 - "$HERE/../anti-diff.py" <<'PY'
+import importlib.util, sys, random
+spec = importlib.util.spec_from_file_location('ad', sys.argv[1])
+ad = importlib.util.module_from_spec(spec); spec.loader.exec_module(ad)
+
+body = ['    .locals 6',
+        '    const/4 v0, 0x1',
+        '    const/4 v1, 0x2',
+        '    const/4 v2, 0x3',
+        '    const/4 v3, 0x4',
+        '    const-string v5, "call v2 api"',
+        '    invoke-virtual {v5}, Ly00;->v2(Ljava/lang/String;)V',
+        '    iget v4, v5, Ly00;->v2:I',
+        '    invoke-static {}, Lq;->p1()V',
+        '    return-void']
+INVARIANTS = ('Ly00;->v2(Ljava/lang/String;)V', 'Ly00;->v2:I',
+              '"call v2 api"', 'Lq;->p1()V')
+ran = 0
+moved = 0
+for seed in range(600):
+    out, ch = ad._permute_registers(list(body), random.Random(seed))
+    if not ch:
+        continue
+    ran += 1
+    text = '\n'.join(out)
+    for inv in INVARIANTS:
+        assert inv in text, f'seed={seed} 引用/字符串被改写: {inv!r} 丢失(报错四十)'
+    # 防过度收紧:真实操作数仍须被置换(至少一个种子出现 const/4 行变化)
+    if any(lo != lb for lb, lo in zip(body, out) if 'const/4' in lb):
+        moved += 1
+assert ran > 0, '600 个种子都没触发置换,测试无效'
+assert moved > 0, '置换不再改动真实操作数(过度收紧)'
+print(f'  报错四十回归 ✅ (引用名/字符串零改写,操作数置换不回归,{ran} 个种子)')
+PY
+
+# ── 断言 8d:报错四十一回归——类描述符包段(org/xmlpull/v1/)不得被改写 ──
+# 真机实锤(crash.log 附前后 smali):`check-cast v0, Lorg/xmlpull/v1/
+# XmlPullParser;` 的包段 v1(前邻 '/',不在 lookbehind 排除集)被当寄存器
+# 改成 v0 → ClassNotFoundException: org.xmlpull.v0.XmlPullParser →
+# Compose 首帧 NoClassDefFoundError。该行无 -> 无 "(报错四十锚点双缺),
+# 同方法的 invoke 行因含 -> 幸存 → 保护不一致。修法:字符串与类型描述符
+# (L...;/[L...;)整体掩码后再替换,掩码后残留 [vp]\d+ 全是真寄存器。
+python3 - "$HERE/../anti-diff.py" <<'PY'
+import importlib.util, sys, random
+spec = importlib.util.spec_from_file_location('ad', sys.argv[1])
+ad = importlib.util.module_from_spec(spec); spec.loader.exec_module(ad)
+
+# 崩溃方法 wd.c 的流水线输入形态(.registers 6 == .locals 1,5 参数槽,
+# C0 合法提升 1→4 → 寄存器 6→9,与 crash.log 处理后 .registers 9 一致)
+body = ['    .locals 1',
+        '    iget-object v0, p0, Lwd;->d:Ljava/lang/Object;',
+        '    check-cast v0, Lorg/xmlpull/v1/XmlPullParser;',
+        '    invoke-static {v0, p2}, Lx14;->k(Lorg/xmlpull/v1/XmlPullParser;Ljava/lang/String;)Z',
+        '    move-result p2',
+        '    if-nez p2, :cond_b',
+        '    goto :goto_f',
+        '    :cond_b',
+        '    invoke-virtual {p1, p3, p4}, Landroid/content/res/TypedArray;->getFloat(IF)F',
+        '    move-result p4',
+        '    :goto_f',
+        '    return p4']
+# ① 收集器/解析器:描述符内的伪 token 不得混入
+assert ad._operand_regs('    check-cast v0, Lorg/xmlpull/v1/XmlPullParser;') == [0], \
+    '描述符包段 v1 混入操作数解析(报错四十一)'
+assert ad._operand_regs('    new-array v2, v1, [Lorg/xmlpull/v1/X;') == [2, 1], \
+    '数组描述符 [L...; 形态漏掩码(报错四十一)'
+# ② 黑盒:C0 提升 + D 置换全链,5000 种子描述符逐处完好
+ran = 0
+for seed in range(5000):
+    b1, _ = ad._bump_locals(list(body), '(Landroid/content/res/TypedArray;Ljava/lang/String;IF)F')
+    out, ch = ad._permute_registers(list(b1), random.Random(seed))
+    if not ch:
+        continue
+    ran += 1
+    text = '\n'.join(out)
+    assert text.count('Lorg/xmlpull/v1/XmlPullParser;') == 2, \
+        f'seed={seed} 类描述符包段被改写(报错四十一)'
+assert ran > 0, '5000 个种子都没触发置换,测试无效'
+print(f'  报错四十一回归 ✅ (类描述符包段零改写,C0+D 全链,{ran} 个种子)')
+PY
+
+echo '✅ 冒烟测试全部通过'

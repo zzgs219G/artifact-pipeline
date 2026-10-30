@@ -1,0 +1,18 @@
+build/
+# dex2c.zip 解压产物(tools/Dex2C/ 单层,真源是 tools/dex2c.zip)
+/tools/Dex2C/
+# dpt-shell.zip 解压产物(tools/executable/ 单层,真源是 tools/dpt-shell.zip)
+/tools/executable/
+.gradle/
+.idea/
+local.properties
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+node_modules/
+dist/
+.env
+*.class
+*.apk
+*.ipa

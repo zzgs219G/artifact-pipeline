@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""resolve-config.py 验收测试（设计方案 §7 验收清单 + §10 追加项）。
+
+纯 stdlib，无 pytest 依赖：直接以子进程跑 resolve-config.py，断言输出。
+覆盖：
+  T1 sigcheck 单独勾选            → args.txt == ["--sigcheck"]
+  T2 dex2c 单独勾选 + 规则        → --dex2c + 规则文件路径（workspace 相对）
+  T3 dex2c 联合 sigcheck 留空规则 → --dex2c 不带文件参数（§7 重点）
+  T2b dcc 已下架（2026-12）       → 旧 App 提交 dcc key → 报错退出（保险丝 a，防幽灵勾选项）
+  T3b dcc 已下架（2026-12）       → 联合 sigcheck 提交 dcc key → 同样报错（不豁免）
+  T4 stringenc 勾选未填规则       → 解析器 fail（App 端同规则应拦截）
+  T6 全家桶组合                   → 参数齐全、顺序固定
+  T7 未知顶层 key                 → 报错退出（保险丝 a，§10.1 反向）
+  T8 config 缺失其余模块 key      → 视为 disabled 不报错（§10.1 正向）
+  T9 schema_version 缺失          → 报错（必填校验）
+  T10 schema_version 偏高         → 报错提示更新流水线（保险丝 a0）
+  T11 全部 disabled               → 报错（保险丝 e）
+  T12 规则内容含空格/特殊字符      → 原样写入文件，argv 仅相对路径（§7）
+  T13 未知模块内子 key            → 报错退出（保险丝 a 模块内）
+  T14 cwd 无关性（§10.5）          → 任意 cwd 下运行结果一致
+  T15 args.txt 结尾无多余空行（§10.2）
+  T6b/T6c packer(基础加壳)          → leaf 模块，只吐 --packer，与共存模块顺序固定
+  T6d 旧 App 快照无 packer 键       → 视为 disabled，不报错（§10.1 正向）
+  T6e/T6f stringenc.dex2c_stub       → 缺省/显式 false 均不追加；显式 true 追加（T6o）
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))   # tests → actions → scripts → 仓库根
+SCRIPT = os.path.join(HERE, "..", "resolve-config.py")
+SCHEMA = os.path.join(ROOT, "configs", "v1", "config-schema.json")
+
+passed = failed = 0
+
+
+def run(config_obj, cwd=None):
+    """在独立临时根中运行解析器，返回 (rc, args_lines, files, stderr)。"""
+    tmp = tempfile.mkdtemp(prefix="rc-test-")
+    os.makedirs(os.path.join(tmp, "configs", "v1"))
+    shutil.copy(SCHEMA, os.path.join(tmp, "configs", "v1", "config-schema.json"))
+    env = dict(os.environ)
+    env["INPUT_PROTECT_CONFIG"] = json.dumps(config_obj, ensure_ascii=False)
+    env["GITHUB_WORKSPACE"] = tmp
+    p = subprocess.run(
+        [sys.executable, SCRIPT], env=env, cwd=cwd or tmp,
+        capture_output=True, text=True,
+    )
+    args_lines, files = [], {}
+    rules_dir = os.path.join(tmp, "schema_rules")
+    if os.path.isdir(rules_dir):
+        for name in sorted(os.listdir(rules_dir)):
+            with open(os.path.join(rules_dir, name), encoding="utf-8") as f:
+                files[name] = f.read()
+        if "args.txt" in files:
+            args_lines = [l for l in files["args.txt"].splitlines() if l.strip()]
+    shutil.rmtree(tmp, ignore_errors=True)
+    return p.returncode, args_lines, files, p.stderr
+
+
+def check(name, cond, detail=""):
+    global passed, failed
+    if cond:
+        passed += 1
+        print(f"  ✅ {name}")
+    else:
+        failed += 1
+        print(f"  ❌ {name}  {detail}")
+
+
+def cfg(**kw):
+    base = {"schema_version": 1, "sigcheck": False,
+            "dex2c": {"enabled": False},
+            "stringenc": {"enabled": False},
+            "antidiff": False, "envcheck": False, "packer": False}
+    base.update(kw)
+    return base
+
+
+print("== resolve-config.py 验收测试 ==")
+
+# T1
+rc, args, files, err = run(cfg(sigcheck=True))
+check("T1 sigcheck 单独勾选 → 仅 --sigcheck", rc == 0 and args == ["--sigcheck"], f"rc={rc} err={err}")
+
+# T2
+rc, args, files, err = run(cfg(dex2c={"enabled": True, "rules_file": "**/com.test.**"}))
+check("T2 dex2c+规则 → --dex2c + workspace 相对规则路径",
+      rc == 0 and args == ["--dex2c", "schema_rules/dex2c.txt"]
+      and files.get("dex2c.txt", "").strip() == "**/com.test.**",
+      f"rc={rc} args={args}")
+
+# T3（§7 重点）
+rc, args, files, err = run(cfg(sigcheck=True, dex2c={"enabled": True, "rules_file": ""}))
+check("T3 dex2c+sigcheck 留空规则 → --dex2c 无文件参数",
+      rc == 0 and args == ["--sigcheck", "--dex2c"], f"rc={rc} args={args} err={err}")
+
+# T2b（2026-12 dcc 引擎下架：schema 已删 dcc 模块块，旧 App 快照提交 dcc key
+# 必须被保险丝 a 拒绝——静默忽略会变成"勾了没生效"的幽灵勾选项）
+rc, args, files, err = run(cfg(dcc={"enabled": True, "rules_file": "**/com.test.**"}))
+check("T2b dcc 已下架 → 提交 dcc key 报错退出（保险丝 a）",
+      rc != 0 and "dcc" in err and "未定义" in err, f"rc={rc} args={args} err={err}")
+
+# T3b（下架同样不因联合 sigcheck 而豁免：旧快照的 dcc key 一律拒绝）
+rc, args, files, err = run(cfg(sigcheck=True, dcc={"enabled": True, "rules_file": ""}))
+check("T3b dcc 已下架+联合 sigcheck → 仍报错退出（不豁免）",
+      rc != 0 and "dcc" in err and "未定义" in err, f"rc={rc} args={args} err={err}")
+
+# T4
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": ""}))
+check("T4 stringenc 留空规则 → fail-fast", rc != 0 and "规则为空" in err, f"rc={rc} err={err}")
+
+# T6
+rc, args, files, err = run(cfg(sigcheck=True, envcheck=True, antidiff=True, packer=True,
+                               dex2c={"enabled": True, "rules_file": "**/com.test.**"},
+                               stringenc={"enabled": True, "rules_file": "**/com.s.**",
+                                          "dex2c_stub": True}))
+expect = ["--sigcheck", "--dex2c", "schema_rules/dex2c.txt",
+          "--stringenc", "schema_rules/stringenc.txt", "--dex2c-stub",
+          "--anti-diff", "--envcheck", "--packer"]
+check("T6 全家桶 → 参数齐全且顺序固定", rc == 0 and args == expect, f"rc={rc} args={args}")
+
+# T6e stringenc.dex2c_stub 子复选框(2026-10 联动;同日防呆复盘改 default false):
+# 缺省 → 不追加。default 曾为 true,与 protect.sh 的依赖校验构成组合矛盾——
+# 只勾 stringenc 的老配置被 resolver 自动追加 --dex2c-stub,protect.sh fail-fast
+# ("必须与 --dex2c 同时勾选")整包构建失败。故 default 改 false(对齐 exclude_x86 先例),
+# 显式勾选才追加(见 T6o);flag 分支:值是布尔、不写规则文件、不进 required 校验。
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "com.a.**"}))
+check("T6e stringenc.dex2c_stub 缺省 → 按 default(false) 不追加",
+      rc == 0 and args == ["--stringenc", "schema_rules/stringenc.txt"],
+      f"rc={rc} args={args} err={err}")
+
+# T6f 显式不勾 → 不追加(老路径:桩留在 dex)
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "com.a.**",
+                                          "dex2c_stub": False}))
+check("T6f stringenc.dex2c_stub=false → 不追加 --dex2c-stub",
+      rc == 0 and args == ["--stringenc", "schema_rules/stringenc.txt"],
+      f"rc={rc} args={args} err={err}")
+
+# T6o 显式勾选 → 追加。resolver 不做跨模块配对判断(stringenc+dex2c 才合法),
+# 缺配对由 protect.sh 的依赖校验 fail-fast 拦截——分工:resolver 管"勾了就传",
+# 流水线管"组合非法拒收"。
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "com.a.**",
+                                          "dex2c_stub": True}))
+check("T6o stringenc.dex2c_stub=true → 追加 --dex2c-stub",
+      rc == 0 and args == ["--stringenc", "schema_rules/stringenc.txt",
+                           "--dex2c-stub"], f"rc={rc} args={args} err={err}")
+
+# T6b packer:新增的加壳模块是 leaf(无子选项),勾选只吐一个 --packer
+rc, args, files, err = run(cfg(packer=True))
+check("T6b packer 单独勾选 → 仅 --packer", rc == 0 and args == ["--packer"],
+      f"rc={rc} args={args} err={err}")
+
+# T6c packer 与其余模块共存 → 顺序固定,packer 落在最后
+rc, args, files, err = run(cfg(sigcheck=True, envcheck=True, antidiff=True, packer=True))
+check("T6c packer 与其余共存 → --packer 在末尾",
+      rc == 0 and args == ["--sigcheck", "--anti-diff", "--envcheck", "--packer"],
+      f"rc={rc} args={args} err={err}")
+
+# T6d 旧版 App 快照(config 无 packer 键)→ 视为 disabled,不报错(§10.1 正向)
+rc, args, files, err = run({"schema_version": 1, "sigcheck": True})
+check("T6d config 缺 packer 键 → 视为 disabled(旧 App 向后兼容)",
+      rc == 0 and args == ["--sigcheck"], f"rc={rc} args={args} err={err}")
+
+# T6e(报错四十三)packer 升 parent:子复选框 smaller(体积优化,默认 true)
+rc, args, files, err = run(cfg(packer={"enabled": True, "smaller": True}))
+check("T6e 勾 packer+smaller → --packer --packer-smaller",
+      rc == 0 and args == ["--packer", "--packer-smaller"], f"rc={rc} args={args} err={err}")
+
+# T6f 子键缺失 → 按 schema default(true)
+rc, args, files, err = run(cfg(packer={"enabled": True}))
+check("T6f 缺 smaller 子键 → 按 default(true) 吐 --packer-smaller",
+      rc == 0 and args == ["--packer", "--packer-smaller"], f"rc={rc} args={args} err={err}")
+
+# T6g 显式不勾 smaller → 只吐 --packer
+rc, args, files, err = run(cfg(packer={"enabled": True, "smaller": False}))
+check("T6g smaller=false → 仅 --packer", rc == 0 and args == ["--packer"],
+      f"rc={rc} args={args} err={err}")
+
+# T6h smaller 非布尔 → 报错退出(布尔校验)
+rc, args, files, err = run(cfg(packer={"enabled": True, "smaller": "yes"}))
+check("T6h smaller 非布尔 → 报错退出", rc != 0 and "布尔" in err, f"rc={rc} err={err}")
+
+# T6i parent 整体不勾 → 子字段无效;无任何模块启用时走保险丝 e fail-fast
+rc, args, files, err = run(cfg(packer={"enabled": False, "smaller": True}))
+check("T6i packer 不勾 → 子字段无效,无启用模块走保险丝 e",
+      rc != 0 and "没有任何加固模块被启用" in err, f"rc={rc} err={err}")
+
+# T6j 旧版 App 快照顶层 bool 形态(packer: true)→ 兼容,子字段不参与(旧行为保持,
+# 不吐 --packer-smaller——旧快照提交时无此概念,不引入行为漂移)
+rc, args, files, err = run(cfg(packer=True))
+check("T6j 旧 bool 快照 → 仅 --packer(旧行为,不默认叠加子选项)",
+      rc == 0 and args == ["--packer"], f"rc={rc} args={args} err={err}")
+
+# T6k(报错四十四)带值参数标准件:勾 exclude_x86 → arg_on 与 arg_value 各占一行
+rc, args, files, err = run(cfg(packer={"enabled": True, "smaller": True, "exclude_x86": True}))
+check("T6k 勾 exclude_x86 → --packer --packer-smaller --exclude-abi x86,x86_64",
+      rc == 0 and args == ["--packer", "--packer-smaller", "--exclude-abi", "x86,x86_64"],
+      f"rc={rc} args={args} err={err}")
+
+# T6l exclude_x86 缺失 → 按 schema default(false) 不追加
+rc, args, files, err = run(cfg(packer={"enabled": True, "smaller": True}))
+check("T6l 缺 exclude_x86 子键 → default(false) 不追加",
+      rc == 0 and args == ["--packer", "--packer-smaller"], f"rc={rc} args={args} err={err}")
+
+# T6m 显式不勾 → 不追加
+rc, args, files, err = run(cfg(packer={"enabled": True, "exclude_x86": False}))
+check("T6m exclude_x86=false → 仅体积优化线",
+      rc == 0 and args == ["--packer", "--packer-smaller"], f"rc={rc} args={args} err={err}")
+
+# T6n exclude_x86 非布尔 → 报错退出(布尔校验同 flag)
+rc, args, files, err = run(cfg(packer={"enabled": True, "exclude_x86": "yes"}))
+check("T6n exclude_x86 非布尔 → 报错退出", rc != 0 and "布尔" in err, f"rc={rc} err={err}")
+
+# T7（§10.1 反向）
+rc, args, files, err = run(cfg(unknown_mod=True))
+check("T7 未知顶层 key → 报错退出（保险丝 a）", rc != 0 and "未定义" in err, f"rc={rc} err={err}")
+
+# T8（§10.1 正向）
+rc, args, files, err = run({"schema_version": 1, "sigcheck": True})
+check("T8 config 缺失其余模块 key → 视为 disabled 不报错",
+      rc == 0 and args == ["--sigcheck"], f"rc={rc} args={args} err={err}")
+
+# T9
+c = cfg(sigcheck=True)
+del c["schema_version"]
+rc, args, files, err = run(c)
+check("T9 缺 schema_version → 报错", rc != 0 and "schema_version" in err, f"rc={rc} err={err}")
+
+# T10（保险丝 a0）
+rc, args, files, err = run(cfg(sigcheck=True, schema_version=2))
+check("T10 schema_version 偏高 → 报错提示更新流水线", rc != 0 and "更新流水线" in err, f"rc={rc} err={err}")
+
+# T11（保险丝 e）
+rc, args, files, err = run(cfg())
+check("T11 全部 disabled → 报错", rc != 0 and "没有" in err, f"rc={rc} err={err}")
+
+# T12（§7：特殊字符规则）
+tricky = "**/com.test.**  # 注释 行 !排除\nactivity*\n\n$HOME `id` ; rm -rf\n"
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": tricky}))
+check("T12 特殊字符规则 → 原样写入文件、argv 仅相对路径",
+      rc == 0 and args == ["--stringenc", "schema_rules/stringenc.txt"]
+      and files.get("stringenc.txt") == tricky,
+      f"rc={rc} args={args}")
+
+# T13
+rc, args, files, err = run(cfg(dex2c={"enabled": True, "rules_file": "x", "rogue": 1}))
+check("T13 模块内未知子 key → 报错退出", rc != 0 and "未定义" in err, f"rc={rc} err={err}")
+
+# T14（§10.5：cwd 无关）
+rc, args, files, err = run(cfg(sigcheck=True), cwd="/")
+check("T14 任意 cwd 运行 → 结果一致（仓库根推算）", rc == 0 and args == ["--sigcheck"], f"rc={rc} err={err}")
+
+# T15（§10.2）
+rc, args, files, err = run(cfg(sigcheck=True, envcheck=True))
+raw = files.get("args.txt", "")
+check("T15 args.txt 一行一个、结尾无多余空行", rc == 0 and raw == "--sigcheck\n--envcheck\n", f"raw={raw!r}")
+
+# T16 v1.2 回退:antidiff 已回退 leaf,变换 F 并入本体固定开启,不再有子复选框。
+# 旧 parent dict 形态提交(含已下线 reencode 字段)→ 按 .enabled 读,只吐模块 arg
+rc, args, files, err = run(cfg(antidiff={"enabled": True, "reencode": True}))
+check("T16 旧 parent dict 形态(勾选 reencode) → 兼容,只吐 --anti-diff",
+      rc == 0 and args == ["--anti-diff"], f"rc={rc} args={args} err={err}")
+
+# T16b 旧 parent dict 形态(不勾 reencode)→ 同样只吐模块 arg(变换 F 固定开,行为一致)
+rc, args, files, err = run(cfg(antidiff={"enabled": True, "reencode": False}))
+check("T16b 旧 parent dict 形态(不勾 reencode) → 只吐 --anti-diff",
+      rc == 0 and args == ["--anti-diff"], f"rc={rc} args={args} err={err}")
+
+# T16c 旧 parent dict 形态(缺 reencode)→ 同样兼容
+rc, args, files, err = run(cfg(antidiff={"enabled": True}))
+check("T16c 旧 parent dict 形态(缺 reencode) → 兼容,只吐 --anti-diff",
+      rc == 0 and args == ["--anti-diff"], f"rc={rc} args={args} err={err}")
+
+# T16d 旧版 App 顶层 bool 形态 → 兼容,只吐模块 arg
+rc, args, files, err = run(cfg(sigcheck=True, antidiff=True))
+check("T16d 顶层 bool 形态 antidiff=true → 兼容,只吐模块 arg",
+      rc == 0 and args == ["--sigcheck", "--anti-diff"], f"rc={rc} args={args} err={err}")
+
+# T16e 旧 parent dict 形态 enabled 非布尔 → 报错
+rc, args, files, err = run(cfg(antidiff={"enabled": "yes"}))
+check("T16e 旧 dict 形态 enabled 非布尔 → 报错退出",
+      rc != 0 and "布尔" in err, f"rc={rc} err={err}")
+
+print(f"\n结果: {passed} 通过, {failed} 失败")
+sys.exit(1 if failed else 0)

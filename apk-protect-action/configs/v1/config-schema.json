@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "modules": [
+    {
+      "key": "sigcheck",
+      "label": "签名校验",
+      "desc": "防移动端98%",
+      "type": "leaf",
+      "default": true,
+      "arg": "--sigcheck"
+    },
+    {
+      "key": "dex2c",
+      "label": "Dex2C",
+      "desc": "java层代码抽至so层（唯一转译引擎）",
+      "type": "parent",
+      "default": false,
+      "arg": "--dex2c",
+      "group_label": "dex2c 类目保护规则",
+      "children": [
+        {
+          "key": "rules_file",
+          "label": "类名规则",
+          "type": "text",
+          "multiline": true,
+          "default": "",
+          "value_kind": "rules_file",
+          "required": {
+            "when": "always",
+            "unless": { "key": "sigcheck", "is": true }
+          },
+          "hint": "留空并勾选签名校验=自动抽主类；支持 com.test.** 定向；勿填 ** 全量（整个App转译，上游不支持）"
+        }
+      ]
+    },
+    {
+      "key": "stringenc",
+      "label": "字符串加密",
+      "desc": "dex字符串加密（防字符串搜索）",
+      "type": "parent",
+      "default": false,
+      "arg": "--stringenc",
+      "group_label": "字符串加密类目保护规则",
+      "children": [
+        {
+          "key": "rules_file",
+          "label": "类名规则",
+          "type": "text",
+          "multiline": true,
+          "default": "",
+          "value_kind": "rules_file",
+          "required": { "when": "always" },
+          "hint": "每行一条，支持 **/com.test.** / activity*"
+        },
+        {
+          "key": "dex2c_stub",
+          "label": "解密桩也抽进 so",
+          "desc": "需同时勾选 Dex2C，单独勾选整个任务会构建失败；勾选后解密桩内核 dn() 转译进 libnc.so，dex 里只剩 try/catch 壳，算法/种子不再以 Java 形式可见。不勾时桩留在 dex。",
+          "type": "checkbox",
+          "default": false,
+          "value_kind": "flag",
+          "arg_on": "--dex2c-stub"
+        }
+      ]
+    },
+    {
+      "key": "antidiff",
+      "label": "防对比混淆",
+      "desc": "dex层结构噪声",
+      "type": "leaf",
+      "default": false,
+      "arg": "--anti-diff"
+    },
+    { "key": "envcheck", "label": "环境检测", "desc": "Frida/Xposed/调试器", "type": "leaf", "default": false, "arg": "--envcheck" },
+    { "key": "packer", "label": "基础加壳", "desc": "dex整体加密（须最后执行）", "type": "parent", "default": false, "arg": "--packer", "group_label": "壳加固选项", "children": [
+      { "key": "smaller", "label": "体积优化", "desc": "性价比极高", "type": "checkbox", "default": true, "value_kind": "flag", "arg_on": "--packer-smaller" },
+      { "key": "exclude_x86", "label": "排除模拟器架构", "desc": "产物剔除 x86/x86_64 的 so 目录（多数手机只需 arm/arm64）；代价：x86 模拟器无法安装运行加壳包", "type": "checkbox", "default": false, "value_kind": "arg_value", "arg_on": "--exclude-abi", "arg_value": "x86,x86_64" }
+    ] }
+  ]
+}

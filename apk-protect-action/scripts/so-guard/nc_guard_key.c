@@ -1,0 +1,508 @@
+/* nc_guard_key.c — .ncx 密钥派生（证书绑定）
+ *
+ * 照抄 XopProtector 的 key ladder（crypto/key_ladder.cpp + crypto/sha256.cpp
+ * 的 hkdf_sha256 + crypto/apk_sign.cpp 的定点读证书），剥离其对
+ * protector::sys_* / std::vector 的依赖，只保留四件事：
+ *   1. sha256（自带精简实现，避免依赖 sig_check.c/sig_guard2.c 的 static 版）
+ *   2. hmac_sha256
+ *   3. hkdf_sha256（RFC 5869）
+ *   4. apk 第一签名者证书 DER 的定点读（只读 EOCD/CD/Signing Block，几十 KB）
+ *
+ * 为什么做证书绑定（威胁模型）：
+ *   原实现 K_so 由 --cert-hex 传入或落默认值，而 so-section-lock.py 就在仓库里、
+ *   派生逻辑公开 → 攻击者自己跑一遍脚本就能解出密钥，4012 字节密文秒变明文。
+ *   证书绑定后 K_so = HKDF(master, SHA256(certDER), pkg)：换 key 重打包 →
+ *   cert 变 → K_so 变 → 密文解不开。这是 Xop 的原设计，我们照抄。
+ *
+ * 2026-10-20 更正一处过期表述：早期注释写本文件"没有调用方，是 HKDF 契约的
+ * 可执行证明"。那是 P1-a 之前的口径。现行链路（P1-a，运行期证书派生）：
+ *   nc_guard_boot.c:533  ncg_derive_k_so_from_der()  ─┐
+ *   nc_guard_boot.c:591  ncg_derive_k_mac_from_der()  ─┼─→ 本文件的
+ *   nc_guard_boot.c:368  ksha256()                    ─┘   ncg_derive_k_so /
+ *                                                     ncg_derive_k_mac / khkdf
+ * 三者都真实参与解锁，不是契约证明。
+ *
+ * 与 so-section-lock.py 的契约（两侧必须逐字节一致）：
+ *   label = "nc-so-v1" + package          （Xop 用 "xop-so-v1"+package）
+ *   salt  = SHA256(certDER)
+ *   ikm   = master（32 字节，构建期与运行期同源）
+ *   out   = 16 字节
+ */
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdlib.h>   /* 2026-10-21:malloc/free（cert 读取缓冲由 static 改堆分配） */
+#include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <elf.h>
+
+#include "nc_guard_key.h"
+
+/* ── SHA-256（FIPS 180-4）───────────────────────────────────────────
+ * 照抄 scripts/sigcheck/src/sig_check.c:239-305 的已验证实现
+ * （test-sig-guard2.sh 与 test-lsgs-strings.sh 6/6 对拍钉死）。
+ * 不自己另写——我自己写的那版 block 压缩有错，NIST 向量全错
+ * （"abc" 应 ba7816bf...，实得 554144d9...）。教训：密码学原语
+ * 必须复用仓内已验证实现，不重造轮子。 */
+#define ROTR(x,n) (((x)>>(n))|((x)<<(32-(n))))
+#define CH(x,y,z)  (((x)&(y))^(~(x)&(z)))
+#define MAJ(x,y,z) (((x)&(y))^((x)&(z))^((y)&(z)))
+#define EP0(x) (ROTR(x,2)^ROTR(x,13)^ROTR(x,22))
+#define EP1(x) (ROTR(x,6)^ROTR(x,11)^ROTR(x,25))
+#define SIG0(x) (ROTR(x,7)^ROTR(x,18)^((x)>>3))
+#define SIG1(x) (ROTR(x,17)^ROTR(x,19)^((x)>>10))
+
+struct ksha_ctx_s {
+    uint32_t state[8];
+    uint8_t data[64];
+    size_t datalen;
+    unsigned long long bitlen;
+};
+
+static const uint32_t K256[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+
+static void k_sha_transform(ksha_ctx *ctx, const uint8_t *data) {
+    uint32_t m[64], a, b, c, d, e, f, g, h, t1, t2;
+    int i;
+    for (i = 0; i < 16; i++)
+        m[i] = (uint32_t)data[i*4] << 24 | (uint32_t)data[i*4+1] << 16 |
+               (uint32_t)data[i*4+2] << 8 | (uint32_t)data[i*4+3];
+    for (; i < 64; i++)
+        m[i] = SIG1(m[i-2]) + m[i-7] + SIG0(m[i-15]) + m[i-16];
+    a=ctx->state[0]; b=ctx->state[1]; c=ctx->state[2]; d=ctx->state[3];
+    e=ctx->state[4]; f=ctx->state[5]; g=ctx->state[6]; h=ctx->state[7];
+    for (i = 0; i < 64; i++) {
+        t1 = h + EP1(e) + CH(e,f,g) + K256[i] + m[i];
+        t2 = EP0(a) + MAJ(a,b,c);
+        h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
+    }
+    ctx->state[0]+=a; ctx->state[1]+=b; ctx->state[2]+=c; ctx->state[3]+=d;
+    ctx->state[4]+=e; ctx->state[5]+=f; ctx->state[6]+=g; ctx->state[7]+=h;
+}
+
+void ksha_init(ksha_ctx *ctx) {
+    ctx->datalen = 0; ctx->bitlen = 0;
+    ctx->state[0]=0x6a09e667; ctx->state[1]=0xbb67ae85;
+    ctx->state[2]=0x3c6ef372; ctx->state[3]=0xa54ff53a;
+    ctx->state[4]=0x510e527f; ctx->state[5]=0x9b05688c;
+    ctx->state[6]=0x1f83d9ab; ctx->state[7]=0x5be0cd19;
+}
+
+void ksha_update(ksha_ctx *ctx, const uint8_t *data, size_t len) {
+    size_t i;
+    for (i = 0; i < len; i++) {
+        ctx->data[ctx->datalen++] = data[i];
+        if (ctx->datalen == 64) {
+            k_sha_transform(ctx, ctx->data);
+            ctx->bitlen += 512;
+            ctx->datalen = 0;
+        }
+    }
+}
+
+void ksha_final(ksha_ctx *ctx, uint8_t *out) {
+    unsigned long long bits = ctx->bitlen + (unsigned long long)ctx->datalen * 8;
+    unsigned char tail[128];
+    size_t padlen, i;
+
+    padlen = (ctx->datalen < 56) ? (56 - ctx->datalen) : (120 - ctx->datalen);
+    memset(tail, 0, sizeof(tail));
+    memcpy(tail, ctx->data, ctx->datalen);
+    tail[ctx->datalen] = 0x80;
+    for (i = 0; i < 8; i++)
+        tail[ctx->datalen + padlen + i] = (unsigned char)(bits >> (56 - i*8));
+
+    if (ctx->datalen + padlen + 8 == 64) {
+        k_sha_transform(ctx, tail);
+    } else {
+        k_sha_transform(ctx, tail);
+        k_sha_transform(ctx, tail + 64);
+    }
+    for (i = 0; i < 8; i++) {
+        out[i*4]   = (uint8_t)(ctx->state[i] >> 24);
+        out[i*4+1] = (uint8_t)(ctx->state[i] >> 16);
+        out[i*4+2] = (uint8_t)(ctx->state[i] >> 8);
+        out[i*4+3] = (uint8_t)(ctx->state[i]);
+    }
+}
+
+/* 一步到位 SHA-256。存在的理由同 ncg_derive_k_so_from_der：ksha_ctx 是
+ * 不透明句柄，密文段里的调用方开不出栈对象。与三步式逐字节等价。 */
+void ksha256(const uint8_t *data, size_t len, uint8_t out[32]) {
+    ksha_ctx ctx;
+    ksha_init(&ctx);
+    ksha_update(&ctx, data, len);
+    ksha_final(&ctx, out);
+}
+
+/* ── HMAC-SHA256（RFC 2104，照抄 Xop crypto/sha256.cpp:123）──────── */
+void khmac_sha256(const uint8_t *key,size_t key_len,
+                  const uint8_t *msg,size_t msg_len,uint8_t out[32]){
+    uint8_t k0[64],ipad[64],opad[64],inner[32]; ksha_ctx c; size_t i;
+    memset(k0,0,64);
+    if(key_len>64){ksha_ctx t; ksha_init(&t);ksha_update(&t,key,key_len);ksha_final(&t,k0);}
+    else memcpy(k0,key,key_len);
+    for(i=0;i<64;i++){ipad[i]=k0[i]^0x36;opad[i]=k0[i]^0x5c;}
+    ksha_init(&c);ksha_update(&c,ipad,64);ksha_update(&c,msg,msg_len);ksha_final(&c,inner);
+    ksha_init(&c);ksha_update(&c,opad,64);ksha_update(&c,inner,32);ksha_final(&c,out);
+}
+
+/* ── 增量 HMAC（2026-10-19）─────────────────────────────────────────
+ * 动机：.ncx 与 .ncxr 是两段不连续内存，一次性算 HMAC 需要
+ * 先把两段拼接进临时缓冲（最多几十 KB）。增量式零额外内存、零拷贝。
+ *
+ * 完整性：与 khmac_sha256(key, m1||m2) 逐字节等价 —— 由
+ * scripts/lib/tests/test-so-lock.sh 的 HMAC 对拍项钉死。
+ *
+ * 结构（RFC 2104）：
+ *   inner = SHA(ipad || m1 || m2 || ...)
+ *   out   = SHA(opad || inner)
+ * 故 ctx 里保存：内层 SHA 上下文 + 已算好的 opad（32 字节未压缩的 k0^0x5c）
+ * 不能在 final 时再算 opad——feed 阶段 key 已不在手上。
+ * ⚠️ k0 必须先清零再用：key_len<64 时 memcpy 只写前 klen 字节，
+ *    后面 64-klen 必须是 0（哈希块填充语义）。 */
+struct khmac_ctx_s {
+    ksha_ctx inner;          /* 内层 SHA 上下文 */
+    uint8_t  opad[64];       /* 外层 pad（k0 ^ 0x5c），final 时用 */
+};
+
+/* 编译期把关：.h 里声明的 KHMAC_CTX_SIZE 必须 >= 实际结构体大小。
+ * 不一致会在这里直接编译失败，而不是运行期栈溢出（那种 bug 极难查）。 */
+typedef char khmac_size_check_t[
+    (sizeof(struct khmac_ctx_s) <= KHMAC_CTX_SIZE) ? 1 : -1];
+
+void khmac_init(khmac_ctx *ctx,const uint8_t *key,size_t key_len){
+    uint8_t k0[64]; size_t i;
+    memset(k0,0,sizeof k0);
+    if(key_len>64){ksha_init(&ctx->inner);ksha_update(&ctx->inner,key,key_len);
+        ksha_final(&ctx->inner,k0);}
+    else memcpy(k0,key,key_len);
+    for(i=0;i<64;i++) ctx->opad[i]=(uint8_t)(k0[i]^0x5c);
+    {
+        uint8_t ipad[64];
+        for(i=0;i<64;i++) ipad[i]=(uint8_t)(k0[i]^0x36);
+        ksha_init(&ctx->inner);
+        ksha_update(&ctx->inner,ipad,64);
+        memset(ipad,0,sizeof ipad);
+    }
+    memset(k0,0,sizeof k0);
+}
+
+void khmac_update(khmac_ctx *ctx,const uint8_t *data,size_t len){
+    ksha_update(&ctx->inner,data,len);
+}
+
+void khmac_final(khmac_ctx *ctx,uint8_t out[32]){
+    uint8_t inner[32];
+    ksha_ctx outer;
+    ksha_final(&ctx->inner,inner);
+    ksha_init(&outer);
+    ksha_update(&outer,ctx->opad,64);
+    ksha_update(&outer,inner,32);
+    ksha_final(&outer,out);
+    memset(inner,0,sizeof inner);
+    memset(ctx,0,sizeof *ctx);
+}
+
+/* ── HKDF-SHA256（RFC 5869，extract-then-expand）───────────────────
+ * 与 so-section-lock.py 的 hkdf_sha256() 逐字节同算法：
+ *   prk = HMAC(salt, ikm)
+ *   okm = T(1)||T(2)||... , T(i)=HMAC(prk, T(i-1)||info||i)
+ */
+void khkdf_sha256(const uint8_t *ikm,size_t ikm_len,
+                  const uint8_t *salt,size_t salt_len,
+                  const uint8_t *info,size_t info_len,
+                  uint8_t *out,size_t out_len){
+    /* RFC 5869 expand：T(i) = HMAC(prk, T(i-1) || info || i)。
+     * ⚠️ info 严禁截断——我第一版写了 `if(info_len>32) info_len=32`，
+     * RFC 测试向量因此全错（34104666... vs 3cb25f25...）。info 极短
+     * （label+pkg < 64B）但语义上必须完整传入。 */
+    uint8_t prk[32],t[32]; size_t done=0; uint8_t counter=1;
+    uint8_t msg[96]; size_t msglen;
+    khmac_sha256(salt,salt_len,ikm,ikm_len,prk);
+    memset(t,0,sizeof t);
+    while(done<out_len){
+        size_t n=0;
+        if(counter>1){ memcpy(msg,t,32); n=32; }
+        if(info_len){ size_t cp=info_len; if(cp>sizeof msg-1) cp=sizeof msg-1;
+                      memcpy(msg+n,info,cp); n+=cp; }
+        msg[n++]=counter;
+        msglen=n;
+        khmac_sha256(prk,32,msg,msglen,t);
+        { size_t take=out_len-done; if(take>32)take=32; memcpy(out+done,t,take); done+=take; }
+        counter++;
+    }
+    memset(prk,0,sizeof prk);
+}
+
+/* ── APK 第一签名者证书 DER 的定点读 ─────────────────────────────
+ * 照抄 Xop crypto/apk_sign.cpp 的 parse_apk：只读 EOCD 尾区 + Signing
+ * Block，不读整个 APK（4.6MB → 几十 KB）。v3 优先，回退 v2。
+ * 与 sig_guard2.c 的 g2_extract_cert 同逻辑，但此处自带以免依赖 static 符号。 */
+static int rd_at(int fd,uint64_t off,void *buf,size_t n){
+    return pread(fd,buf,n,(off_t)off)==(ssize_t)n?0:-1;
+}
+static uint32_t le32(const uint8_t*p){return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
+static uint64_t le64(const uint8_t*p){uint64_t v=0;int i;for(i=7;i>=0;i--)v=v<<8|p[i];return v;}
+
+/* v2/v3 scheme block 里第一个 certificate 的 DER */
+/* 从 v2/v3 scheme 块里取第一张证书 DER。
+ *
+ * ⚠️ 2026-10-19 重写。旧实现（从 signed_data 尾部反推"证书数"）是错的：
+ * APK Sig Scheme v2/v3 的 certificates 段是【长度前缀序列】，压根没有
+ * "证书数量"字段。旧代码把 `i+sl-4` 处的字节当证书数，实测在真 APK 上
+ * 取到 920551173，`certs<n` 判假 → 100% 失败（该函数此前无调用方，
+ * 所以从未暴露；P1-a 落地时才被实测抓到）。
+ *
+ * 规范布局（https://source.android.com/docs/security/features/apksigning/v2）：
+ *   signer      = signed_data_len(4) + signed_data + signatures
+ *                 + public_key_len(4) + public_key
+ *   signed_data = digests_len(4) + digests
+ *               + certificates_len(4) + [cert_len(4) + cert_der]...
+ *                 + additional_attrs_len(4) + ...
+ *
+ * 入参 p 指向【单个 signer】的起点（已跳过外层 signers_len 与 signer_len），
+ * n 是 signer 块长度。 */
+static int first_cert_der(const uint8_t *p,size_t n,const uint8_t **der,uint32_t *der_len){
+    if(n<12) return -1;
+    uint32_t sd_len=le32(p);                 /* signed_data 长度 */
+    if(sd_len<8||(size_t)sd_len+4>n) return -1;
+    const uint8_t *sd=p+4;
+    size_t q=0;
+    uint32_t dg=le32(sd+q);                  /* digests_len */
+    if(dg<4||(size_t)dg+8>sd_len) return -1;
+    q+=4+(size_t)dg;
+    uint32_t certs_len=le32(sd+q);           /* certificates 段总长 */
+    q+=4;
+    if(certs_len<4||q+(size_t)certs_len>sd_len) return -1;
+    uint32_t cl=le32(sd+q);                  /* 第一张证书长度 */
+    q+=4;
+    if(cl==0||cl>certs_len-4||q+(size_t)cl>sd_len) return -1;
+    *der=sd+q; *der_len=cl;
+    return 0;
+}
+
+/* 从 scheme 块（v2/v3 的 value）里定位第一个 signer。
+ *   signers     = signers_len(4) + [signer_len(4) + signer]...
+ * 兼容 signers_len 写成"1"（= signer 个数）的实现差异——两种都能走通。 */
+static int apk_first_cert_der_from_scheme(const uint8_t *s,size_t sn,
+                                          const uint8_t **der,uint32_t *der_len){
+    if(!s||sn<12) return -1;
+    size_t off=4;                            /* 跳 signers_len */
+    /* 先按规范：signers_len 是字节数，紧跟 signer_len(4) */
+    if(off+4<=sn){
+        uint32_t sl=le32(s+off);
+        if(sl>=12&&off+4+(size_t)sl<=sn){
+            if(first_cert_der(s+off+4,sl,der,der_len)==0) return 0;
+        }
+    }
+    /* 回退：把第一个 4 字节当 signer 个数(=1)，后面直接是 signer_len */
+    {
+        uint32_t cnt=le32(s);
+        if(cnt>=1&&cnt<=8&&off+4<=sn){
+            uint32_t sl=le32(s+off);
+            if(sl>=12&&off+4+(size_t)sl<=sn)
+                if(first_cert_der(s+off+4,sl,der,der_len)==0) return 0;
+        }
+    }
+    return -1;
+}
+
+int ncg_apk_first_cert_der(const char *apk_path,uint8_t *der,size_t der_cap,size_t *der_len){
+    int fd=open(apk_path,O_RDONLY);
+    if(fd<0) return -1;
+    struct stat st; if(fstat(fd,&st)!=0||st.st_size<64){close(fd);return -1;}
+    uint64_t fsize=(uint64_t)st.st_size;
+    uint8_t eocd[22];
+
+    /* 1) EOCD：尾部前 64KB 内反向找 PK\x05\x06
+     *
+     * ⚠️ 2026-10-19：改成【一次性读 64KB 到内存扫】，不再逐字节 pread。
+     * 旧实现每个偏移一次 syscall，最坏情况（EOCD 带 64KB 注释，合法且常见）
+     * 要 65535 次 pread。实测 on-device 级存储上 92 ms —— 一旦 P1-a 上
+     * 运行期，这就是可见的启动卡顿。改后同一最坏样本 74.8 us（1234x）。
+     * 内存需求 64KB 缓冲。
+     *
+     * ⚠️ 2026-10-21 由 static 改为 malloc/free：static 让 64KB 常驻 .bss
+     * 至进程死亡（全进程 .bss 由此一项占掉近一半），而本函数只在
+     * constructor 跑一次，malloc 的开销（微秒级）与"一次性"语义完全匹配。
+     * 本函数为冻结模块，此改动经用户授权；16 条 return 路径中缓冲存活
+     * 区间内的 3 条均已补 free（下方三处）。 */
+    {
+        uint8_t *tail=(uint8_t*)malloc(65557);
+        if(!tail){close(fd);return -1;}
+        uint64_t start=fsize>65557?fsize-65557:0;
+        size_t len=(size_t)(fsize-start);
+        if(rd_at(fd,start,tail,len)!=0){free(tail);close(fd);return -1;}
+        long eo=-1;
+        if(len>=22){
+            for(size_t i=len-22+1;i-->0;)
+                if(tail[i]==0x50&&tail[i+1]==0x4b&&tail[i+2]==0x05&&tail[i+3]==0x06){
+                    eo=(long)i;break;
+                }
+        }
+        if(eo<0){free(tail);close(fd);return -1;}
+        memcpy(eocd,tail+eo,22);
+        free(tail);
+    }
+    uint64_t cd_off=le32(eocd+16);
+    if(cd_off<32||cd_off>=fsize){close(fd);return -1;}
+
+    /* 2) Signing Block footer：cd_off-24 处 size+magic
+     * 照抄 XopProtector crypto/apk_sign.cpp:21-22：
+     *   kMagicLo = 0x20676953204b5041 ("APK Sig ")
+     *   kMagicHi = 0x3234206b636f6c42 ("Block 42")
+     * ⚠️ 我第一版凭印象编了 0x342e726f6e6f632e / 0x2e706f6f6c，小端解出来是
+     * ".conor.4" / "loop." —— magic 永不匹配，真 APK 提取必失败。 */
+    uint8_t footer[24];
+    if(rd_at(fd,cd_off-24,footer,24)!=0){close(fd);return -1;}
+    if(le64(footer+8)!=0x20676953204b5041ULL||le64(footer+16)!=0x3234206b636f6c42ULL){
+        close(fd);return -1;
+    }
+    uint64_t block_size=le64(footer);
+    if(block_size<24||block_size+8>cd_off){close(fd);return -1;}
+    uint64_t total=block_size+8, block_off=cd_off-total;
+    if(total>der_cap+4096){close(fd);return -1;}     /* 防御性上限 */
+
+    /* 3) 只把 block 读进缓冲，再在其中找 v3/v2 的 id-value 对
+     *
+     * ⚠️ 2026-10-21 由 static 改为 malloc/free（理由同上方 tail 块）。
+     * ⚠️⚠️ free 必须放在【函数末尾、memcpy(der,cd,cl) 之后】：
+     *   v3/v2 是指向 blk 内部的指针（apk_first_cert_der_from_scheme
+     *   返回的 der 也指向 blk 内），提前 free = use-after-free。
+     *   下方每条提前 return 的路径都补了 free(blk)。 */
+    uint8_t *blk=(uint8_t*)malloc(65536);
+    if(!blk){close(fd);return -1;}
+    if(total>65536){free(blk);close(fd);return -1;}
+    if(rd_at(fd,block_off,blk,(size_t)total)!=0){free(blk);close(fd);return -1;}
+    if(le64(blk)!=block_size){free(blk);close(fd);return -1;}
+
+    /* id-value 对遍历：APK Sig Block v2=0x7109871a, v3=0xf05368c0 */
+    const uint8_t *v3=NULL,*v2=NULL; size_t v3n=0,v2n=0;
+    {   size_t i=8;
+        while(i+12<=total){
+            uint64_t pl=le64(blk+i); i+=8;
+            if(pl<4||i+pl>total) break;
+            uint32_t id=le32(blk+i);
+            const uint8_t *val=blk+i+4; size_t vn=(size_t)pl-4;
+            if(id==0xf05368c0U){v3=val;v3n=vn;}
+            else if(id==0x7109871aU){v2=val;v2n=vn;}
+            i+=pl;
+        }
+    }
+    const uint8_t *cd=NULL; uint32_t cl=0;
+    if(v3&&apk_first_cert_der_from_scheme(v3,v3n,&cd,&cl)==0) ;
+    else if(v2&&apk_first_cert_der_from_scheme(v2,v2n,&cd,&cl)==0) ;
+    else {free(blk);close(fd);return -1;}
+    if((size_t)cl>der_cap){free(blk);close(fd);return -1;}
+    memcpy(der,cd,cl); *der_len=cl;
+    free(blk);
+    close(fd);
+    return 0;
+}
+
+/* ── 派生 K_so（与 so-section-lock.py 的 derive_app_keys['so'] 一致）──
+ * k_so = HKDF-SHA256(ikm=master, salt=SHA256(certDER), info="nc-so-v1"+pkg, 16) */
+int ncg_derive_k_so(const uint8_t master[32],const uint8_t cert_sha256[32],
+                    const char *pkg,uint8_t out[16]){
+    if(!master||!cert_sha256||!pkg||!pkg[0]||!out) return -1;
+    uint8_t info[128]; size_t n=0;
+    memcpy(info,"nc-so-v1",8); n=8;
+    { size_t l=strlen(pkg); if(l>sizeof info-9) l=sizeof info-9; memcpy(info+n,pkg,l); n+=l; }
+    khkdf_sha256(master,32,cert_sha256,32,info,n,out,16);
+    return 0;
+}
+
+/* 便捷版：吃 certDER，内部 SHA256(der) 再派生。
+ * 存在的唯一理由：ksha_ctx 在 .h 里是不透明句柄，调用方在栈上开不出来；
+ * head 本体是密文段里的代码，不宜为它引入额外依赖。
+ * ⚠️ salt = SHA256(certDER)，不是 certDER 本身——必须与 Python 侧
+ *    apk_first_signer_cert_sha256() 逐字节一致。 */
+int ncg_derive_k_so_from_der(const uint8_t master[32],
+                             const uint8_t *cert_der,size_t der_len,
+                             const char *pkg,uint8_t out[16]){
+    if(!master||!cert_der||!der_len||!pkg||!pkg[0]||!out) return -1;
+    uint8_t sha[32];
+    ksha_ctx ctx;
+    ksha_init(&ctx);
+    ksha_update(&ctx,cert_der,der_len);
+    ksha_final(&ctx,sha);
+    int rc=ncg_derive_k_so(master,sha,pkg,out);
+    memset(sha,0,sizeof sha);
+    return rc;
+}
+
+/* mac 域同上（label "nc-so-mac-v1"）。与 so 域必须硬分隔：
+ * 复用同一把钥匙 = 知道 RC4 密钥即可伪造 MAC，完整性校验形同虚设。 */
+int ncg_derive_k_mac_from_der(const uint8_t master[32],
+                              const uint8_t *cert_der,size_t der_len,
+                              const char *pkg,uint8_t out[16]){
+    if(!master||!cert_der||!der_len||!pkg||!pkg[0]||!out) return -1;
+    uint8_t sha[32];
+    ksha_ctx ctx;
+    ksha_init(&ctx);
+    ksha_update(&ctx,cert_der,der_len);
+    ksha_final(&ctx,sha);
+    int rc=ncg_derive_k_mac(master,sha,pkg,out);
+    memset(sha,0,sizeof sha);
+    return rc;
+}
+
+/* ── 派生 K_mac（与 so-section-lock.py 的 derive_app_keys['mac'] 一致）──
+ * k_mac = HKDF-SHA256(ikm=master, salt=SHA256(certDER), info="nc-so-mac-v1"+pkg, 16)
+ * 2026-12 完整性校验专用：只参与 .ncx 密文的 HMAC 计算，绝不与 so 域复用
+ * 同一把钥匙（复用 = 知道 RC4 密钥即可伪造 MAC，校验形同虚设）。 */
+int ncg_derive_k_mac(const uint8_t master[32],const uint8_t cert_sha256[32],
+                     const char *pkg,uint8_t out[16]){
+    if(!master||!cert_sha256||!pkg||!pkg[0]||!out) return -1;
+    uint8_t info[128]; size_t n=0;
+    memcpy(info,"nc-so-mac-v1",12); n=12;
+    { size_t l=strlen(pkg); if(l>sizeof info-13) l=sizeof info-13; memcpy(info+n,pkg,l); n+=l; }
+    khkdf_sha256(master,32,cert_sha256,32,info,n,out,16);
+    return 0;
+}
+
+/* ── 派生 K_so_r（与 so-section-lock.py 的 derive_app_keys['so_r'] 一致）──
+ * k_so_r = HKDF-SHA256(ikm=master, salt=SHA256(certDER),
+ *                      info="nc-so-r-v1"+pkg, 16)
+ *
+ * 2026-10-28 新增（逆向报告 §6.2）：.ncxr 常量表段专用密钥，隔断 RC4
+ * keystream 跨段复用。此前 .ncx 与 .ncxr 都从 keystream 偏移 0 起，
+ * 实测属于 two-time-pad 误用，已知 .ncxr 明文即可反推 .ncx 明文。
+ *
+ * ⚠️ 与 k_so / k_mac / k_stub 必须全部不同。改 label 必须同步 Python 侧
+ *    derive_app_keys()（T20 跨语言对拍会抓不一致）。 */
+int ncg_derive_k_so_r(const uint8_t master[32],const uint8_t cert_sha256[32],
+                      const char *pkg,uint8_t out[16]){
+    if(!master||!cert_sha256||!pkg||!pkg[0]||!out) return -1;
+    uint8_t info[128]; size_t n=0;
+    memcpy(info,"nc-so-r-v1",10); n=10;
+    { size_t l=strlen(pkg); if(l>sizeof info-11) l=sizeof info-11; memcpy(info+n,pkg,l); n+=l; }
+    khkdf_sha256(master,32,cert_sha256,32,info,n,out,16);
+    return 0;
+}
+
+/* 便捷版：吃 certDER，内部 SHA256 再派生。存在的理由与
+ * ncg_derive_k_so_from_der 完全相同（ksha_ctx 是不透明句柄，密文段里的
+ * 调用方开不出栈对象）。 */
+int ncg_derive_k_so_r_from_der(const uint8_t master[32],
+                               const uint8_t *cert_der,size_t der_len,
+                               const char *pkg,uint8_t out[16]){
+    if(!master||!cert_der||!der_len||!pkg||!pkg[0]||!out) return -1;
+    uint8_t sha[32];
+    ksha_ctx ctx;
+    ksha_init(&ctx);
+    ksha_update(&ctx,cert_der,der_len);
+    ksha_final(&ctx,sha);
+    int rc=ncg_derive_k_so_r(master,sha,pkg,out);
+    memset(sha,0,sizeof sha);
+    return rc;
+}

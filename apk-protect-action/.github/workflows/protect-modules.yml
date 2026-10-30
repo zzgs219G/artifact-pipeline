@@ -1,0 +1,156 @@
+name: APK加固-模块勾选
+
+# 勾选式统一入口（schema 驱动动态配置版）：
+#   App 拉取 configs/v1/config-schema.json 生成父子级勾选 UI → 生成 protect_config
+#   JSON → dispatch 传入 → scripts/actions/resolve-config.py 按 schema 解释成
+#   protect.sh 参数（schema_rules/args.txt，一行一个）→ 执行。
+#   加新模块/子选项只改 configs/v1/config-schema.json 一份文件（App 与本 yml 零改动）。
+# 执行顺序由 protect.sh 固定为
+#   签名校验 → Dex2C(唯一转译引擎) → 字符串加密 → 防对比混淆(anti-diff) → 环境检测(envcheck) → 基础加壳(packer)
+#   （anti-diff 是 dex 层结构噪声,放 stringenc 后;加壳必须最后，加了壳其它模块改不动）
+# GitHub 网页兜底：不勾任何模块时可直接在 protect_config 手填 JSON（见 configs/v1/config-schema.json）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: 'APK下载链接(需已用开发者keystore签名)'
+        required: true
+      protect_config:
+        description: '加固配置JSON(schema驱动;结构见 configs/v1/config-schema.json)'
+        required: true
+      dpt_extra_args:
+        description: '附加 dpt.jar 参数,空格分隔,如 --smaller(自由文本只构成打包参数注入面,最坏打包失败;secrets 不经此路径)'
+        required: false
+        default: 
+
+jobs:
+  protect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+      R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_PUBLIC_DOMAIN: ${{ secrets.R2_PUBLIC_DOMAIN }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 安装 Android NDK（优先预装，零下载）
+        id: ndk
+        uses: ./.github/actions/setup-ndk
+        with:
+          ndk-version: r27d
+
+      - name: 解压 dex2c 分发包
+        run: |
+          # zip 内顶层是 Dex2C/,解压到 tools/ 得单层 tools/Dex2C/;
+          # 产物由 .gitignore 的 /tools/Dex2C/ 忽略。
+          # 转译引擎:dex2c 是唯一引擎(旧引擎 dcc 已于 2026-12 下线)
+          unzip -qo tools/dex2c.zip -d tools
+          test -f tools/Dex2C/dcc.py || { echo "❌ dex2c.zip 解压产物异常"; exit 1; }
+
+      - name: 安装 python 依赖(dex2c)
+        run: pip3 install -r tools/Dex2C/requirements.txt
+
+      - name: 解析 protect_config（schema 驱动 → protect.sh 参数）
+        env:
+          # 经 env 中转，用户输入不直接插值进 shell（命令注入面，沿用旧 yml 思路）
+          # input 键名 protect_config 为永久冻结名（设计方案 §10.7）
+          INPUT_PROTECT_CONFIG: ${{ inputs.protect_config }}
+        run: |
+          # 观测性(2026-10-15 排查教训)：本次提交的配置原文/解析参数/规则内容必须进
+          # build.log——否则失败排查时(如规则误填 ** 触发全量转译)对"实际提交了什么"
+          # 一无所知，只能去网页翻 step 日志。env 中转照旧，内容仅 tee 进日志文件。
+          touch build.log
+          echo "=== 本次提交的 protect_config 原文 ===" | tee -a build.log
+          echo "$INPUT_PROTECT_CONFIG" | tee -a build.log
+          python3 scripts/actions/resolve-config.py 2>&1 | tee -a build.log
+          {
+            echo "=== args.txt（一行一个参数）==="
+            cat schema_rules/args.txt
+            for f in schema_rules/*.txt; do
+              [[ "$f" == schema_rules/args.txt ]] && continue
+              echo "=== $f ==="; cat "$f"
+            done
+          } | tee -a build.log
+
+      - name: 下载 APK
+        timeout-minutes: 5
+        env:
+          # apk_url 同样经 env 中转：URL 直接插值进 bash 双引号可被 "$(...)" 逃逸
+          # （安全审查 2026-09-18：protect_config 已中转，apk_url 补齐同一防线）
+          APK_URL: ${{ inputs.apk_url }}
+        run: |
+          set -o pipefail
+          # 报错四十四(2026-10-16): curl (3) URL rejected —— apk_url 含中文/空格
+          # (文件名"简盒-正式版-...(1)_sign.apk")。curl 默认拒绝非 ASCII URL。
+          # 修法: 下载前对 path/query 做百分号编码(scheme/host 保留,已编码的 %XX 不重复)。
+          ENC_URL=$(APK_URL="$APK_URL" python3 -c 'import os, urllib.parse; u = os.environ["APK_URL"].strip(); p = urllib.parse.urlsplit(u); path = urllib.parse.quote(p.path, safe="/%:@"); query = urllib.parse.quote(p.query, safe="=&%:@") if p.query else ""; print(urllib.parse.urlunsplit((p.scheme, p.netloc, path, query, "")))')
+          [ -n "$ENC_URL" ] || { echo "apk_url 为空" | tee -a build.log; exit 1; }
+          echo "下载 URL(编码后): $ENC_URL" | tee -a build.log
+          curl -fL --retry 3 -o app.apk "$ENC_URL" 2>&1 | tee -a build.log
+          ls -la app.apk | tee -a build.log
+
+      - name: 执行模块编排（固定顺序-签名校验-Dex2C-字符串加密-防对比混淆-环境检测-基础加壳）
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          # 通用 dpt 参数通道(报错四十三后方向调整):env 中转防注入,与 protect_config 同款
+          INPUT_DPT_EXTRA_ARGS: ${{ inputs.dpt_extra_args }}
+        run: |
+          chmod +x scripts/pipelines/protect.sh
+          # §10.2：读取时必须过滤空行（禁止直接 mapfile < args.txt）；
+          # 一行一个参数 + "${ARGS[@]}" 引用展开，禁止空格分隔单行 + 无引号 $ARGS
+          mapfile -t ARGS < <(grep -v '^$' schema_rules/args.txt)
+          EXTRA_ARGS=()
+          [[ -n "${INPUT_DPT_EXTRA_ARGS:-}" ]] && EXTRA_ARGS+=(--dpt-extra-args "$INPUT_DPT_EXTRA_ARGS")
+          set -o pipefail
+          ./scripts/pipelines/protect.sh app.apk protected_unsigned.apk "${ARGS[@]}" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} 2>&1 | tee -a build.log
+
+      - name: 上传加固包到 R2
+        id: upload-r2
+        run: |
+          set -o pipefail
+          if [[ -z "$R2_ENDPOINT" || -z "$R2_BUCKET" ]]; then
+            echo "❌ R2_ENDPOINT/R2_BUCKET 为空，检查仓库 Secrets" | tee -a build.log
+            exit 1
+          fi
+          export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY"
+          export AWS_SECRET_ACCESS_KEY="$R2_SECRET_KEY"
+          export AWS_DEFAULT_REGION="auto"
+          SAFE_NAME="${GITHUB_RUN_ID}_模块勾选包.apk"
+          aws s3 cp protected_unsigned.apk "s3://$R2_BUCKET/apks/$SAFE_NAME" \
+            --endpoint-url "$R2_ENDPOINT" --no-progress 2>&1 | tee -a build.log
+          DL="$R2_PUBLIC_DOMAIN/apks/$SAFE_NAME"
+          echo "download_url=$DL" >> "$GITHUB_OUTPUT"
+          echo "🔗 下载地址: $DL" | tee -a build.log
+
+      - name: 显示下载链接
+        run: |
+          echo "::notice title=📥 模块勾选加固包(未签名,请自行重签)::${{ steps.upload-r2.outputs.download_url }}"
+
+      - name: 上传构建日志（无论成败都可下载）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 构建日志-build.log
+          path: build.log
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Artifact 备用
+        uses: actions/upload-artifact@v4
+        with:
+          name: 模块勾选加固包-未签名
+          path: protected_unsigned.apk
+          if-no-files-found: error
+          retention-days: 1
