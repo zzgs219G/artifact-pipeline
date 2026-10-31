@@ -107,6 +107,14 @@ def http(method: str, url: str, token: str, body=None, raw: bytes = None,
     die(f"请求失败 {method} {url}: {last_err}")
 
 
+def _read_rules_file(path: str) -> str:
+    """读规则文件内容。不存在则 die（人话），不静默返回空。"""
+    if not os.path.isfile(path):
+        die(f"规则文件不存在: {path}")
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
 def build_config(args) -> str:
     """按开关拼 protect_config JSON。结构见 configs/v1/config-schema.json。
 
@@ -146,6 +154,47 @@ def build_config(args) -> str:
         "envcheck": on["envcheck"],
         "packer": {"enabled": on["packer"]},
     }
+
+    # ── 规则文件：值是【文件内容】而非路径 ───────────────────────────
+    # resolve-config.py 的 value_kind=rules_file 语义：非空 → 写
+    # schema_rules/<module>_<child>.txt，把路径追加在 arg 后；
+    # 空 → 只吐 arg。
+    #
+    # ⚠️ 字段名必须是 schema 里的 child key（rules_file），不是 "rules"。
+    #    schema 的 required 规则：
+    #      dex2c.rules_file      always，但 sigcheck=true 时豁免 → 留空即
+    #                            "自动解析 Manifest 的 LAUNCHER 主类"
+    #      stringenc.rules_file  always，无豁免 → 必须给内容
+    #
+    # 默认（用户 2026-10-31 确认的测试常态）：
+    #   dex2c 留空 → 自动主类（覆盖启动路径）
+    #   stringenc "**" → 全量（漏类等于没加密）
+    #
+    # ⚠️ dex2c 不能填 "**"：schema hint 明确写"勿填 ** 全量
+    #    （整个App转译，上游不支持）"。
+    #
+    # ⚠️ dex2c 规则留空时【必须】勾 sigcheck：schema 的 required.unless
+    #    只在 sigcheck=true 时豁免（否则 resolve-config 直接 fail）。
+    #    这里提前人话报错，别等云端跑 40 秒才告诉你。
+    if on["dex2c"]:
+        dex_rules = args.dex2c_rules
+        if args.dex2c_rules_file:
+            dex_rules = _read_rules_file(args.dex2c_rules_file)
+        if not dex_rules.strip() and not on["sigcheck"]:
+            die("dex2c 规则为空时必须同时勾 --sigcheck（否则上游无法确定抽哪些类）。\n"
+                "  要么加 --sigcheck（自动抽 Manifest 主类），\n"
+                "  要么用 --dex2c-rules 'com.example.**' 指定类名。")
+        cfg["dex2c"]["rules_file"] = dex_rules
+
+    if on["stringenc"]:
+        enc_rules = args.stringenc_rules
+        if args.stringenc_rules_file:
+            enc_rules = _read_rules_file(args.stringenc_rules_file)
+        if not enc_rules.strip():
+            die("stringenc 规则不能为空：用 --stringenc-rules '**' 全量，"
+                "或 --stringenc-rules-file <文件>")
+        cfg["stringenc"]["rules_file"] = enc_rules
+
     return json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -339,6 +388,17 @@ def main() -> int:
                    help="快速档：只 sigcheck（默认，约 1-2 分钟）")
     p.add_argument("--std", action="store_true",
                    help="标准档：sigcheck + dex2c + stringenc（约 5-10 分钟）")
+
+    r = ap.add_argument_group("规则文件（不给则用默认）")
+    r.add_argument("--dex2c-rules", default="",
+                   help="Dex2C 类名规则，一行一条。留空 = 自动抽 Manifest 主类"
+                        "（需同时勾 sigcheck）。⚠️ 不要填 ** —— 整个 App 转译，上游不支持")
+    r.add_argument("--stringenc-rules", default="**",
+                   help="字符串加密规则，默认 ** （全量）。")
+    r.add_argument("--stringenc-rules-file", default="",
+                   help="从文件读字符串加密规则（与 --stringenc-rules 二选一）")
+    r.add_argument("--dex2c-rules-file", default="",
+                   help="从文件读 Dex2C 规则（与 --dex2c-rules 二选一）")
 
     ap.add_argument("--dry-run", action="store_true", help="只打印，不真发请求")
     ap.add_argument("--no-wait", action="store_true", help="触发后立即返回，不等结果")
