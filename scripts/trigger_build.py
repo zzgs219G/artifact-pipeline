@@ -36,6 +36,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -187,17 +188,61 @@ def resolve_download_dir(preferred: str) -> str:
     return ""
 
 
-def download_file(url: str, dest_dir: str, token: str) -> str:
+def _clean_app_name(raw: str) -> str:
+    """提取纯净应用名：去 .apk/.zip 后缀与版本号后缀。
+
+    与 jian_box 的 TaskArtifactHelper.extractCleanAppName 同规则
+    （app/src/main/java/com/xixin/box/wrapper/common/apk/TaskArtifactHelper.kt），
+    目的是让脚本下载的文件名与 APP 下载的完全一致 —— 同一份产物在两个
+    入口拿到的名字相同，用户不会以为下了两个包。
+
+    版本号后缀只认 ·v / _v / -v 且紧跟数字，避免误伤 Apex_virtual 这类名字。
+    """
+    base = raw
+    for suf in (".apk", ".zip"):
+        if base.lower().endswith(suf):
+            base = base[: -len(suf)]
+    base = base.strip()
+
+    # 与 Kotlin 侧同一条正则：(?i)(·v|_v|-v)\d
+    m = re.search(r"(?i)(?:·v|_v|-v)\d", base)
+    if m:
+        base = base[: m.start()]
+
+    return base.strip() or "app"
+
+
+def artifact_filename(source_apk: str) -> str:
+    """生成规范产物名：[App名]_signed_[HH_mm_ss].apk
+
+    ⚠️ 刻意与 APP 保持一致（TaskArtifactHelper.generateSignedApkName），
+    【不加模块名】：同一应用不同模块的产物靠时间戳区分；加了模块反而让
+    APP 侧「找本地最新一版」的匹配规则（前缀 [App名]_signed_）失效。
+
+    例：简盒-正式版-v2.1.2_样本.apk → 简盒-正式版_signed_14_36_22.apk
+    """
+    clean = _clean_app_name(os.path.basename(source_apk))
+    return f"{clean}_signed_{time.strftime('%H_%M_%S')}.apk"
+
+
+def download_file(url: str, dest_dir: str, token: str,
+                  save_as: str = "") -> str:
     """下载产物到 dest_dir，返回本地路径（失败返回空串）。
 
-    产物在 R2 公开域名下，不需要 token；但同一套 http() 带 UA 更保险
+    save_as 给定时用它做文件名（不用 URL 里的原名）——R2 侧的文件名是
+    workflow 生成的 "<run_id>_模块勾选包.apk"，信息量低且每次不同，
+    本地保存要换成可读的名字（见 artifact_filename）。
+
+    产物在 R2 公开域名下，不需要 token；但同一套 UA 更保险
     （Cloudflare 的 Browser Integrity Check 对裸 urllib 会 403）。
     """
     if not dest_dir or not url:
         return ""
-    name = os.path.basename(urllib.parse.urlsplit(url).path) or "protected.apk"
-    # 文件名里的中文 keep 原样（Android 文件管理器显示友好）；
-    # 只挡路径分隔符，防 url 里带 ../ 之类。
+    if save_as:
+        name = save_as
+    else:
+        name = os.path.basename(urllib.parse.urlsplit(url).path) or "protected.apk"
+    # 只挡路径分隔符，防 url 里带 ../ 之类
     name = name.replace("/", "_").replace("\\", "_")
     dest = os.path.join(dest_dir, name)
 
@@ -383,7 +428,8 @@ def main() -> int:
                     print(f"   链接: {dl}")
                     if not args.no_download:
                         dest = resolve_download_dir(args.download_dir)
-                        saved = download_file(dl, dest, token)
+                        saved = download_file(dl, dest, token,
+                                              save_as=artifact_filename(args.apk))
                         if saved:
                             print(f"   本地: {saved}")
             else:
@@ -393,7 +439,10 @@ def main() -> int:
             print(f"   任务页: {args.base}/jobs/{job_id}")
             return 0 if st == "SUCCESS" else 1
 
-        time.sleep(10)
+        # 20s 一次：构建通常 1-2 分钟，20s 内必然有状态变化，
+        # 不必更密。EdgeRelay 限流 RATE_LIMIT_PER_MIN=120（次/分钟），
+        # 3 次/分钟的轮询远低于阈值，但也没必要白花请求。
+        time.sleep(20)
 
     print(f"⚠ 超时（{args.timeout}s），任务仍在跑: {args.base}/jobs/{job_id}")
     return 2
