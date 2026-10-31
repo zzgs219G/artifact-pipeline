@@ -408,6 +408,12 @@ def main() -> int:
                          "不可写时退回 ~/Download）")
     ap.add_argument("--no-download", action="store_true",
                     help="只打印链接，不下载产物")
+    ap.add_argument("--sign", action="store_true",
+                    help="请求流水线用仓库 Secrets 里的 keystore 重签产物"
+                         "（产出可直接安装）。需要 KEYSTORE_BASE64 / "
+                         "KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD 四个 Secrets；"
+                         "⚠️ keystore 必须与上传 APK 同源，否则证书绑定失败"
+                         "（见 docs/CI签名.md）")
     args = ap.parse_args()
 
     if not os.path.isfile(args.apk):
@@ -441,6 +447,8 @@ def main() -> int:
         "dpt_extra_args": args.dpt_extra,
         "display_name": args.name or base_name,
     }
+    if args.sign:
+        payload["sign"] = True
     print(f"  workflow: {args.workflow}")
     print(f"  模块:     {describe_plan(config)}")
     if args.dry_run:

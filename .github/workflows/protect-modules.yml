@@ -23,6 +23,11 @@ on:
         description: '附加 dpt.jar 参数,空格分隔,如 --smaller(自由文本只构成打包参数注入面,最坏打包失败;secrets 不经此路径)'
         required: false
         default: 
+      sign:
+        description: '是否签名产物（true=用 KEYSTORE_BASE64 对应的 keystore 重签，产出可直接安装；默认 false=保持"未签名"契约）'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   protect:
@@ -140,6 +145,73 @@ jobs:
           [[ -n "${INPUT_DPT_EXTRA_ARGS:-}" ]] && EXTRA_ARGS+=(--dpt-extra-args "$INPUT_DPT_EXTRA_ARGS")
           set -o pipefail
           ./scripts/pipelines/protect.sh app.apk protected_unsigned.apk "${ARGS[@]}" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} 2>&1 | tee -a build.log
+
+      # ── 可选签名（默认关闭，保持"产物未签名"契约）───────────────────
+      # 为什么做成可选而非默认：
+      #   本仓库的既有契约是「产出未签名包，开发者自行重签」（见 AGENTS.md
+      #   与流程文档 §2 步骤 11）。App 走默认路径时不应改变这个行为。
+      #   但 CLI 调试时每次手工重签很烦（trigger_build.py 的诉求），
+      #   所以给一个显式开关。
+      #
+      # ⚠️ 只接受 workflow input sign=true 触发，不接受 protect_config 里的
+      #    字段：resolve-config.py 有白名单保险丝（未知顶层 key 直接 die），
+      #    往 protect_config 加 sign 会让整个流程 fail-fast。
+      #
+      # ⚠️ 必须用【上传 APK 时那把 keystore】：加 --sigcheck 后 libnc.so 里
+      #    写的是原证书的指纹，换证书重签 → 运行期证书派生失败 → 包起不来。
+      #    （所以 secrets 里的 keystore 必须与用户上传的 APK 同源。）
+      #
+      # secrets 缺失时 fail-fast，不静默跳过 —— 否则用户以为签了，装上去
+      # 还是"未签名，无法安装"。
+      - name: 签名产物（可选）
+        if: inputs.sign
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -o pipefail
+          missing=()
+          [[ -n "$KEYSTORE_B64" ]] || missing+=("KEYSTORE_BASE64")
+          [[ -n "$KS_PASS"      ]] || missing+=("KEYSTORE_PASSWORD")
+          [[ -n "$KEY_ALIAS"    ]] || missing+=("KEY_ALIAS")
+          [[ -n "$KEY_PASS"     ]] || missing+=("KEY_PASSWORD")
+          if (( ${#missing[@]} > 0 )); then
+            echo "❌ 请求了 sign=true 但缺少 Secrets: ${missing[*]}" | tee -a build.log
+            echo "   存法见 docs/CI签名.md" | tee -a build.log
+            exit 1
+          fi
+
+          # keystore 只落临时目录，跑完随 runner 销毁（不写 workspace，避免
+          # 被 upload-artifact / 缓存意外带走）
+          KS="$RUNNER_TEMP/release.keystore"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$KS"
+          # 校验解出来是真 keystore（防 base64 截断/换行问题）
+          keytool -list -keystore "$KS" -storepass "$KS_PASS" >/dev/null 2>&1 \
+            || { echo "❌ keystore 解密失败：base64 或密码不对" | tee -a build.log; exit 1; }
+          echo "✅ keystore 载入成功" | tee -a build.log
+
+          # zipalign 必须在 apksigner 之前（apksigner 之后再对齐会破坏签名）
+          aligned="$RUNNER_TEMP/aligned.apk"
+          if command -v zipalign >/dev/null 2>&1; then
+            zipalign -f -p 4 protected_unsigned.apk "$aligned" 2>&1 | tee -a build.log
+          else
+            echo "⚠ 无 zipalign，跳过对齐" | tee -a build.log
+            cp protected_unsigned.apk "$aligned"
+          fi
+
+          apksigner sign \
+            --ks "$KS" --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" \
+            --out protected_signed.apk "$aligned" 2>&1 | tee -a build.log
+
+          apksigner verify --print-certs protected_signed.apk 2>&1 | tee -a build.log
+          # 原产物改名，让下游"上传哪个文件"无歧义
+          mv protected_unsigned.apk protected_unsigned_unsigned.apk
+          mv protected_signed.apk protected_unsigned.apk
+          echo "✅ 已签名（cert: $(apksigner verify --print-certs protected_unsigned.apk 2>/dev/null | grep 'SHA-256 digest' | head -1 | awk '{print $NF}')）" | tee -a build.log
+          rm -f "$KS"
 
       - name: 上传加固包到 R2
         id: upload-r2
