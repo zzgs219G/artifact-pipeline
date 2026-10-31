@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""trigger_build.py — 命令行触发 EdgeRelay 构建（不经过 APP）
+
+用途：改完 nox / 流水线代码后，一条命令跑完「上传 APK → 触发构建 → 等结果」，
+不用打开 APP 手动勾模块、手选文件。
+
+为什么走 EdgeRelay 而不是直接调 GitHub API：
+  · 和 APP 完全同一条路，触发逻辑只有一份，不会出现「脚本能跑但 APP 挂」
+  · GitHub token 只在网关侧，本地不需要持有
+  · 任务记录落在 KV，面板与 APP 都能看到
+
+用法：
+  python3 scripts/trigger_build.py <apk文件> [选项]
+
+  # 最简：只勾签名校验
+  python3 scripts/trigger_build.py app.apk
+
+  # 指定模块
+  python3 scripts/trigger_build.py app.apk --sigcheck --dex2c --stringenc
+
+  # 全量
+  python3 scripts/trigger_build.py app.apk --all
+
+  # 只看会发什么请求，不真发
+  python3 scripts/trigger_build.py app.apk --sigcheck --dry-run
+
+令牌来源（按优先级）：
+  1. --token 参数
+  2. 环境变量 RELAY_TOKEN
+  3. 交互输入
+
+⚠️ 令牌不要写进本文件、不要提交进 git。
+"""
+import argparse
+import getpass
+import hashlib
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+DEFAULT_BASE = "https://relay.614118.xyz"
+DEFAULT_WORKFLOW = "protect-modules.yml"
+# 默认下载目录：Android 系统「下载」目录。Termux 有存储权限时可写；
+# 没有则退回 $HOME/Download（见 resolve_download_dir）。
+DEFAULT_DOWNLOAD_DIR = "/storage/emulated/0/Download"
+
+
+def die(msg: str) -> "None":
+    print(f"✗ {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def http(method: str, url: str, token: str, body=None, raw: bytes = None,
+         content_type: str = "application/json", timeout: int = 60,
+         retries: int = 3):
+    """发一个请求，返回 (status, parsed_json_or_text)。
+
+    网络层错误（连接重置/超时）自动重试 —— 移动网络下 Termux 出口不稳，
+    实测单次轮询就可能 Connection reset by peer。业务错误（4xx/5xx）不重试。
+    """
+    data = None
+    # ⚠️ 必须带 User-Agent：Cloudflare 的 Browser Integrity Check 会把
+    #    python-urllib 的默认 UA 拦成 403 error 1010（真机实测）。
+    #    curl 的 UA 在白名单里所以能过 —— 这正是"curl 能通、脚本不能"的根因。
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "relay-build-cli/1.0",
+        "Accept": "application/json",
+    }
+    if raw is not None:
+        data = raw
+        headers["Content-Type"] = content_type
+    elif body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+
+    last_err = None
+    for attempt in range(1, retries + 1):
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                payload = r.read()
+                try:
+                    return r.status, json.loads(payload)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    return r.status, payload.decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            text = e.read().decode("utf-8", "replace")
+            try:
+                return e.code, json.loads(text)
+            except json.JSONDecodeError:
+                return e.code, text
+        except Exception as e:  # noqa: BLE001
+            # 网络层：可重试
+            last_err = e
+            if attempt < retries:
+                wait = 2 * attempt
+                print(f"  ⚠ 网络错误（{e}），{wait}s 后重试 {attempt}/{retries - 1}",
+                      file=sys.stderr)
+                time.sleep(wait)
+                continue
+    die(f"请求失败 {method} {url}: {last_err}")
+
+
+def build_config(args) -> str:
+    """按开关拼 protect_config JSON。结构见 configs/v1/config-schema.json。
+
+    预设优先级：--all > --std > --fast > 逐个开关。
+    --fast 是默认：没给任何模块开关时只跑 sigcheck（最快，约 1-2 分钟）。
+
+    为什么默认不含 packer / antidiff（用户 2026-10-31 明确要求）：
+      · packer（dpt 加壳）本身要跑 1-2 分钟且最容易出兼容问题
+      · antidiff 只加结构噪声，对"验证加固链路是否通"没有价值
+      测试场景要的是"改完代码尽快知道有没有坏"，不是出厂强度。
+      需要出厂强度时显式加 --packer / --antidiff 或 --all。
+    """
+    any_switch = any([args.sigcheck, args.dex2c, args.stringenc,
+                      args.antidiff, args.envcheck, args.packer])
+
+    if args.all:
+        on = dict(sigcheck=True, dex2c=True, stringenc=True,
+                  antidiff=True, envcheck=True, packer=True)
+    elif args.std:
+        on = dict(sigcheck=True, dex2c=True, stringenc=True,
+                  antidiff=False, envcheck=False, packer=False)
+    elif not any_switch:
+        # 默认 = 快速档，只 sigcheck
+        on = dict(sigcheck=True, dex2c=False, stringenc=False,
+                  antidiff=False, envcheck=False, packer=False)
+    else:
+        on = dict(sigcheck=args.sigcheck, dex2c=args.dex2c,
+                  stringenc=args.stringenc, antidiff=args.antidiff,
+                  envcheck=args.envcheck, packer=args.packer)
+
+    cfg = {
+        "schema_version": 1,
+        "sigcheck": on["sigcheck"],
+        "dex2c": {"enabled": on["dex2c"]},
+        "stringenc": {"enabled": on["stringenc"]},
+        "antidiff": on["antidiff"],
+        "envcheck": on["envcheck"],
+        "packer": {"enabled": on["packer"]},
+    }
+    return json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
+
+
+def describe_plan(cfg_json: str) -> str:
+    """把 config JSON 翻成人类可读的模块列表，便于触发前确认。"""
+    c = json.loads(cfg_json)
+    mods = []
+    if c.get("sigcheck"):
+        mods.append("签名校验")
+    if c.get("dex2c", {}).get("enabled"):
+        mods.append("Dex2C")
+    if c.get("stringenc", {}).get("enabled"):
+        mods.append("字符串加密")
+    if c.get("antidiff"):
+        mods.append("防对比")
+    if c.get("envcheck"):
+        mods.append("环境检测")
+    if c.get("packer", {}).get("enabled"):
+        mods.append("加壳")
+    return " + ".join(mods) if mods else "（无）"
+
+
+def resolve_download_dir(preferred: str) -> str:
+    """选一个可写的下载目录。
+
+    优先用调用方指定的（默认 Android 系统 Download）；不可写时退回
+    $HOME/Download。不 fail-fast —— 产物下载失败不应该让整个流程算失败，
+    拿不到就只打印链接，用户自己点。
+    """
+    for cand in (preferred, os.path.join(os.path.expanduser("~"), "Download")):
+        try:
+            os.makedirs(cand, exist_ok=True)
+            probe = os.path.join(cand, ".write-probe")
+            with open(probe, "w") as f:
+                f.write("x")
+            os.remove(probe)
+            return cand
+        except OSError:
+            continue
+    return ""
+
+
+def download_file(url: str, dest_dir: str, token: str) -> str:
+    """下载产物到 dest_dir，返回本地路径（失败返回空串）。
+
+    产物在 R2 公开域名下，不需要 token；但同一套 http() 带 UA 更保险
+    （Cloudflare 的 Browser Integrity Check 对裸 urllib 会 403）。
+    """
+    if not dest_dir or not url:
+        return ""
+    name = os.path.basename(urllib.parse.urlsplit(url).path) or "protected.apk"
+    # 文件名里的中文 keep 原样（Android 文件管理器显示友好）；
+    # 只挡路径分隔符，防 url 里带 ../ 之类。
+    name = name.replace("/", "_").replace("\\", "_")
+    dest = os.path.join(dest_dir, name)
+
+    print(f"  下载到: {dest}")
+    headers = {"User-Agent": "relay-build-cli/1.0"}
+    # ⚠️ urllib 不接受含非 ASCII 的 URL（中文文件名会报
+    #    'ascii' codec can't encode characters）。产物文件名里带中文是常态
+    #    （"41176839128_模块勾选包.apk"），所以下载前必须百分号编码。
+    safe_url = urllib.parse.quote(url, safe=":/?&=%@#+")
+    req = urllib.request.Request(safe_url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as f:
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+        size = os.path.getsize(dest)
+        print(f"  ✅ 已保存（{size} 字节）")
+        return dest
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ 下载失败（{e}），链接仍可手动访问")
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return ""
+
+
+def upload_apk(base: str, token: str, apk_path: str, key: str, dry: bool) -> str:
+    """调 /api/r2/presign 拿签名 URL，PUT 上传，返回 public_url。"""
+    size = os.path.getsize(apk_path)
+    print(f"  APK: {apk_path} ({size} 字节)")
+    print(f"  R2 key: {key}")
+
+    if dry:
+        return f"<dry-run public_url for {key}>"
+
+    status, resp = http("POST", f"{base}/api/r2/presign", token,
+                        body={"key": key, "content_type": "application/vnd.android.package-archive"})
+    if status != 200 or not isinstance(resp, dict):
+        die(f"presign 失败 HTTP {status}: {resp}")
+
+    url = resp.get("url")
+    public_url = resp.get("public_url")
+    headers = resp.get("headers") or {}
+    if not url or not public_url:
+        die(f"presign 响应缺 url/public_url: {resp}")
+
+    print(f"  签名 URL 有效期: {resp.get('expires_at', 0) - int(time.time())} 秒")
+    print(f"  上传中...", end="", flush=True)
+
+    with open(apk_path, "rb") as f:
+        data = f.read()
+    # ⚠️ 同一把 UA：R2 侧虽不查 CF 的完整性检查，但保持一致避免将来踩坑
+    up_headers = dict(headers or {})
+    up_headers.setdefault("User-Agent", "relay-build-cli/1.0")
+    req = urllib.request.Request(url, data=data, method="PUT", headers=up_headers)
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            print(f" HTTP {r.status} ✅")
+    except urllib.error.HTTPError as e:
+        print(f" HTTP {e.code} ❌")
+        die(f"上传失败: {e.read()[:300].decode('utf-8', 'replace')}")
+
+    return public_url
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="命令行触发 EdgeRelay 构建",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__)
+    ap.add_argument("apk", help="本地 APK 路径")
+    ap.add_argument("--base", default=os.environ.get("RELAY_BASE", DEFAULT_BASE),
+                    help=f"EdgeRelay 地址（默认 {DEFAULT_BASE}）")
+    ap.add_argument("--token", default=os.environ.get("RELAY_TOKEN"),
+                    help="Bearer 令牌（默认读 RELAY_TOKEN 环境变量）")
+    ap.add_argument("--workflow", default=DEFAULT_WORKFLOW, help="workflow 文件名")
+    ap.add_argument("--name", default="", help="任务显示名（面板可见）")
+    ap.add_argument("--dpt-extra", default="", help="附加 dpt.jar 参数")
+
+    g = ap.add_argument_group("模块勾选")
+    g.add_argument("--sigcheck", action="store_true", help="签名校验")
+    g.add_argument("--dex2c", action="store_true", help="Dex2C 转译")
+    g.add_argument("--stringenc", action="store_true", help="字符串加密")
+    g.add_argument("--antidiff", action="store_true", help="防对比混淆")
+    g.add_argument("--envcheck", action="store_true", help="环境检测")
+    g.add_argument("--packer", action="store_true", help="基础加壳")
+    g.add_argument("--all", action="store_true", help="全选（含 packer，慢）")
+
+    p = ap.add_argument_group("预设（互斥，优先于逐个开关）")
+    p.add_argument("--fast", action="store_true",
+                   help="快速档：只 sigcheck（默认，约 1-2 分钟）")
+    p.add_argument("--std", action="store_true",
+                   help="标准档：sigcheck + dex2c + stringenc（约 5-10 分钟）")
+
+    ap.add_argument("--dry-run", action="store_true", help="只打印，不真发请求")
+    ap.add_argument("--no-wait", action="store_true", help="触发后立即返回，不等结果")
+    ap.add_argument("--timeout", type=int, default=1800, help="等待上限（秒）")
+    ap.add_argument("--download-dir", default=DEFAULT_DOWNLOAD_DIR,
+                    help=f"产物下载目录（默认 {DEFAULT_DOWNLOAD_DIR}；"
+                         "不可写时退回 ~/Download）")
+    ap.add_argument("--no-download", action="store_true",
+                    help="只打印链接，不下载产物")
+    args = ap.parse_args()
+
+    if not os.path.isfile(args.apk):
+        die(f"APK 不存在: {args.apk}")
+
+    token = args.token
+    if not token and not args.dry_run:
+        token = getpass.getpass("RELAY_TOKEN: ")
+    if not token and not args.dry_run:
+        die("缺令牌：用 --token 或设 RELAY_TOKEN 环境变量")
+
+    # R2 key 规则（见 EdgeRelay services/sigv4.py validatePresignKey）：
+    #   必须以 apks/ 开头；不能含 . / .. 路径段；不能有 //；不能以 / 结尾。
+    # 用内容哈希做 key，天然去重：同一份 APK 重复触发不会传两份。
+    with open(args.apk, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()[:16]
+    base_name = os.path.basename(args.apk)
+    safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in base_name)
+    key = f"apks/{digest}-{safe_name}"
+
+    config = build_config(args)
+    print("=== 1. 上传 APK 到 R2 ===")
+    public_url = upload_apk(args.base, token, args.apk, key, args.dry_run)
+
+    print()
+    print("=== 2. 触发构建 ===")
+    payload = {
+        "apk_url": public_url,
+        "workflow_file": args.workflow,
+        "protect_config": config,
+        "dpt_extra_args": args.dpt_extra,
+        "display_name": args.name or base_name,
+    }
+    print(f"  workflow: {args.workflow}")
+    print(f"  模块:     {describe_plan(config)}")
+    if args.dry_run:
+        print(f"  config:   {config}")
+        print(f"  payload:  {json.dumps(payload, ensure_ascii=False)}")
+        print()
+        print("（dry-run：未发送任何请求）")
+        return 0
+
+    status, resp = http("POST", f"{args.base}/api/build", token, body=payload)
+    if status != 200 or not isinstance(resp, dict) or not resp.get("success"):
+        die(f"触发失败 HTTP {status}: {resp}")
+
+    job_id = resp["job_id"]
+    print(f"  ✅ 已触发，job_id = {job_id}")
+
+    if args.no_wait:
+        print()
+        print(f"任务页: {args.base}/jobs/{job_id}")
+        return 0
+
+    print()
+    print("=== 3. 等待结果 ===")
+    started = time.time()
+    last_status = None
+    while time.time() - started < args.timeout:
+        status, resp = http("GET", f"{args.base}/api/status/{job_id}", token)
+        if status != 200 or not isinstance(resp, dict):
+            print(f"  ⚠ 查询失败 HTTP {status}，重试...")
+            time.sleep(5)
+            continue
+
+        st = resp.get("app_status") or resp.get("status") or "?"
+        if st != last_status:
+            elapsed = int(time.time() - started)
+            print(f"  [{elapsed:>4}s] {st}")
+            last_status = st
+
+        if st in ("SUCCESS", "FAILED"):
+            print()
+            if st == "SUCCESS":
+                print(f"✅ 构建成功（耗时 {int(time.time() - started)}s）")
+                dl = resp.get("download_url")
+                if dl:
+                    print(f"   链接: {dl}")
+                    if not args.no_download:
+                        dest = resolve_download_dir(args.download_dir)
+                        saved = download_file(dl, dest, token)
+                        if saved:
+                            print(f"   本地: {saved}")
+            else:
+                print(f"❌ 构建失败")
+                if resp.get("error"):
+                    print(f"   原因: {resp['error']}")
+            print(f"   任务页: {args.base}/jobs/{job_id}")
+            return 0 if st == "SUCCESS" else 1
+
+        time.sleep(10)
+
+    print(f"⚠ 超时（{args.timeout}s），任务仍在跑: {args.base}/jobs/{job_id}")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
