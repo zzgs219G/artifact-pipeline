@@ -1163,8 +1163,42 @@ def _patch_stub_seed_from_shell(stub_smali: str, shell_jni_desc: str,
     return out
 
 
+def _stub_transpiled(compiled_methods: str, stub_path: str) -> bool:
+    """判断 dex2c 是否真的转译了桩类（按类描述符匹配）。
+
+    compiled_methods.txt 每行格式：`Lcom/pkg/Cls;method(args)ret`（无箭头）。
+    桩文件名形如 `.../el/za/jl/yh.smali`，描述符为 `Lel/za/jl/yh;`。
+
+    为什么必须按类匹配而不是"文件存在就认为转译了"：
+      传了 compiled_methods 但里面只有业务类（桩没被 filter 命中）时，
+      native 化桩 = 声明了 native 却没有实现 → 运行期 ULE。
+      这种情况在「dex2c + stringenc + packer 且不勾 --dex2c-stub」下必现。
+
+    边界：compiled_methods 为空/文件不存在 → 保守返回 False（不 native 化）。
+      代价是桩留在壳 dex 里以明文运行（少了"算法进 so"的收益），
+      但绝不会闪退 —— 正确性优先于强度。
+    """
+    if not compiled_methods or not os.path.isfile(compiled_methods):
+        return False
+    # stub_path: .../smali_classes2/el/za/jl/yh.smali → Lel/za/jl/yh;
+    norm = stub_path.replace('\\', '/')
+    m = re.search(r'/(smali[^/]*)/(.+)\.smali$', norm)
+    if not m:
+        return False
+    desc = 'L' + m.group(2) + ';'
+    try:
+        with open(compiled_methods, encoding='utf-8') as fp:
+            for line in fp:
+                if line.startswith(desc):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def emit_stub_dex(decompiled_dir: str, out_path: str, repo_root: str,
-                  seed_from_shell: bool = False) -> bool:
+                  seed_from_shell: bool = False,
+                  compiled_methods: str = "") -> bool:
     """把【注入后的解密桩类】单独汇编成一个 dex 文件（packer 联动用）。
 
     为什么需要单独一个 dex：
@@ -1208,13 +1242,29 @@ def emit_stub_dex(decompiled_dir: str, out_path: str, repo_root: str,
         #
         # 只 native 化 filter 命中的 4 个方法（由 --emit-stub-filter 的固定
         # 列表决定），<clinit> 必须保留 —— 它建 L1 缓存，dex2c 没转译它。
-        # ⚠️ 返回值有两种形态（历史设计）：失败/无需改 → 原 smali 内容；
-        #    成功 → 新文件路径。用它判断"是否真的 native 化了"。
-        stub_smali = _make_stub_methods_native(stub_path, work)
-        stub_methods_native = os.path.isfile(stub_smali)
+        #
+        # ⚠️⚠️ 关键前置判断（2026-10-31 修严重静默 bug）：
+        #   只有当【dex2c 真的转译了桩】时才 native 化。
+        #   判据 = compiled_methods.txt 里有桩类的方法条目。
+        #
+        #   不判断的后果（真机实测，构建全绿但装上去启动即闪退）：
+        #     dex2c + stringenc + packer（不勾 --dex2c-stub）
+        #     → 桩被摘到壳 dex、4 个方法被改成 native
+        #     → 但 dex2c 从未转译桩，libnc.so 里没有实现
+        #     → 启动调 md() → UnsatisfiedLinkError
+        #
+        #   不 native 化时桩保持明文 Java 方法，在壳 dex 里自给自足，
+        #   根本不需要 libnc.so —— 这是「不勾联动」的正确行为。
+        stub_native_ok = _stub_transpiled(compiled_methods, stub_path)
+        if stub_native_ok:
+            stub_smali = _make_stub_methods_native(stub_path, work)
+            stub_methods_native = os.path.isfile(stub_smali)
+        else:
+            stub_smali = stub_path
+            stub_methods_native = False
+            print('  ℹ️ 桩未被 dex2c 转译 → 保持明文 Java（不 native 化，不需要 libnc.so）')
         if not stub_methods_native:
-            # 没 native 化（未走 dex2c 联动）→ 返回的是原 smali 内容，
-            # 汇编要用原始文件路径。
+            # 没 native 化（未走 dex2c 联动）→ 汇编要用原始文件路径。
             stub_smali = stub_path
 
         # ── ⚠️ native 化后必须让桩自己加载 libnc.so（2026-10-31 修真 bug）──
@@ -1937,6 +1987,11 @@ def main():
                          "供 protect.sh 的 packer 联动使用:桩会被 dpt 合并进壳 dex"
                          "(dpt --extra-dex),从而脱离业务 dex。"
                          "桩未注入时不写文件(调用方据此判定联动是否成立)。")
+    ap.add_argument('--compiled-methods', metavar='PATH', default='',
+                    help='配合 --emit-stub-dex:dex2c 的 compiled_methods.txt。'
+                         '用于判断【桩是否真的被转译进 so】—— 只有转了才把桩方法'
+                         '改成 native。不传或桩不在其中 → 桩保持明文 Java'
+                         '（不需要 libnc.so，避免"声明 native 却无实现"的闪退）。')
     ap.add_argument('--emit-seed', metavar='OUT_PATH',
                     help='把本次的 SEED（16 位 hex）写入该文件。'
                          '供 protect.sh 传给 packer.sh → dpt --stub-seed，'
@@ -2124,7 +2179,8 @@ def main():
                 fp.write(f'{seed_int:016x}\n')
             print(f'  🌱 SEED 已写出: {args.emit_seed} ({seed_int:016x})')
         wrote = emit_stub_dex(args.decompiled, args.emit_stub_dex, _ROOT,
-                              seed_from_shell=args.stub_seed_from_shell)
+                              seed_from_shell=args.stub_seed_from_shell,
+                              compiled_methods=args.compiled_methods)
         if not args.quiet:
             if wrote:
                 size = os.path.getsize(args.emit_stub_dex)

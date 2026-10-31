@@ -1,4 +1,4 @@
-.class public final Lw1/tu/zs/xc;
+.class public final Lsx/if/n6/di;
 .super Ljava/lang/Object;
 
 
@@ -20,7 +20,7 @@
 
     invoke-direct {v0}, Ljava/util/concurrent/ConcurrentHashMap;-><init>()V
 
-    sput-object v0, Lw1/tu/zs/xc;->CACHE:Ljava/util/concurrent/ConcurrentHashMap;
+    sput-object v0, Lsx/if/n6/di;->CACHE:Ljava/util/concurrent/ConcurrentHashMap;
 
     return-void
 .end method
@@ -33,11 +33,11 @@
     return-void
 .end method
 
-.method public static jb(Ljava/lang/String;)Ljava/lang/String;
+.method public static t5(Ljava/lang/String;)Ljava/lang/String;
     .locals 0
 
     :try_start_0
-    invoke-static {p0}, Lw1/tu/zs/xc;->dn(Ljava/lang/String;)Ljava/lang/String;
+    invoke-static {p0}, Lsx/if/n6/di;->dn(Ljava/lang/String;)Ljava/lang/String;
 
     move-result-object p0
     :try_end_0
@@ -55,7 +55,7 @@
         }
     .end annotation
 
-    sget-object v0, Lw1/tu/zs/xc;->CACHE:Ljava/util/concurrent/ConcurrentHashMap;
+    sget-object v0, Lsx/if/n6/di;->CACHE:Ljava/util/concurrent/ConcurrentHashMap;
 
     invoke-virtual {v0, p0}, Ljava/util/concurrent/ConcurrentHashMap;->get(Ljava/lang/Object;)Ljava/lang/Object;
 
@@ -142,7 +142,7 @@
 
     add-long/2addr v10, v12
 
-    invoke-static {v10, v11}, Lw1/tu/zs/xc;->mix64(J)J
+    invoke-static {v10, v11}, Lsx/if/n6/di;->mix64(J)J
 
     move-result-wide v10
 
@@ -190,7 +190,7 @@
 
     invoke-direct {v0, v6, v1}, Ljava/lang/String;-><init>([BLjava/lang/String;)V
 
-    sget-object v1, Lw1/tu/zs/xc;->CACHE:Ljava/util/concurrent/ConcurrentHashMap;
+    sget-object v1, Lsx/if/n6/di;->CACHE:Ljava/util/concurrent/ConcurrentHashMap;
 
     invoke-virtual {v1}, Ljava/util/concurrent/ConcurrentHashMap;->size()I
 
@@ -219,7 +219,7 @@
 
     add-long/2addr p0, v0
 
-    invoke-static {p0, p1}, Lw1/tu/zs/xc;->mix64(J)J
+    invoke-static {p0, p1}, Lsx/if/n6/di;->mix64(J)J
 
     move-result-wide p0
 

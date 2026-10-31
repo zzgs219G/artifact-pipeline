@@ -764,9 +764,16 @@ if [[ $WANT_STRINGENC -eq 1 ]]; then
   #    绝不能让这件事发生——那时没有壳 dex 承载桩，摘除 = 运行期 ClassNotFound。
   #    所以只有 WANT_PACKER=1 才传该参数；其余组合与改动前逐字节一致。
   if [[ $WANT_PACKER -eq 1 ]]; then
+    # --compiled-methods：判断桩是否真被 dex2c 转译。不在其中 → 桩保持明文
+    # Java（不 native 化）。缺这个参数会导致「dex2c+stringenc+packer 且不勾
+    # --dex2c-stub」组合产出声明 native 却无实现的桩 → 启动闪退。
+    _CM_ARG=()
+    if [[ -f "$WORK/project/jni/nc/compiled_methods.txt" ]]; then
+      _CM_ARG=(--compiled-methods "$WORK/project/jni/nc/compiled_methods.txt")
+    fi
     python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
       "$WORK/decompiled" "$STRING_RULES" "${STRING_ENC_ARGS[@]}" \
-      --emit-stub-dex "$WORK/stub.dex"
+      --emit-stub-dex "$WORK/stub.dex" ${_CM_ARG[@]+"${_CM_ARG[@]}"}
   else
     python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
       "$WORK/decompiled" "$STRING_RULES" "${STRING_ENC_ARGS[@]}"

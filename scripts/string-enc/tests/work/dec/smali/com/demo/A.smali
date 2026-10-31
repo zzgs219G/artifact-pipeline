@@ -5,7 +5,7 @@
 .method public static hello()V
     .locals 1
     const-string v0, "AAAARGXBm5di75382uaKYkAbeOO8xBr4PR76yP0="
-    invoke-static/range {v0 .. v0}, Lw1/tu/zs/xc;->jb(Ljava/lang/String;)Ljava/lang/String;
+    invoke-static/range {v0 .. v0}, Lsx/if/n6/di;->t5(Ljava/lang/String;)Ljava/lang/String;
     move-result-object v0
     return-void
 .end method
