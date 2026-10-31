@@ -1,8 +1,8 @@
 #include "Dex2C.h"
 
-/* Lao/nj/ck/un;->mix64(J)J */
+/* Ltd/or/b0/ym;->mix64(J)J */
 extern "C" JNIEXPORT jlong JNICALL
-Java_ao_nj_ck_un_mix64__J(JNIEnv *env, jobject thiz, jlong p2){
+Java_td_or_b0_ym_mix64__J(JNIEnv *env, jobject thiz, jlong p2){
 jlong v0;
 jlong v1;
 v0 = (jlong)p2;

@@ -1055,6 +1055,57 @@ def read_app_package_name(decompiled_dir: str):
     return m.group(1) if m else None
 
 
+def _inject_loadlib_into_stub_clinit(stub_smali: str, work_dir: str) -> str:
+    """在桩的 <clinit> 最前面插入 System.loadLibrary("nc")。
+
+    为什么必须有这一步（2026-10-31 真机 logcat 实证的崩溃）：
+      · 桩的 md()/dn()/mix64()/keyByte() 被 _make_stub_methods_native 改成 native
+      · 真实 Application 的 <clinit> 里有被 stringenc 加密的字符串 → 调 md()
+      · 而 so 的加载点原来只在 MainActivity.<clinit>（inject-loadlib 插的），
+        Application 比 Activity 早 → 此刻 so 还没加载
+      · → UnsatisfiedLinkError: No implementation found for ...md()
+      · → 启动即闪退
+
+    为什么插在【桩自己的 <clinit>】而不是宿主 Application 的 <clinit>：
+      1. JVM 规范保证：类的静态方法被调用前，JVM 必须先完成该类初始化。
+         所以无论谁、在什么时候调 md()，这个 <clinit> 一定已经跑完 ——
+         不依赖插入位置，也不依赖宿主类形态（混淆改名也不影响）。
+      2. 覆盖所有调用点，不只 Application 那一段。
+      3. 插在宿主 <clinit> 里还可能踩「静态字段初始化器先于静态块执行」
+         的顺序陷阱（字段初始化调 md() 时 loadLibrary 还没跑）。
+
+    为什么 <clinit> 本身不会被 dex2c 抽走：filter 首行恒为 `!<clinit|init>`
+    （rules-to-filter.py / make-filter-from-apk.py 都硬写），所以它有实体可改。
+
+    ⚠️ 与 _patch_stub_seed_from_shell 的分工：
+      那个负责 SEED 从壳取（可选特性），本函数负责 so 加载（**无条件必需**）。
+      历史 bug 的成因就是这两件事被绑在一起——只有开 --stub-seed-from-shell
+      时才插 loadLibrary，于是不开就闪退。
+
+    幂等：已含 loadLibrary("nc") 时原样返回。
+    失败：<clinit> 缺失 → 返回原内容（桩骨架变了，交给上层日志/断言暴露）。
+    """
+    if 'loadLibrary' in stub_smali:
+        return stub_smali
+
+    clinit_re = re.compile(
+        r'(\.method static constructor <clinit>\(\)V\s*\n)([ \t]*)\.locals\s+(\d+)')
+    m = clinit_re.search(stub_smali)
+    if not m:
+        return stub_smali
+
+    nlocals = int(m.group(3))
+    need = max(nlocals, 1)   # 只需 v0 放 "nc" 字符串
+
+    inject = (
+        f'{m.group(1)}{m.group(2)}.locals {need}\n\n'
+        f'{m.group(2)}const-string v0, "nc"\n\n'
+        f'{m.group(2)}invoke-static {{v0}}, Ljava/lang/System;'
+        f'->loadLibrary(Ljava/lang/String;)V\n\n'
+    )
+    return stub_smali[:m.start()] + inject + stub_smali[m.end():]
+
+
 def _patch_stub_seed_from_shell(stub_smali: str, shell_jni_desc: str,
                                 work_dir: str) -> str:
     """把桩的 SEED 改成运行期从壳取（`SEED = <shellJni>->gseed()`）。
@@ -1093,19 +1144,13 @@ def _patch_stub_seed_from_shell(stub_smali: str, shell_jni_desc: str,
     nlocals = int(m.group(3))
     # 需要 2 个 wide 寄存器（v0/v1）；不够就抬 .locals
     need = max(nlocals, 2)
-    # ⚠️ 顺序不能反（真机实测踩过）：
-    #   1) loadLibrary("nc")   —— 桩的 l4/dn/mix64/keyByte 实现都在 libnc.so，
-    #                             不先加载就是 UnsatisfiedLinkError。
-    #                             业务类里没有别的注入点能兜住这件事：mark-native
-    #                             只给"被 native 化的方法所属类"插 loadLibrary，
-    #                             而桩已挪进壳 dex，业务 dex 里没有它。
-    #   2) SEED = JniBridge.gseed() —— gseed 在【壳 so】(libxixin.so)，
-    #                             壳由 ProxyComponentFactory 先加载，此处必已就绪。
+    # ⚠️ 本函数【只负责 SEED 从壳取】，不负责 so 加载 ——
+    #   loadLibrary("nc") 已由 _inject_loadlib_into_stub_clinit 无条件插入
+    #   （那是 native 方法能跑的前提，与"SEED 藏不藏"无关）。
+    #   历史 bug：这两件事曾绑在一起，只有开 --stub-seed-from-shell 才插
+    #   loadLibrary → 不开就闪退。现已解耦。
     inject = (
         f'{m.group(1)}{m.group(2)}.locals {need}\n\n'
-        f'{m.group(2)}const-string v0, "nc"\n\n'
-        f'{m.group(2)}invoke-static {{v0}}, Ljava/lang/System;'
-        f'->loadLibrary(Ljava/lang/String;)V\n\n'
         f'{m.group(2)}invoke-static {{}}, {shell_jni_desc}->gseed()J\n\n'
         f'{m.group(2)}move-result-wide v0\n\n'
         f'{m.group(2)}sput-wide v0, {STUB_DESC}->SEED:J\n'
@@ -1163,7 +1208,41 @@ def emit_stub_dex(decompiled_dir: str, out_path: str, repo_root: str,
         #
         # 只 native 化 filter 命中的 4 个方法（由 --emit-stub-filter 的固定
         # 列表决定），<clinit> 必须保留 —— 它建 L1 缓存，dex2c 没转译它。
+        # ⚠️ 返回值有两种形态（历史设计）：失败/无需改 → 原 smali 内容；
+        #    成功 → 新文件路径。用它判断"是否真的 native 化了"。
         stub_smali = _make_stub_methods_native(stub_path, work)
+        stub_methods_native = os.path.isfile(stub_smali)
+        if not stub_methods_native:
+            # 没 native 化（未走 dex2c 联动）→ 返回的是原 smali 内容，
+            # 汇编要用原始文件路径。
+            stub_smali = stub_path
+
+        # ── ⚠️ native 化后必须让桩自己加载 libnc.so（2026-10-31 修真 bug）──
+        # 因果链（真机 logcat 实证）：
+        #   1. 桩的 md()/dn()/mix64()/keyByte() 被改成 native
+        #   2. 真实 Application 的 <clinit> 里有加密字符串 → 调 md()
+        #   3. 此刻 so 尚未 loadLibrary（原来只有 MainActivity.<clinit> 插了）
+        #      → UnsatisfiedLinkError → 启动即闪退
+        # 修法：插进【桩自己的 <clinit> 最前面】。JVM 规范保证「类的静态方法
+        #   被调用前必须先完成该类初始化」，所以无论谁在什么时候调 md()，
+        #   so 一定已经加载完 —— 不依赖宿主类形态，也不依赖插入位置。
+        #
+        # 为什么不只依赖 inject-loadlib 插在 Application.<clinit>：
+        #   · 依赖宿主类形态（混淆改名后可能插不上）
+        #   · 静态字段初始化器可能先于静态块执行，插错位置照样崩
+        #   · 覆盖面只到 Application，别处（ContentProvider 等）仍可能踩到
+        if stub_methods_native:
+            with open(stub_smali, encoding='utf-8') as fp:
+                _native_src = fp.read()
+            _patched = _inject_loadlib_into_stub_clinit(_native_src, work)
+            if _patched != _native_src:
+                with open(stub_smali, 'w', encoding='utf-8') as fp:
+                    fp.write(_patched)
+                print('  🔗 桩 <clinit> 已插入 loadLibrary("nc")'
+                      '（native 方法需 so 先就绪）')
+            else:
+                print('  ⚠️ 桩 <clinit> 插入 loadLibrary 未生效'
+                      '（骨架无 <clinit>？）', file=sys.stderr)
 
         # ── SEED 改为运行期从壳取（packer 联动，可选）────────────────────
         # 为什么：桩的 4 个算法方法已 native 化进 libnc.so，此时 SEED 若还是
@@ -1179,12 +1258,17 @@ def emit_stub_dex(decompiled_dir: str, out_path: str, repo_root: str,
                     '   壳包名规则 = <应用包名>.shell（dpt 的 resolveDefaultShellPackageName）')
             shell_pkg_slash = pkg.replace('.', '/') + '/shell'
             jni_desc = 'L' + shell_pkg_slash + '/JniBridge;'
-            patched = _patch_stub_seed_from_shell(stub_smali, jni_desc, work)
-            if patched == stub_smali:
+            # ⚠️ stub_smali 此时是【文件路径】（_make_stub_methods_native 成功时
+            #    返回新文件），必须读内容再传，不能直接当源码用。
+            with open(stub_smali, encoding='utf-8') as fp:
+                _cur = fp.read()
+            patched = _patch_stub_seed_from_shell(_cur, jni_desc, work)
+            if patched == _cur:
                 raise SystemExit(
                     '❌ --stub-seed-from-shell：桩骨架里找不到 SEED 字段或 <clinit>，\n'
                     '   无法改成从壳取（骨架形态变了？）。拒绝产出"以为改了其实没改"的桩。')
-            stub_smali = patched
+            with open(stub_smali, 'w', encoding='utf-8') as fp:
+                fp.write(patched)
             print(f'  🔑 SEED 改为运行期从壳取: {jni_desc}->gseed()')
         # 驱动类：用 apktool.jar 自带的 SmaliBuilder 把单个 smali 汇编成 dex。
         # 走独立 JVM 而不是在同一进程里反射，避免污染本进程的 smali 状态。

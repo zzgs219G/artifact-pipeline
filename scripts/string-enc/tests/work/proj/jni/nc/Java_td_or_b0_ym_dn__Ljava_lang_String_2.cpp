@@ -1,8 +1,8 @@
 #include "Dex2C.h"
 
-/* Lao/nj/ck/un;->dn(Ljava/lang/String;)Ljava/lang/String; */
+/* Ltd/or/b0/ym;->dn(Ljava/lang/String;)Ljava/lang/String; */
 extern "C" JNIEXPORT jstring JNICALL
-Java_ao_nj_ck_un_dn__Ljava_lang_String_2(JNIEnv *env, jobject thiz, jstring p14){
+Java_td_or_b0_ym_dn__Ljava_lang_String_2(JNIEnv *env, jobject thiz, jstring p14){
 jobject v0 = NULL;
 jobject v1 = NULL;
 jobject v2 = NULL;
@@ -29,7 +29,7 @@ jfieldID fld0 = NULL;
 jmethodID mth0 = NULL, mth1 = NULL, mth2 = NULL, mth3 = NULL, mth4 = NULL, mth5 = NULL;
 v0 = (jobject)env->NewLocalRef(p14);
 L0:
-LOGD("0:sget-object \x76\x30\x2c\x20\x4c\x61\x6f\x2f\x6e\x6a\x2f\x63\x6b\x2f\x75\x6e\x3b\x2d\x3e\x43\x41\x43\x48\x45\x20\x4c\x6a\x61\x76\x61\x2f\x75\x74\x69\x6c\x2f\x63\x6f\x6e\x63\x75\x72\x72\x65\x6e\x74\x2f\x43\x6f\x6e\x63\x75\x72\x72\x65\x6e\x74\x48\x61\x73\x68\x4d\x61\x70\x3b");
+LOGD("0:sget-object \x76\x30\x2c\x20\x4c\x74\x64\x2f\x6f\x72\x2f\x62\x30\x2f\x79\x6d\x3b\x2d\x3e\x43\x41\x43\x48\x45\x20\x4c\x6a\x61\x76\x61\x2f\x75\x74\x69\x6c\x2f\x63\x6f\x6e\x63\x75\x72\x72\x65\x6e\x74\x2f\x43\x6f\x6e\x63\x75\x72\x72\x65\x6e\x74\x48\x61\x73\x68\x4d\x61\x70\x3b");
 {
 #define EX_HANDLE EX_UnwindBlock
 if (v1) {
@@ -38,7 +38,7 @@ env->DeleteLocalRef(v1);
 }
 jclass &clz = cls0;
 jfieldID &fld = fld0;
-D2C_RESOLVE_STATIC_FIELD(clz, fld, "ao/nj/ck/un", "CACHE", "Ljava/util/concurrent/ConcurrentHashMap;");
+D2C_RESOLVE_STATIC_FIELD(clz, fld, "td/or/b0/ym", "CACHE", "Ljava/util/concurrent/ConcurrentHashMap;");
 v1 = (jobject) env->GetStaticObjectField(clz,fld);
 D2C_CHECK_PENDING_EX;
 #undef EX_HANDLE
@@ -173,8 +173,8 @@ v3 = env->GetArrayLength((jarray) v4);
 D2C_CHECK_PENDING_EX;
 #undef EX_HANDLE
 }
-v8 = 3;
 v9 = 3;
+v8 = 3;
 LOGD("60:sub-int/2addr \x76\x30\x2c\x20\x76\x35");
 v3 = (v3 - v9);
 LOGD("62:new-array \x76\x36\x2c\x20\x76\x30\x2c\x20\x5b\x42");
@@ -212,12 +212,12 @@ v14 = (v14 * v15);
 v15 = 81985529216486895;
 LOGD("88:add-long/2addr \x76\x31\x30\x2c\x20\x76\x31\x32");
 v14 = (v14 + v15);
-LOGD("8a:invoke-static \x76\x31\x30\x2c\x20\x76\x31\x31\x2c\x20\x4c\x61\x6f\x2f\x6e\x6a\x2f\x63\x6b\x2f\x75\x6e\x3b\x2d\x3e\x6d\x69\x78\x36\x34\x28\x4a\x29\x4a");
+LOGD("8a:invoke-static \x76\x31\x30\x2c\x20\x76\x31\x31\x2c\x20\x4c\x74\x64\x2f\x6f\x72\x2f\x62\x30\x2f\x79\x6d\x3b\x2d\x3e\x6d\x69\x78\x36\x34\x28\x4a\x29\x4a");
 {
 #define EX_HANDLE EX_UnwindBlock
 jclass &clz = cls0;
 jmethodID &mid = mth2;
-D2C_RESOLVE_STATIC_METHOD(clz, mid, "ao/nj/ck/un", "mix64", "(J)J");
+D2C_RESOLVE_STATIC_METHOD(clz, mid, "td/or/b0/ym", "mix64", "(J)J");
 jvalue args[] = {{.j = (jlong) v14}};
 v16 = (jlong) env->CallStaticLongMethodA(clz, mid, args);
 D2C_CHECK_PENDING_EX;
@@ -313,7 +313,7 @@ env->CallVoidMethodA(v1, mid, args);
 D2C_CHECK_PENDING_EX;
 #undef EX_HANDLE
 }
-LOGD("dc:sget-object \x76\x31\x2c\x20\x4c\x61\x6f\x2f\x6e\x6a\x2f\x63\x6b\x2f\x75\x6e\x3b\x2d\x3e\x43\x41\x43\x48\x45\x20\x4c\x6a\x61\x76\x61\x2f\x75\x74\x69\x6c\x2f\x63\x6f\x6e\x63\x75\x72\x72\x65\x6e\x74\x2f\x43\x6f\x6e\x63\x75\x72\x72\x65\x6e\x74\x48\x61\x73\x68\x4d\x61\x70\x3b");
+LOGD("dc:sget-object \x76\x31\x2c\x20\x4c\x74\x64\x2f\x6f\x72\x2f\x62\x30\x2f\x79\x6d\x3b\x2d\x3e\x43\x41\x43\x48\x45\x20\x4c\x6a\x61\x76\x61\x2f\x75\x74\x69\x6c\x2f\x63\x6f\x6e\x63\x75\x72\x72\x65\x6e\x74\x2f\x43\x6f\x6e\x63\x75\x72\x72\x65\x6e\x74\x48\x61\x73\x68\x4d\x61\x70\x3b");
 {
 #define EX_HANDLE EX_UnwindBlock
 if (v4) {
@@ -322,7 +322,7 @@ env->DeleteLocalRef(v4);
 }
 jclass &clz = cls0;
 jfieldID &fld = fld0;
-D2C_RESOLVE_STATIC_FIELD(clz, fld, "ao/nj/ck/un", "CACHE", "Ljava/util/concurrent/ConcurrentHashMap;");
+D2C_RESOLVE_STATIC_FIELD(clz, fld, "td/or/b0/ym", "CACHE", "Ljava/util/concurrent/ConcurrentHashMap;");
 v4 = (jobject) env->GetStaticObjectField(clz,fld);
 D2C_CHECK_PENDING_EX;
 #undef EX_HANDLE
