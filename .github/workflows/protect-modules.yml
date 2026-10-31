@@ -163,6 +163,15 @@ jobs:
       #
       # secrets 缺失时 fail-fast，不静默跳过 —— 否则用户以为签了，装上去
       # 还是"未签名，无法安装"。
+      # apksigner / zipalign 在 Android SDK build-tools 里，ubuntu runner 默认
+      # 不装。用 setup-android 装一份并写进 PATH。
+      # ⚠️ 只在 sign=true 时跑，不给默认路径增加下载开销。
+      - name: 安装 Android build-tools（签名工具）
+        if: inputs.sign
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;34.0.0'
+
       - name: 签名产物（可选）
         if: inputs.sign
         env:
@@ -182,6 +191,22 @@ jobs:
             echo "   存法见 docs/CI签名.md" | tee -a build.log
             exit 1
           fi
+
+          # ── 定位 apksigner / zipalign ────────────────────────────────
+          # setup-android 把它们装在 $ANDROID_HOME/build-tools/<ver>/ 下，
+          # 但默认不在 PATH 里。显式找出目录加进 PATH，找不到就 fail-fast
+          # （否则报 "apksigner: command not found" 而看不出是没装好）。
+          BT=""
+          for cand in "$ANDROID_HOME"/build-tools/*/; do
+            if [[ -x "${cand}apksigner" ]]; then BT="$cand"; break; fi
+          done
+          if [[ -z "$BT" ]]; then
+            echo "❌ 找不到 apksigner（build-tools 未安装？）" | tee -a build.log
+            ls "$ANDROID_HOME"/build-tools/ 2>/dev/null | tee -a build.log || true
+            exit 1
+          fi
+          export PATH="$BT:$PATH"
+          echo "build-tools: $BT" | tee -a build.log
 
           # keystore 只落临时目录，跑完随 runner 销毁（不写 workspace，避免
           # 被 upload-artifact / 缓存意外带走）
