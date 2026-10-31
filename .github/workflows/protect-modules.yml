@@ -83,11 +83,7 @@ jobs:
           # 反向断言：生产包不得含 C 源码（静态库形态核心契约）
           BAD=$(find tools/nox/so-guard -maxdepth 1 -name '*.c' 2>/dev/null || true)
           [ -z "$BAD" ] || { echo "❌ nox.zip 含 C 源码（应为静态库形态）: $BAD"; exit 1; }
-
-          unzip -qo tools/nox-src.zip -d tools/nox-src
-          test -f tools/nox-src/nox/so-guard/nc_guard_boot.c \
-            || { echo "❌ nox-src.zip 缺源码 nc_guard_boot.c"; exit 1; }
-          echo "✔ 生产包（静态库）+ 源码包（回归测试）均已就位"
+          echo "✔ nox 生产包（静态库形态）已就位"
 
       - name: 安装 python 依赖(dex2c)
         run: pip3 install -r tools/Dex2C/requirements.txt

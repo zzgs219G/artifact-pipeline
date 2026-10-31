@@ -172,13 +172,46 @@ ensure_nox() {
 #   两者内容不同（一个有 .c、一个只有 .a），共用一个目录会互相覆盖，
 #   且 ensure_nox 的幂等判据会误判成"已解压"。
 # 与生产路径分离 = 测试和生产可以同时用，不互相污染。
+# ensure_nox_src [忽略] → 源码形态设施路径(stdout)
+#
+# 【仅回归测试用】。test-so-lock.sh 的职责是"源码改对了没有"：
+# T20 要解析 nc_guard_boot.c 的契约常量，T22/T23/T27/T28/T32 要真编译
+# 那 5 个 .c —— 静态库形态做不了这些。
+#
+# 源码来源优先级：
+#   1. 本地 nox 仓库（../nox/scripts/so-guard）—— 开发者机器上就有，
+#      零成本、永远是最新版，且改完 nox 立刻能验证
+#   2. tools/nox-src.zip —— 无本地仓库时的兜底（CI 或他人克隆本仓库）
+#   3. 都没有 → 报错并给出获取提示
+#
+# 为什么不再把源码包当唯一来源：本仓库与 nox 仓库都是公开的，
+# 把公开源码再打包存一份不提供任何额外保护，只是多一处要同步的副本。
+# 保留 zip 兜底是为了"只克隆 artifact-pipeline 的人也能跑测试"。
 ensure_nox_src() {
-  local dest="${1:-$ROOT/tools/nox-src}"
+  # ① 本地 nox 仓库（开发机常态）
+  local local_repo="$ROOT/../nox/scripts/so-guard"
+  local_repo="$(cd "$local_repo" 2>/dev/null && pwd)" || local_repo=""
+  if [[ -n "$local_repo" ]] && nox_guard_has_src "$local_repo"; then
+    echo "$local_repo"
+    return 0
+  fi
+
+  # ② 兜底：解压源码包
+  local dest="$ROOT/tools/nox-src"
   if nox_guard_has_src "$dest/nox/so-guard" 2>/dev/null; then
     echo "$dest/nox/so-guard"
     return 0
   fi
-  _unzip_nox "$NOX_SRC_ZIP" "$dest"
+  if [[ -f "$NOX_SRC_ZIP" ]]; then
+    _unzip_nox "$NOX_SRC_ZIP" "$dest"
+    return 0
+  fi
+
+  # ③ 都没有
+  log_err "找不到 nox 源码（回归测试需要）："
+  log_err "  · 本地仓库: $ROOT/../nox/scripts/so-guard（推荐，git clone 该仓库即可）"
+  log_err "  · 或分发包: $NOX_SRC_ZIP"
+  exit 1
 }
 
 # module_cd_run <目录> <命令...> — 在子 shell 里切目录执行，主进程 cwd 永不漂移
