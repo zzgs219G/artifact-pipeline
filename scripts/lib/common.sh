@@ -132,6 +132,16 @@ _unzip_nox() {
     log_err "  该头文件是 so 加密契约的唯一真相源，两种分发形态都必须有"
     exit 1
   }
+  # 版本标记（nox 0.4.1 起提供）：便于日志里定位"这次用的是哪版设施"。
+  # 老包没有该文件时不报错——只是打一行提示，不阻断构建。
+  # ⚠️ 必须重定向到 stderr：本函数的 stdout 是"so-guard 路径"，
+  #    日志混进 stdout 会让调用方拿到多行脏值（实测踩过：
+  #    GUARD_SRC 变成 "ℹ️ ...\n/path/so-guard"）。
+  if [[ -f "$dest/nox/VERSION" ]]; then
+    log_info "nox 分发包版本: $(cat "$dest/nox/VERSION")" >&2
+  else
+    log_warn "nox 分发包无 VERSION 文件（旧包？）" >&2
+  fi
   echo "$dest/nox/so-guard"
 }
 

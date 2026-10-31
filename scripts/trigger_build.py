@@ -37,6 +37,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -215,6 +217,36 @@ def describe_plan(cfg_json: str) -> str:
     if c.get("packer", {}).get("enabled"):
         mods.append("加壳")
     return " + ".join(mods) if mods else "（无）"
+
+
+def _report_signature(path: str, requested: bool) -> None:
+    """检查产物签名状态，明确告知「请求了但没签上」这种最危险的情况。
+
+    为什么要主动查：--sign 只是"请求"流水线签名，Secrets 缺失/密码错/
+    apksigner 缺失都会让签名步骤失败或跳过，而产物照样下载得到、照样能打开。
+    用户装不上或发现证书不对时才察觉，排查成本高。这里下载后立刻验证。
+    """
+    tool = shutil.which("apksigner")
+    if not tool:
+        if requested:
+            print("   ⚠ 本机无 apksigner，无法验证签名（产物可能未签名）")
+        return
+    r = subprocess.run([tool, "verify", path], capture_output=True, text=True)
+    if r.returncode == 0:
+        c = subprocess.run([tool, "verify", "--print-certs", path],
+                           capture_output=True, text=True)
+        fp = ""
+        for line in c.stdout.split("\n"):
+            if "SHA-256 digest" in line:
+                fp = line.split(":")[-1].strip()
+                break
+        print(f"   ✅ 已签名（证书 {fp[:16]}...）" if fp else "   ✅ 已签名")
+    elif requested:
+        print("   ❌ 请求了 --sign 但产物未签名！")
+        print("      检查 Secrets 是否配齐、流水线「签名产物」步骤日志")
+        print("      详见 docs/CI签名.md")
+    else:
+        print("   ℹ 未签名（本次未请求 --sign，符合默认契约）")
 
 
 def resolve_download_dir(preferred: str) -> str:
@@ -500,6 +532,7 @@ def main() -> int:
                                               save_as=artifact_filename(args.apk))
                         if saved:
                             print(f"   本地: {saved}")
+                            _report_signature(saved, args.sign)
             else:
                 print(f"❌ 构建失败")
                 if resp.get("error"):
