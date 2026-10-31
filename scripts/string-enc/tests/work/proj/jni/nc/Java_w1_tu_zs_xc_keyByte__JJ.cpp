@@ -1,8 +1,8 @@
 #include "Dex2C.h"
 
-/* Ltd/or/b0/ym;->keyByte(JJ)I */
+/* Lw1/tu/zs/xc;->keyByte(JJ)I */
 extern "C" JNIEXPORT jint JNICALL
-Java_td_or_b0_ym_keyByte__JJ(JNIEnv *env, jobject thiz, jlong p4, jlong p6){
+Java_w1_tu_zs_xc_keyByte__JJ(JNIEnv *env, jobject thiz, jlong p4, jlong p6){
 jlong v0;
 jlong v1;
 jlong v2;
@@ -23,12 +23,12 @@ LOGD("10:mul-long/2addr \x76\x30\x2c\x20\x76\x32");
 v2 = (v2 * v3);
 LOGD("12:add-long/2addr \x76\x34\x2c\x20\x76\x30");
 v0 = (v0 + v2);
-LOGD("14:invoke-static \x76\x34\x2c\x20\x76\x35\x2c\x20\x4c\x74\x64\x2f\x6f\x72\x2f\x62\x30\x2f\x79\x6d\x3b\x2d\x3e\x6d\x69\x78\x36\x34\x28\x4a\x29\x4a");
+LOGD("14:invoke-static \x76\x34\x2c\x20\x76\x35\x2c\x20\x4c\x77\x31\x2f\x74\x75\x2f\x7a\x73\x2f\x78\x63\x3b\x2d\x3e\x6d\x69\x78\x36\x34\x28\x4a\x29\x4a");
 {
 #define EX_HANDLE EX_UnwindBlock
 jclass &clz = cls0;
 jmethodID &mid = mth0;
-D2C_RESOLVE_STATIC_METHOD(clz, mid, "td/or/b0/ym", "mix64", "(J)J");
+D2C_RESOLVE_STATIC_METHOD(clz, mid, "w1/tu/zs/xc", "mix64", "(J)J");
 jvalue args[] = {{.j = (jlong) v0}};
 v4 = (jlong) env->CallStaticLongMethodA(clz, mid, args);
 D2C_CHECK_PENDING_EX;

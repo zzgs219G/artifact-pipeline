@@ -1258,17 +1258,14 @@ def emit_stub_dex(decompiled_dir: str, out_path: str, repo_root: str,
                     '   壳包名规则 = <应用包名>.shell（dpt 的 resolveDefaultShellPackageName）')
             shell_pkg_slash = pkg.replace('.', '/') + '/shell'
             jni_desc = 'L' + shell_pkg_slash + '/JniBridge;'
-            # ⚠️ stub_smali 此时是【文件路径】（_make_stub_methods_native 成功时
-            #    返回新文件），必须读内容再传，不能直接当源码用。
-            with open(stub_smali, encoding='utf-8') as fp:
-                _cur = fp.read()
-            patched = _patch_stub_seed_from_shell(_cur, jni_desc, work)
-            if patched == _cur:
+            # ⚠️ 该函数收【路径】、返回【路径】（内部自己 open/写文件），
+            #    不能传内容。
+            patched = _patch_stub_seed_from_shell(stub_smali, jni_desc, work)
+            if patched == stub_smali:
                 raise SystemExit(
                     '❌ --stub-seed-from-shell：桩骨架里找不到 SEED 字段或 <clinit>，\n'
                     '   无法改成从壳取（骨架形态变了？）。拒绝产出"以为改了其实没改"的桩。')
-            with open(stub_smali, 'w', encoding='utf-8') as fp:
-                fp.write(patched)
+            stub_smali = patched
             print(f'  🔑 SEED 改为运行期从壳取: {jni_desc}->gseed()')
         # 驱动类：用 apktool.jar 自带的 SmaliBuilder 把单个 smali 汇编成 dex。
         # 走独立 JVM 而不是在同一进程里反射，避免污染本进程的 smali 状态。

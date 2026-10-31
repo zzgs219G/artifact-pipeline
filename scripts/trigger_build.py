@@ -196,6 +196,9 @@ def build_config(args) -> str:
             die("stringenc 规则不能为空：用 --stringenc-rules '**' 全量，"
                 "或 --stringenc-rules-file <文件>")
         cfg["stringenc"]["rules_file"] = enc_rules
+        # 联动子选项：把桩内核也抽进 so（对应 schema 的 dex2c_stub）
+        if args.dex2c_stub:
+            cfg["stringenc"]["dex2c_stub"] = True
 
     return json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
 
@@ -425,6 +428,10 @@ def main() -> int:
     r.add_argument("--dex2c-rules", default="",
                    help="Dex2C 类名规则，一行一条。留空 = 自动抽 Manifest 主类"
                         "（需同时勾 sigcheck）。⚠️ 不要填 ** —— 整个 App 转译，上游不支持")
+    r.add_argument("--dex2c-stub", action="store_true",
+                   help="联动：把解密桩内核也抽进 libnc.so（需同时勾 dex2c + stringenc）。"
+                        "勾选后走 LINK_STUB 路径 —— 桩先注入再转译，"
+                        "解包/回编次数由 1 次变 2 次（+30~60s）")
     r.add_argument("--stringenc-rules", default="**",
                    help="字符串加密规则，默认 ** （全量）。")
     r.add_argument("--stringenc-rules-file", default="",
