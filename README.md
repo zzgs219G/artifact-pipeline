@@ -1,4 +1,4 @@
-# apk-protect-action
+# artifact-pipeline
 
 GitHub Action 形态的 APK 加固流水线：签名校验、环境检测、dex2c 转译、字符串加密、防对比混淆、so 段加密，按固定顺序编排，产物为加固后的未签名 APK。
 

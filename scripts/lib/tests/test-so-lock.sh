@@ -51,11 +51,16 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/tso.XXXXXX" 2>/dev/null \
        || mktemp -d "$HOME/.tso.XXXXXX")
-# 2026-10-30 设施独立：so 加密设施在 scripts/so-guard/，签名校验模块仍在其原位。
+# 2026-10-30 设施独立：so 加密设施曾置于 scripts/so-guard/。
+# 2026-10-31 消费方化：源码副本已删除，改由 ensure_nox 从 tools/nox.zip 解压
+# （上游 nox 仓库是唯一真相源）。签名校验模块仍在其原位。
 # 测试必须【两个根都拷】才能得到与生产一致的扁平 NDK 工程（见下方拷贝段）。
-GUARD_SRC="$ROOT/scripts/so-guard"
+# 2026-10-31 消费方化：设施源码不再存放在本仓库，统一从 tools/nox.zip 解压
+# （上游 nox 仓库是唯一真相源）。require/source 公共库以复用 ensure_nox。
+source "$ROOT/scripts/lib/common.sh"
+GUARD_SRC="$(ensure_nox_src)"   # 回归测试必须源码形态（要解析/编译 .c）
 SRC="$ROOT/scripts/sigcheck/src"
-LOCK="$ROOT/scripts/so-guard/so-section-lock.py"
+LOCK="$GUARD_SRC/so-section-lock.py"
 # 需要一个【已签名】APK（锁箱要提证书）。默认取仓库内样本，可用 TEST_APK 覆盖。
 # 为什么必须已签名：本轮 P1-a 起 k_so 由证书派生，未签名包会在锁箱阶段
 # fail-fast（"非 APK Signing Block magic"）——这是设计行为，不是 bug。
@@ -717,6 +722,11 @@ fi
 
 LAYOUT_H="$GUARD_SRC/nc_guard_layout.h"
 LOCK_PY="$LOCK"
+# T20 的 C 侧初始化检查需要 nc_guard_boot.c（argv[3]）。
+# ⚠️ 2026-10-31：此前 T20 只传 2 个参数，`boot` 恒为空字符串 → C 侧
+#    "是否用 NC_SEED_*_INIT 初始化" 那三条断言被【静默跳过】。
+#    这是"关键断言被静默跳过比失败更糟"的又一例，一并补上。
+BOOT_C_T20="$GUARD_SRC/nc_guard_boot.c"
 
 # ── T20 C↔Python 契约常数跨语言对拍 ──────────────────────────────
 # 做法：让 so-section-lock.py 自己从 layout.h 抽取（它的 _load_layout_contract），
@@ -740,7 +750,7 @@ LOCK_PY="$LOCK"
 #   本身是已登记的。T21 的职责是防"未登记/拼错的段名"，不是防"绕过宏"。
 #   抓绕过宏要靠 T20 的 C 侧检查（见下方 scan_c_copies）。
 if [ -f "$LAYOUT_H" ] && [ -f "$LOCK_PY" ]; then
-    if python3 - "$LAYOUT_H" "$LOCK_PY" >t20.log 2>&1 <<'PYT20'
+    if python3 - "$LAYOUT_H" "$LOCK_PY" "$BOOT_C_T20" "$SRC" >t20.log 2>&1 <<'PYT20'
 import importlib.util, re, sys
 layout, lockpy = sys.argv[1], sys.argv[2]
 
@@ -805,9 +815,13 @@ if boot:
 import os
 # ── 2026-10-30 设施独立：消费者分散在两个目录 ────────────────────────
 # 设施自身（so-guard/）与签名校验模块（sigcheck/src/）都含消费者文件。
-# 不能再假设 "全都 relative to lockpy/../sigcheck/src"。
+# ⚠️ 2026-10-31 消费方化：设施改由 tools/nox.zip 解压（tools/nox/so-guard），
+#    与 scripts/sigcheck/src 不再互为兄弟目录 —— 不能用 _GUARD/../sigcheck/src
+#    推导（会推成 tools/nox/sigcheck/src，文件不存在 → 5 个消费者全部"缺失"）。
+#    改由测试脚本通过 argv[4] 传入 sigcheck/src 的绝对路径。
 _GUARD = os.path.dirname(os.path.abspath(lockpy))
-_SIGCHK = os.path.normpath(os.path.join(_GUARD, '..', 'sigcheck', 'src'))
+_SIGCHK = sys.argv[4] if len(sys.argv) > 4 else os.path.normpath(
+    os.path.join(_GUARD, '..', 'sigcheck', 'src'))
 _SEARCH = [_GUARD, _SIGCHK]
 CONSUMERS = ['nc_guard_boot.c', 'nc_link.c', 'env_check.c', 'sig_check.c',
              'nc_guard_probe.c']

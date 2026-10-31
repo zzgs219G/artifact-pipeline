@@ -17,10 +17,14 @@ ndk_require() {
   require_env ANDROID_NDK_HOME "指向 NDK 根目录，由 workflow 的 setup-ndk 提供"
 }
 
-# ndk_write_mk <jni目录> [模块名=nc] — 写入统一的 Application.mk / Android.mk
+# ndk_write_mk <jni目录> [模块名=nc] [静态库目录] — 写入统一的 Application.mk / Android.mk
 # Android.mk wildcard 收 jni 目录下 *.cpp/*.c（sigcheck-only 原本自包含的 mk 逻辑）
+#
+# 第 3 参数 guard_lib_dir（可选）：so 加密设施的静态库形态（上游 nox 发 .a 时用）。
+#   给定时不编设施源码，改为链接 <dir>/lib/<abi>/libnox.a。
+#   不给时维持原行为（设施源码在 jni/ 下，由 wildcard 收进来编）。
 ndk_write_mk() {
-  local jni="$1" mod="${2:-nc}"
+  local jni="$1" mod="${2:-nc}" guard_lib_dir="${3:-}"
   cat > "$jni/Application.mk" <<'EOF'
 APP_STL := c++_static
 # NC_GUARD_SECTIONED: 让判决核心（nc_verify_t1）与签名表进 .ncx 加密段。
@@ -215,6 +219,35 @@ EOF
 LOCAL_LDFLAGS += -Wl,--version-script=\$(LOCAL_PATH)/nc_hide.map
 LOCAL_LDFLAGS += -Wl,--undefined-version
 EOF
+
+  # ── so 加密设施：静态库形态（上游 nox 只发 .a 时启用）─────────────
+  # 触发条件：调用方传了 guard_lib_dir（protect.sh 检测到包里没有 .c 时传）。
+  #
+  # ⚠️⚠️ 必须 --whole-archive，这是本方案唯一的硬约束：
+  #    ncg_boot_init 是 __attribute__((constructor(50)))，运行时由 .init_array
+  #    自动调用，**没有任何代码显式引用它**。静态库默认按需拉取成员 →
+  #    链接器判定"没人要"→ 整个 nc_guard_boot.o 被丢弃 →
+  #    .ncxh/.ncxhr/.nck/.ncks 四段连段一起消失 → 锁箱报"段不存在"。
+  #    实测（上游 nox 与本次改造记录一致）：不加时加密段 5 个塌成 1 个，
+  #    连 ncguard_unlock 都找不到。
+  #    --no-whole-archive 必须紧跟其后收尾，否则 libc/liblog 也会被全量拉入，
+  #    so 体积暴涨。
+  #
+  # ⚠️ NDK 的 $(TARGET_ARCH_ABI) 是 ndk-build 内置变量（arm64-v8a /
+  #    armeabi-v7a），天然按 ABI 选对库，不需要在 mk 里写分支。
+  if [[ -n "$guard_lib_dir" ]]; then
+    cat >> "$jni/Android.mk" <<EOF
+
+# so 加密设施（静态库形态）：按 ABI 链接预编译 libnox.a
+# 必须 --whole-archive：设施入口是 constructor，无人显式引用会被丢弃
+NOX_LIB := $guard_lib_dir/\$(TARGET_ARCH_ABI)/libnox.a
+ifeq (\$(wildcard \$(NOX_LIB)),)
+  \$(error 缺少静态库 \$(NOX_LIB) —— nox.zip 未含该 ABI 的 libnox.a，或解压不完整)
+endif
+LOCAL_LDFLAGS += -Wl,--whole-archive \$(NOX_LIB) -Wl,--no-whole-archive
+EOF
+    echo "  [mk] so 加密设施: 静态库形态 (按 ABI 选 libnox.a)"
+  fi
 
   # ⚠️ include $(BUILD_SHARED_LIBRARY) 必须放在【所有 LOCAL_* 赋值之后】。
   # 2026-10-19 CI 实证：此前 include 写在中间，后面追加的

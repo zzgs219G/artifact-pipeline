@@ -59,6 +59,31 @@ jobs:
           unzip -qo tools/dex2c.zip -d tools
           test -f tools/Dex2C/dcc.py || { echo "❌ dex2c.zip 解压产物异常"; exit 1; }
 
+      - name: 解压 nox 分发包（so 段加密设施）
+        run: |
+          # 上游 nox 仓库是 so 加密设施的【唯一真相源】，本仓库不再保存源码副本。
+          # 两个包，用途不同：
+          #   tools/nox.zip     → 生产用（静态库形态：*.h + *.py + lib/<abi>/libnox.a）
+          #   tools/nox-src.zip → 回归测试用（含 .c；test-so-lock.sh 要解析/编译源码）
+          # zip 内顶层都是 nox/（不带版本号），解压到不同目录避免互相覆盖。
+          # protect.sh / test-so-lock.sh 入口的 ensure_nox* 也会幂等解压，
+          # 此处提前做是为了让"包损坏/顶层目录名漂移"尽早炸。
+          unzip -qo tools/nox.zip -d tools
+          test -f tools/nox/so-guard/nc_guard_layout.h \
+            || { echo "❌ nox.zip 缺契约头文件 nc_guard_layout.h"; exit 1; }
+          test -f tools/nox/so-guard/lib/arm64-v8a/libnox.a \
+            || { echo "❌ nox.zip 缺 arm64-v8a 静态库"; exit 1; }
+          test -f tools/nox/so-guard/lib/armeabi-v7a/libnox.a \
+            || { echo "❌ nox.zip 缺 armeabi-v7a 静态库"; exit 1; }
+          # 反向断言：生产包不得含 C 源码（静态库形态核心契约）
+          BAD=$(find tools/nox/so-guard -maxdepth 1 -name '*.c' 2>/dev/null || true)
+          [ -z "$BAD" ] || { echo "❌ nox.zip 含 C 源码（应为静态库形态）: $BAD"; exit 1; }
+
+          unzip -qo tools/nox-src.zip -d tools/nox-src
+          test -f tools/nox-src/nox/so-guard/nc_guard_boot.c \
+            || { echo "❌ nox-src.zip 缺源码 nc_guard_boot.c"; exit 1; }
+          echo "✔ 生产包（静态库）+ 源码包（回归测试）均已就位"
+
       - name: 安装 python 依赖(dex2c)
         run: pip3 install -r tools/Dex2C/requirements.txt
 

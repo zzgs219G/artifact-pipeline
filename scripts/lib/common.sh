@@ -95,6 +95,82 @@ ensure_dex2c() {
   echo "$dest/Dex2C"
 }
 
+# ensure_nox [解压根目录，默认 "$ROOT/tools"] → 解压后 nox/so-guard 目录路径(stdout)
+#
+# so 段加密设施（nc_guard_*.c/h、so-section-lock.py、so_section_mark.py）由上游
+# nox 仓库分发，本仓库【不再保存源码副本】——上游是唯一真相源，避免双源头漂移。
+# 真源 tools/nox.zip = 上游 ../nox/ 的 dist/nox-<ver>.zip 原样（顶层 nox/，
+# 不带版本号），解压到 tools/ 得单层 tools/nox/；解压产物不进版本库，
+# 由 .gitignore 的 /tools/nox/ 忽略。
+#
+# ── 上游有两种分发形态，本函数都要认（2026-10-31 起）─────────────────
+#   ① 源码形态：so-guard/*.c 存在
+#      → protect.sh 把它们 cp 进 NDK 工程一起编译
+#   ② 静态库形态：只有 so-guard/*.h + lib/<abi>/libnox.a
+#      → protect.sh 只拷头文件，.a 由 lib-ndk.sh 用 --whole-archive 链接
+# 判别用 nc_guard_layout.h（两种形态都必有）；具体走哪条路由调用方查
+# nox_guard_has_src 决定。
+#
+# ⚠️ 幂等判据同样要用"两种形态都存在"的文件，否则切换形态后不重新解压。
+# 换版纪律：删旧解压产物再跑（幂等靠文件存在判断，旧产物在会静默用旧版）。
+NOX_ZIP="$ROOT/tools/nox.zip"           # 生产分发包（静态库形态，上游 ../nox/）
+NOX_SRC_ZIP="$ROOT/tools/nox-src.zip"   # 源码包（仅回归测试用，见 ensure_nox_src）
+
+# nox_guard_has_src <guard目录> → 0=源码形态，1=静态库形态
+nox_guard_has_src() {
+  [[ -f "$1/nc_guard_boot.c" ]] && [[ -f "$1/nc_guard_probe.c" ]]
+}
+
+# _unzip_nox <zip文件> <解压根目录> → 解压后 nox/so-guard 路径(stdout)
+_unzip_nox() {
+  local zip="$1" dest="$2"
+  require_file "$zip" "$(basename "$zip") 分发包"
+  mkdir -p "$dest"
+  unzip -qo "$zip" -d "$dest"
+  [[ -f "$dest/nox/so-guard/nc_guard_layout.h" ]] || {
+    log_err "$(basename "$zip") 解压后缺 nox/so-guard/nc_guard_layout.h: $dest"
+    log_err "  该头文件是 so 加密契约的唯一真相源，两种分发形态都必须有"
+    exit 1
+  }
+  echo "$dest/nox/so-guard"
+}
+
+# ensure_nox [解压根目录，默认 "$ROOT/tools"] → 生产设施路径(stdout)
+#
+# 生产用【静态库形态】（tools/nox.zip）：C 实现不外泄，
+# 只给头文件 + Python 工具 + lib/<abi>/libnox.a。
+# protect.sh 走这条：只拷头文件，.a 由 lib-ndk.sh 用 --whole-archive 链接。
+#
+# ⚠️ 若上游改发源码形态（tools/nox.zip 内含 .c），本函数同样工作：
+#    调用方用 nox_guard_has_src 判断，源码形态就拷 .c 编。
+ensure_nox() {
+  local dest="${1:-$ROOT/tools}"
+  if [[ -f "$dest/nox/so-guard/nc_guard_layout.h" ]]; then
+    echo "$dest/nox/so-guard"
+    return 0
+  fi
+  _unzip_nox "$NOX_ZIP" "$dest"
+}
+
+# ensure_nox_src [解压根目录，默认 "$ROOT/tools/nox-src"] → 源码形态设施路径(stdout)
+#
+# 【仅回归测试用】。test-so-lock.sh 的职责是"源码改对了没有"，
+# 其中 T20 要解析 nc_guard_boot.c 的源码常量、T22/T23/T27/T28/T32 要
+# 真编译那 5 个 .c —— 静态库形态做不了这些，所以测试必须用源码包。
+#
+# 为什么解压到 tools/nox-src/（而不是复用 tools/nox/）：
+#   两者内容不同（一个有 .c、一个只有 .a），共用一个目录会互相覆盖，
+#   且 ensure_nox 的幂等判据会误判成"已解压"。
+# 与生产路径分离 = 测试和生产可以同时用，不互相污染。
+ensure_nox_src() {
+  local dest="${1:-$ROOT/tools/nox-src}"
+  if nox_guard_has_src "$dest/nox/so-guard" 2>/dev/null; then
+    echo "$dest/nox/so-guard"
+    return 0
+  fi
+  _unzip_nox "$NOX_SRC_ZIP" "$dest"
+}
+
 # module_cd_run <目录> <命令...> — 在子 shell 里切目录执行，主进程 cwd 永不漂移
 module_cd_run() {
   local dir="$1"; shift

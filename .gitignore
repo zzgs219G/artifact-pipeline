@@ -3,6 +3,12 @@ build/
 /tools/Dex2C/
 # dpt-shell.zip 解压产物(tools/executable/ 单层,真源是 tools/dpt-shell.zip)
 /tools/executable/
+# nox.zip 解压产物(tools/nox/ 单层,真源是 tools/nox.zip;上游 nox 仓库)
+/tools/nox/
+# nox-src.zip 解压产物(tools/nox-src/ 单层,真源是 tools/nox-src.zip)
+# 源码包仅回归测试用 —— test-so-lock.sh 要解析/编译 nc_guard_*.c，
+# 静态库形态做不了（T20/T22/T23/T27/T28/T32 全依赖源码）。
+/tools/nox-src/
 .gradle/
 .idea/
 local.properties

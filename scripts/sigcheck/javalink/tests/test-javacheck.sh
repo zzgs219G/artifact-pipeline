@@ -9,6 +9,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 [[ -f "$ROOT/AGENTS.md" ]] || { echo "❌ ROOT 定位失败"; exit 1; }
+# so 加密设施源码在 tools/nox.zip（上游 nox 仓库），本仓库不再保存副本。
+source "$ROOT/scripts/lib/common.sh"
+GUARD_SRC="$(ensure_nox_src)"   # 回归测试必须源码形态（要解析/编译 .c）
 JL="$ROOT/scripts/sigcheck/javalink"
 APKTOOL="$ROOT/tools/apktool.jar"
 T="$(mktemp -d)"
@@ -347,12 +350,12 @@ emit(out + '0', bytes(32))
 PY
 cp "$ROOT/scripts/sigcheck/src/nc_link.c" "$T/ncl/"   # 引号包含优先搜源文件目录,须就位编译
 # 2026-10-20：nc_link.c 现在 include nc_guard_layout.h（契约真相源），必须一并拷
-cp "$ROOT/scripts/so-guard/nc_guard_layout.h" "$T/ncl/"
+cp "$GUARD_SRC/nc_guard_layout.h" "$T/ncl/"
 clang -O1 -DNCLINK_HOST_TEST -I"$T/ncl" \
   "$T/ncl/nc_link.c" "$JL/tests/test-nclink.c" -o "$T/ncl/test"
 "$T/ncl/test" "$T/ncl/good.bin" "$T/ncl/bad.bin"
 cp "$ROOT/scripts/sigcheck/src/nc_link.c" "$T/ncl0/"
-cp "$ROOT/scripts/so-guard/nc_guard_layout.h" "$T/ncl0/"
+cp "$GUARD_SRC/nc_guard_layout.h" "$T/ncl0/"
 clang -O1 -DNCLINK_HOST_TEST -I"$T/ncl0" \
   "$T/ncl0/nc_link.c" "$JL/tests/test-nclink.c" -o "$T/ncl/test0"
 "$T/ncl/test0" "$T/ncl/good.bin" "$T/ncl/good.bin" debug-skip

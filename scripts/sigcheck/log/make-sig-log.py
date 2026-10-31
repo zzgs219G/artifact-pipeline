@@ -198,7 +198,7 @@ def main():
     lines.append(' *      被 sig_check/env_check/nc_guard_boot 无条件包含 —— 依赖外部 TU 的符号')
     lines.append(' *      会让"单文件宿主测试"（test-lsgs-strings.sh 用 clang 单独编 lsgs_decode_test.c）')
     lines.append(' *      直接链接失败。自包含 = 任何编译单元都能独立跑通。')
-    lines.append(' * 实现照抄 scripts/so-guard/nc_guard_key.c 的 ksha256（NIST 向量钉死过），')
+    lines.append(' * 实现照抄 nox 仓库 so-guard/nc_guard_key.c 的 ksha256（NIST 向量钉死过），')
     lines.append(' * 不重写密码学原语（AGENTS.md：密码学原语必须复用仓内已验证实现）。 */')
     lines.append('#define LSG_ROTR(x,n) (((x)>>(n))|((x)<<(32-(n))))')
     lines.append('#define LSG_CH(x,y,z)  (((x)&(y))^(~(x)&(z)))')

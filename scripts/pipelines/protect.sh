@@ -87,6 +87,8 @@ source "$ROOT/scripts/lib/lib-repack.sh"
 source "$ROOT/scripts/lib/lib-ndk.sh"
 
 DEX2C_DIR=""                                  # dex2c 工具目录(--dex2c 勾选时经 ensure_dex2c 解压填充)
+GUARD_SRC=""                                  # so 加密设施目录(经 ensure_nox 从 tools/nox.zip 解压填充)
+GUARD_LIB_DIR=""                              # 静态库形态时的 lib 目录；源码形态为空
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -163,6 +165,10 @@ IN_APK="$(normalize_path "$IN_APK")"
 OUT_APK="$(normalize_path "$OUT_APK")"
 require_file "$IN_APK" "输入 APK"
 repack_require_tools
+# so 加密设施不在本仓库保存源码，统一从 tools/nox.zip 解压（上游 nox 仓库）。
+# 放在入口处一次性解压：protect.sh 的 22 处引用与 4 套回归测试都依赖该路径。
+GUARD_SRC="$(ensure_nox)"
+require_dir "$GUARD_SRC" "so 加密设施目录"
 if [[ $WANT_TRANSPILE -eq 1 ]]; then
     DEX2C_DIR="$(ensure_dex2c)"             # 从 tools/dex2c.zip 解压(幂等)并取得 Dex2C 目录
     require_dir "$DEX2C_DIR" "dex2c 工具目录"
@@ -349,7 +355,7 @@ if [[ $WANT_SIGCHECK -eq 1 ]]; then
   if [[ $WANT_TRANSPILE -eq 1 ]]; then
     mkdir -p "$WORK/project/jni/nc"
     cp "$ROOT/scripts/sigcheck/src/sig_check.c" "$WORK/project/jni/nc/"
-  cp "$ROOT/scripts/so-guard/nc_guard_layout.h" "$WORK/project/jni/nc/"
+  cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/nc/"
     cp "$ROOT/scripts/sigcheck/src/nc_link.c"   "$WORK/project/jni/nc/"
     cp "$ROOT/scripts/sigcheck/src/sig_guard2.c" "$WORK/project/jni/nc/"
     cp "$WORK/sig_hash.h"               "$WORK/project/jni/nc/"
@@ -358,7 +364,7 @@ if [[ $WANT_SIGCHECK -eq 1 ]]; then
   else
     mkdir -p "$WORK/project/jni"
     cp "$ROOT/scripts/sigcheck/src/sig_check.c" "$WORK/project/jni/"
-  cp "$ROOT/scripts/so-guard/nc_guard_layout.h" "$WORK/project/jni/"
+  cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/"
     cp "$ROOT/scripts/sigcheck/src/nc_link.c"   "$WORK/project/jni/"
     cp "$ROOT/scripts/sigcheck/src/sig_guard2.c" "$WORK/project/jni/"
     cp "$WORK/sig_hash.h"               "$WORK/project/jni/"
@@ -371,11 +377,11 @@ if [[ $WANT_ENVCHECK -eq 1 ]]; then
   if [[ $WANT_TRANSPILE -eq 1 ]]; then
     mkdir -p "$WORK/project/jni/nc"
     cp "$ROOT/scripts/sigcheck/src/env_check.c" "$WORK/project/jni/nc/"
-  cp "$ROOT/scripts/so-guard/nc_guard_layout.h" "$WORK/project/jni/nc/"
+  cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/nc/"
   else
     mkdir -p "$WORK/project/jni"
     cp "$ROOT/scripts/sigcheck/src/env_check.c" "$WORK/project/jni/"
-  cp "$ROOT/scripts/so-guard/nc_guard_layout.h" "$WORK/project/jni/"
+  cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/"
   fi
   # envcheck 未勾 sigcheck 时也要有文案表(仅勾 envcheck 的组合)
   if [[ $WANT_SIGCHECK -ne 1 ]]; then
@@ -414,28 +420,46 @@ fi
 #    设施跟随【被保护资产】走，不跟随【最先勾了哪个防御模块】走。
 if [[ -d "$WORK/project/jni/nc" || $WANT_TRANSPILE -eq 1 ]]; then
   mkdir -p "$WORK/project/jni/nc"
-  cp "$ROOT/scripts/so-guard/nc_guard_boot.c"  "$WORK/project/jni/nc/"
-  cp "$ROOT/scripts/so-guard/nc_guard_probe.c" "$WORK/project/jni/nc/"
-  cp "$ROOT/scripts/so-guard/nc_guard_jni.c"   "$WORK/project/jni/nc/"
-  cp "$ROOT/scripts/so-guard/nc_guard_key.c"   "$WORK/project/jni/nc/"
-  cp "$ROOT/scripts/so-guard/nc_guard_key.h"   "$WORK/project/jni/nc/"
-  cp "$ROOT/scripts/so-guard/nc_guard_layout.h" "$WORK/project/jni/nc/"
-  # 2026-10-30 独立化：设施自带的路径密文表（不再依赖 sig_log_data.h）
-  cp "$ROOT/scripts/so-guard/nc_guard_paths.c" "$WORK/project/jni/nc/"
-  cp "$ROOT/scripts/so-guard/nc_guard_paths.h" "$WORK/project/jni/nc/"
+  _guard_dst="$WORK/project/jni/nc"
 elif [[ -d "$WORK/project/jni" ]]; then
-  cp "$ROOT/scripts/so-guard/nc_guard_boot.c"  "$WORK/project/jni/"
-  cp "$ROOT/scripts/so-guard/nc_guard_probe.c" "$WORK/project/jni/"
-  cp "$ROOT/scripts/so-guard/nc_guard_jni.c"   "$WORK/project/jni/"
-  cp "$ROOT/scripts/so-guard/nc_guard_key.c"   "$WORK/project/jni/"
-  cp "$ROOT/scripts/so-guard/nc_guard_key.h"   "$WORK/project/jni/"
-  cp "$ROOT/scripts/so-guard/nc_guard_layout.h" "$WORK/project/jni/"
-  # 2026-10-30 独立化：设施自带的路径密文表（不再依赖 sig_log_data.h）
-  cp "$ROOT/scripts/so-guard/nc_guard_paths.c" "$WORK/project/jni/"
-  cp "$ROOT/scripts/so-guard/nc_guard_paths.h" "$WORK/project/jni/"
+  _guard_dst="$WORK/project/jni"
+else
+  _guard_dst=""
 fi
 
-ndk_write_mk "$WORK/project/jni" nc   # mk 模板唯一来源（报错十一），模块名固定 nc
+# ── 设施落地：按上游分发形态二选一（2026-10-31）──────────────────────
+#   ① 源码形态（nox 包里有 .c）→ 拷 .c + .h，由 mk 的 wildcard 编进来
+#   ② 静态库形态（nox 包里只有 .h + lib/<abi>/libnox.a）→ 只拷 .h，
+#      .a 由 ndk_write_mk 用 --whole-archive 链接
+# 两种形态产物等价；差别只在"编译发生在什么时候"。
+if [[ -n "$_guard_dst" ]]; then
+  # 头文件两种形态都要（契约真相源 + 各 .c include 的接口）
+  for _h in nc_guard_key.h nc_guard_layout.h nc_guard_paths.h; do
+    cp "$GUARD_SRC/$_h" "$_guard_dst/"
+  done
+  if nox_guard_has_src "$GUARD_SRC"; then
+    cp "$GUARD_SRC/nc_guard_boot.c"  "$_guard_dst/"
+    cp "$GUARD_SRC/nc_guard_probe.c" "$_guard_dst/"
+    cp "$GUARD_SRC/nc_guard_jni.c"   "$_guard_dst/"
+    cp "$GUARD_SRC/nc_guard_key.c"   "$_guard_dst/"
+    cp "$GUARD_SRC/nc_guard_paths.c" "$_guard_dst/"
+    GUARD_LIB_DIR=""      # 源码形态：mk 不需要额外链接 .a
+    echo "[nox] 分发形态: 源码（编进 NDK 工程）"
+  else
+    # 静态库形态：nc_guard_jni.c 提供了 JNI 自检入口，但它不在 .a 里
+    #（.a 只含 boot/probe/key/paths 四个固定源文件，见上游 make-zip-lib.sh）。
+    # 缺它不影响生产链路 —— 它只是 selftest 入口，protect 不需要。
+    GUARD_LIB_DIR="$GUARD_SRC/lib"
+    [[ -d "$GUARD_LIB_DIR" ]] || {
+      log_err "nox 分发包既无源码也无静态库: $GUARD_SRC"
+      log_err "  期望其一: $GUARD_SRC/nc_guard_boot.c 或 $GUARD_LIB_DIR/<abi>/libnox.a"
+      exit 1
+    }
+    echo "[nox] 分发形态: 静态库（链接 $GUARD_LIB_DIR/<abi>/libnox.a）"
+  fi
+fi
+
+ndk_write_mk "$WORK/project/jni" nc "$GUARD_LIB_DIR"   # mk 模板唯一来源（报错十一），模块名固定 nc
 
 # ── 通用段标记（2026-10 设施化第2层）──────────────────────────────
 # 让 dex2c 转译产物吃上 .ncx 加密：用规则把 JNI 函数打进加密段。
@@ -452,7 +476,7 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   JNI_HDRS=$(grep -rlE 'JNIEXPORT[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+JNICALL' \
              "$WORK/project/jni" --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null | wc -l)
 
-  python3 "$ROOT/scripts/so-guard/so_section_mark.py" "$WORK/project/jni" \
+  python3 "$GUARD_SRC/so_section_mark.py" "$WORK/project/jni" \
     --rule dex2c-jni \
     --exclude nc_guard_jni.c \
     --exclude-func ncVerify \
@@ -477,7 +501,7 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   if [[ $JNI_HDRS -gt 0 && $MARKED -eq 0 ]]; then
     echo "❌ 检出 $JNI_HDRS 个含 JNIEXPORT 的源文件，但段标记命中 0" >&2
     echo "   → dex2c 的 writer.py 可能改了函数头格式，规则已脱节" >&2
-    echo "   → 修 scripts/so-guard/so_section_mark.py 的 dex2c-jni 规则，不许静默放行" >&2
+    echo "   → 修 nox 仓库的 so_section_mark.py dex2c-jni 规则，不许静默放行" >&2
     exit 1
   fi
   echo "[mark] 完成：$MARKED 处 .ncx 标记（含探针与转译函数）"
@@ -627,7 +651,7 @@ if [[ -d "$WORK/project/libs" ]]; then
       echo "  [lock] ⚠️ 未发现 .ncxr 段（NC_GUARD_SECTIONED 未定义？）" >&2
       echo "  [lock]    → 签名判定函数已加密，但 SIG_SALT/SIG_HASH_STORED 仍在明文" >&2
     fi
-    python3 "$ROOT/scripts/so-guard/so-section-lock.py" "$so" "$so" \
+    python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" \
       --section "$_SECTIONS" --from-apk "$IN_APK" \
       2>&1 | sed 's/^/  [lock] /' || {
       echo "❌ .ncx 锁箱失败（段未标记？cert/包名提取失败？）——so 静态加固未生效" >&2
@@ -641,7 +665,7 @@ if [[ -d "$WORK/project/libs" ]]; then
     # ⚠️ 二级失败必须 fail-fast：stub 见 slot 无 magic 会静默放行，
     #    head 段保持明文 → 自解谜没发生 → 静态攻击者照旧读 unlock 本体。
     #    那种"以为防了其实没防"的静默降级正是本机制最该避免的。
-    python3 "$ROOT/scripts/so-guard/so-section-lock.py" "$so" "$so" --lock-head \
+    python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" --lock-head \
       2>&1 | sed 's/^/  [lock2] /' || {
       echo "❌ 二级锁箱失败（.ncxh 未标记？符号被 strip？）——unlock 本体仍可静态读取" >&2
       exit 1

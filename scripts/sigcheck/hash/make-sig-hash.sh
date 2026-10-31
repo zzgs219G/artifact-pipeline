@@ -129,18 +129,29 @@ fi
   #    结果是一个空段名被原样 echo 进头文件，锁箱阶段才炸。
   #    2026-10-20 实测：只靠 set -e 时 exit=2 但报的是 sed 的错，
   #    排查者看不出"契约真相源缺失"这个根因。
-  # ⚠️ 2026-10-30 设施独立：layout.h 从 sigcheck/src/ 移到 scripts/so-guard/。
-  #    仍保留旧路径作兼容候选（同 so-section-lock.py 的处理），但正常布局
-  #    下第一顺位就命中，不会走到旧路径。
+  # ⚠️ 2026-10-30 设施独立：layout.h 曾从 sigcheck/src/ 移到 scripts/so-guard/。
+  # ⚠️ 2026-10-31 消费方化：设施源码不再存放在本仓库，改从 tools/nox.zip 解压
+  #    （上游 nox 仓库是唯一真相源）。优先用 ensure_nox 的返回值；解压失败时
+  #    退回旧候选路径（保留兼容，正常布局下第一顺位即命中）。
   _LAYOUT_H=""
-  for _cand in "$SCRIPT_DIR/../../so-guard/nc_guard_layout.h" \
+  # ⚠️ ROOT 必须在 source 之前赋值：common.sh 的 ensure_nox 依赖调用方设好的
+  #    $ROOT 定位 tools/nox.zip。写在 source 之后 = ensure_nox 拿到空 $ROOT →
+  #    路径变成 "/tools/nox.zip" → 解压失败 → 静默回退旧候选 → 报"找不到 layout.h"。
+  #    （2026-10-31 实测踩过：症状是 T1 编译失败 + 生成出截断的 sig_hash.h）
+  _nox_guard=$( (
+      ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+      source "$ROOT/scripts/lib/common.sh"
+      ensure_nox ) 2>/dev/null ) || _nox_guard=""
+  for _cand in "${_nox_guard:+$_nox_guard/nc_guard_layout.h}" \
+               "$SCRIPT_DIR/../../so-guard/nc_guard_layout.h" \
                "$SCRIPT_DIR/../src/nc_guard_layout.h"; do
     if [ -f "$_cand" ]; then _LAYOUT_H="$_cand"; break; fi
   done
   if [ -z "$_LAYOUT_H" ]; then
     echo "❌ 找不到 nc_guard_layout.h（so 加密契约的唯一真相源）" >&2
-    echo "   它应在 scripts/so-guard/ 下；缺失 = 无法对拍 C 侧与 Python 侧" >&2
-    echo "   的段名/尺寸/偏移契约，拒绝继续（否则会产出运行期 SIGILL 的包）。" >&2
+    echo "   它应由 tools/nox.zip 解压得到（tools/nox/so-guard/）；" >&2
+    echo "   缺失 = 无法对拍 C 侧与 Python 侧的段名/尺寸/偏移契约，" >&2
+    echo "   拒绝继续（否则会产出运行期 SIGILL 的包）。" >&2
     exit 1
   fi
   NC_CONST_SEC=$(sed -n 's/^#define NC_SEC_CONST[[:space:]]*"\([^"]*\)".*/\1/p' \
