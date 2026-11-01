@@ -58,6 +58,32 @@ printf '#ifndef _SIG_HASH_H_\n#define _SIG_HASH_H_\n#define SIG_HASH_LEN 32\n#de
 
 CC="$(command -v clang || command -v gcc)"
 
+# ── 编译 sig_check.c / env_check.c 需要 <android/log.h> ─────────────
+# 这是【NDK 才有的头】，普通宿主 clang 找不到。
+# 差异来源（2026-11-01，CI 暴露）：
+#   · Termux 自带 /data/data/com.termux/files/usr/include/android/log.h
+#   · 本机装了 NDK，也能找到
+#   · ubuntu CI 的宿主 clang 两者都没有 → fatal error: 'android/log.h' file not found
+# 所以：能拿到 NDK 就用 NDK clang（与实际构建同源，最真实）；
+# 拿不到就退回宿主 clang（本地 Termux 仍可跑）。
+# 用 NDK 的好处：编译选项、sysroot、-llog 都与生产一致，
+# 避免"宿主能过、CI 不能"这类差异反复出现。
+NDK_ROOT="${ANDROID_NDK_HOME:-}"
+if [[ -z "$NDK_ROOT" ]]; then
+    for cand in "$HOME"/android-ndk-r*/android-ndk-r* "$HOME"/android-ndk-r*; do
+        [[ -d "$cand/toolchains/llvm/prebuilt" ]] && NDK_ROOT="$cand" && break
+    done
+fi
+if [[ -n "$NDK_ROOT" ]]; then
+    for tcdir in "$NDK_ROOT"/toolchains/llvm/prebuilt/*/bin; do
+        if [[ -x "$tcdir/clang" ]]; then
+            CC="$tcdir/clang --target=aarch64-linux-android21"
+            echo "  （使用 NDK clang: $tcdir）"
+            break
+        fi
+    done
+fi
+
 # ── ④ 解码正确性(lsgs_decode_test.c,26 条 LSGS 与明文期望逐字节比对) ──
 if $CC -O2 -DSIGCHECK_HOST_TEST -I"$T" "$HERE/lsgs_decode_test.c" -o "$T/deco" 2>"$T/d.log"; then
     DR="$("$T/deco" 2>&1 || true)"
