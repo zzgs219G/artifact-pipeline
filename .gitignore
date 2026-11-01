@@ -24,3 +24,4 @@ dist/
 # stringenc 测试的临时工作目录（test-link-dex2c.sh 首行 rm -rf work 重建）。
 # 2026-11-01 前它的产物被误提交入库，导致每次跑测试都产生随机桩名的脏 diff。
 /scripts/string-enc/tests/work/
+/.nox-tmp/

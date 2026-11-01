@@ -124,27 +124,33 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: pip3 install -r tools/Dex2C/requirements.txt
 
-      # so 层测试（test-so-lock / test-lsgs-strings / test-javacheck）要源码形态
+      # so 层测试（test-so-lock / test-lsgs-strings）要源码形态
       # （grep 契约常量 + 真编译那 5 个 .c），tools/nox.zip 是静态库形态。
       # 锁 tag = tools/工具包版本.md 登记的 v0.4.2：不锁的话 nox 的 main 一变
       # 就会出现"测的是新版、用的是旧版"的莫名红。
-      # clone 到 runner 的 workspace 之外（../nox），跑完随 runner 销毁，
-      # 不写进本仓库、不产生 git 变更。
+      #
+      # ⚠️ actions/checkout 的 path 不允许 `../`（会报
+      #    "Repository path ... is not under ..."）。所以先 clone 到仓库内
+      #    临时目录，再 mv 到同级 ../nox —— 测试脚本的 ensure_nox_src 认的是
+      #    <repo>/../nox/scripts/so-guard。临时目录用完即删，不进 git
+      #    （已在 .gitignore 里忽略 .nox-tmp）。
       - name: 检出 nox 源码（锁 tag，供 so 层测试）
         if: steps.scope.outputs.code == 'true'
         uses: actions/checkout@v4
         with:
           repository: zzgs219G/nox
           ref: v0.4.2
-          path: ../nox
+          path: .nox-tmp
           fetch-depth: 1
 
-      - name: 确认 nox 源码就位
+      - name: 把 nox 源码放到同级目录
         if: steps.scope.outputs.code == 'true'
         run: |
+          mv .nox-tmp ../nox
           test -f ../nox/scripts/so-guard/nc_guard_boot.c \
             || { echo "❌ nox 源码未就位（so 层测试需要 .c 形态）"; exit 1; }
           echo "✔ nox 源码: $(cat ../nox/VERSION 2>/dev/null || echo '(无 VERSION)')"
+          echo "  so-guard: $(ls ../nox/scripts/so-guard/*.c | wc -l) 个 .c"
 
       - name: 文档路径有效性（改文档必跑）
         if: steps.scope.outputs.docs == 'true'
@@ -209,10 +215,6 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/lib/tests/test-so-lock.sh
 
-      - name: 签名校验完整链路（sig_check.c，真实 APK）
-        if: steps.scope.outputs.code == 'true'
-        run: bash scripts/sigcheck/tests/test-sig-verify.sh
-
       - name: sig_guard2 派生对拍
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/sigcheck/tests/test-sig-guard2.sh
@@ -224,6 +226,12 @@ jobs:
       - name: LSGS 特征串密文化（12 断言）
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/sigcheck/tests/test-lsgs-strings.sh
+
+      # ⚠️ test-sig-verify.sh 未接入：它需要一份【已签名的真实 APK】作为夹具，
+      # 而 CI 干净树里没有。该脚本在没有 APK 时是 `skip + exit 0`——
+      # 接进来等于"0 通过 0 失败"，是假绿，比不接更糟。
+      # 待办：把一份小体积已签名 APK 作为夹具入库（<200KB），再接入。
+      # 见 AGENTS.md「冻结资产的能力边界」。
 
   protect:
     runs-on: ubuntu-24.04
