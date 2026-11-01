@@ -69,6 +69,25 @@ for must in ("scripts/anti-diff/tests/test-smoke.sh",
 # 再大说明该拆 job 了（例如把 so 层单独拆出去并行）。
 assert d["jobs"]["test"].get("timeout-minutes", 99) <= 25, \
     "test job 超过 25 分钟，应拆 job 并行（不要把全部套件压在一个 job 里）"
+
+# ── 环境唯一真相：test 与 protect 必须 uses 同一个 composite action ──
+# 这条是本仓库最贵的一课：最初 test job 照着 protect job 手工抄环境步骤，
+# 连抄 5 次红（漏 pip 依赖 / 漏解压 dex2c / 抄了不存在的 nox tag）。
+# 抄一遍 = 制造第二份真相，两边必然漂移。谁再手写环境步骤，这条断言会红。
+def _uses(step):
+    return step.get("uses", "")
+
+for jname in ("test", "protect"):
+    jsteps = d["jobs"][jname]["steps"]
+    uses_list = [_uses(s) for s in jsteps]
+    assert "./.github/actions/setup-toolchain" in uses_list, \
+        f"{jname} job 必须 uses 共用的 setup-toolchain action（不许手写环境步骤）"
+    # 环境步骤不得在 job 里手写：解压 dex2c/nox、pip install 都归 action 管
+    runs = "\n".join((s.get("run") or "") for s in jsteps)
+    for forbidden in ("unzip -qo tools/dex2c.zip", "unzip -qo tools/nox.zip",
+                      "pip3 install -r tools/Dex2C/requirements.txt"):
+        assert forbidden not in runs, \
+            f"{jname} job 里出现了手写的环境步骤 `{forbidden}` —— 应放进 setup-toolchain"
 print("yaml OK:", list(inputs))
 EOF
 else
