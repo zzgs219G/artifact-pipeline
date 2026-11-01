@@ -5,9 +5,8 @@ build/
 /tools/executable/
 # nox.zip 解压产物(tools/nox/ 单层,真源是 tools/nox.zip;上游 nox 仓库)
 /tools/nox/
-# nox-src.zip 解压产物(tools/nox-src/ 单层,真源是 tools/nox-src.zip)
-# 源码包仅回归测试用 —— test-so-lock.sh 要解析/编译 nc_guard_*.c，
-# 静态库形态做不了（T20/T22/T23/T27/T28/T32 全依赖源码）。
+# 历史残留：nox-src.zip 已于 b655f0a 删除（回归测试改读 ../nox 仓库源码）。
+# 这条忽略规则仅用于清掉旧克隆里残留的解压目录，勿再写入新文件。
 /tools/nox-src/
 .gradle/
 .idea/

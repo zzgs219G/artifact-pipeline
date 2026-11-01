@@ -18,6 +18,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 SRC="$ROOT/scripts/sigcheck/src/sig_guard2.c"
 
+# sig_guard2.c 在 2026-10-30 独立化后 include 了 nc_guard_layout.h（so 加密契约
+# 唯一真相源，位于上游 nox 仓库）。宿主编译必须能找到它，否则本测试恒红。
+# 用 ensure_nox_src 统一取路径（与 test-so-lock.sh / test-lsgs-strings.sh 同源，
+# 不写死 ../nox 绝对路径）。缺 nox 仓库时它会 exit 1 并给出 clone 提示。
+# shellcheck source=../../lib/common.sh
+source "$ROOT/scripts/lib/common.sh"
+GUARD_SRC="$(ensure_nox_src)"
+
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 
@@ -85,7 +93,8 @@ int main(void) {
 C
 
 CC="$(command -v clang || command -v gcc)"
-if ! $CC -O1 -DSIGGUARD2_HOST_TEST -I"$T" "$T/guard2_test.c" "$T/main.c" -o "$T/t" 2>"$T/cc.log"; then
+if ! $CC -O1 -DSIGGUARD2_HOST_TEST -I"$T" -I"$GUARD_SRC" \
+        "$T/guard2_test.c" "$T/main.c" -o "$T/t" 2>"$T/cc.log"; then
     echo "编译失败:"; head -20 "$T/cc.log"; bad "编译 sig_guard2.c"
 else
     ok "编译通过(clang/gcc, 宿主端)"
@@ -114,7 +123,7 @@ int main(void) {
     return 0;
 }
 C
-$CC -O1 -DSIGGUARD2_HOST_TEST -I"$T" "$T/guard2_test.c" "$T/neg.c" -o "$T/tn" 2>"$T/neg.log" || true
+$CC -O1 -DSIGGUARD2_HOST_TEST -I"$T" -I"$GUARD_SRC" "$T/guard2_test.c" "$T/neg.c" -o "$T/tn" 2>"$T/neg.log" || true
 if [[ -x "$T/tn" ]]; then
     RN="$("$T/tn" 2>&1 || true)"
     if [[ "$RN" == "DIFF" ]]; then

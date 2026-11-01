@@ -15,6 +15,12 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+# nc_guard_layout.h（so 加密契约唯一真相源）在 2026-10-30 独立化后位于上游
+# nox 仓库；sig_check.c 会 include 它，宿主编译必须能找到。
+# 与 test-so-lock.sh / test-lsgs-strings.sh 同源，不写死 ../nox 绝对路径。
+# shellcheck source=../../lib/common.sh
+source "$ROOT/scripts/lib/common.sh"
+GUARD_SRC="$(ensure_nox_src)"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/tsv.XXXXXX" 2>/dev/null || mktemp -d "$HOME/.tsv.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
@@ -40,7 +46,7 @@ echo "  APK: $TEST_APK"
 command -v clang >/dev/null || { skip "无 clang"; exit 0; }
 
 SRC="$ROOT/scripts/sigcheck/src"
-cp "$SRC/sig_check.c" "$SRC/env_check.c" "$SRC/nc_guard_layout.h" "$WORK/"
+cp "$SRC/sig_check.c" "$SRC/env_check.c" "$GUARD_SRC/nc_guard_layout.h" "$WORK/"
 # sig_hash.h 由生成器产出（两张表含真值），本测试同时充当"生成器→C 侧"对拍
 bash "$ROOT/scripts/sigcheck/hash/make-sig-hash.sh" "$TEST_APK" "$WORK/sig_hash.h" \
     >"$WORK/sighash.log" 2>&1 || { bad "sig_hash.h 生成失败"; tail -3 "$WORK/sighash.log" >&2; exit 1; }

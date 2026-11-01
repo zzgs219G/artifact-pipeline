@@ -18,9 +18,18 @@
 | Secret 名 | 内容 | 怎么生成 |
 |---|---|---|
 | `KEYSTORE_BASE64` | keystore 文件 base64 | `base64 -w0 release.keystore` |
-| `KEYSTORE_PASSWORD` | keystore 密码 | 你自己的 |
+| `KEYSTORE_PASSWORD` | **store 密码**（keystore 容器密码） | 你自己的 |
 | `KEY_ALIAS` | key 别名 | 你自己的 |
-| `KEY_PASSWORD` | key 密码 | 通常与 keystore 密码相同 |
+| `KEY_PASSWORD` | **key 密码**（该别名对应的私钥密码） | 你自己的 |
+
+> ⚠️ **store 密码与 key 密码不一定相同**，实测踩过：两个填成同一个 →
+> `java.security.UnrecoverableKeyException: Cannot recover key`。
+>
+> 陷阱在于 `keytool -list -storepass <store密码>` 能通过——它**只校验 store 密码、
+> 不校验 key 密码**，所以"keystore 载入成功"不等于"密码正确"，
+> 真正的失败要等到 `apksigner sign` 才暴露。
+>
+> 不确定时先本地验一次：`keytool -list -keystore release.keystore`（会分别问两个密码）。
 
 ## ⚠️ keystore 必须与上传 APK 同源
 

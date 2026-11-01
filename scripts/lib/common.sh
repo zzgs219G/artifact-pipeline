@@ -114,7 +114,6 @@ ensure_dex2c() {
 # ⚠️ 幂等判据同样要用"两种形态都存在"的文件，否则切换形态后不重新解压。
 # 换版纪律：删旧解压产物再跑（幂等靠文件存在判断，旧产物在会静默用旧版）。
 NOX_ZIP="$ROOT/tools/nox.zip"           # 生产分发包（静态库形态，上游 ../nox/）
-NOX_SRC_ZIP="$ROOT/tools/nox-src.zip"   # 源码包（仅回归测试用，见 ensure_nox_src）
 
 # nox_guard_has_src <guard目录> → 0=源码形态，1=静态库形态
 nox_guard_has_src() {
@@ -162,33 +161,22 @@ ensure_nox() {
   _unzip_nox "$NOX_ZIP" "$dest"
 }
 
-# ensure_nox_src [解压根目录，默认 "$ROOT/tools/nox-src"] → 源码形态设施路径(stdout)
-#
-# 【仅回归测试用】。test-so-lock.sh 的职责是"源码改对了没有"，
-# 其中 T20 要解析 nc_guard_boot.c 的源码常量、T22/T23/T27/T28/T32 要
-# 真编译那 5 个 .c —— 静态库形态做不了这些，所以测试必须用源码包。
-#
-# 为什么解压到 tools/nox-src/（而不是复用 tools/nox/）：
-#   两者内容不同（一个有 .c、一个只有 .a），共用一个目录会互相覆盖，
-#   且 ensure_nox 的幂等判据会误判成"已解压"。
-# 与生产路径分离 = 测试和生产可以同时用，不互相污染。
-# ensure_nox_src [忽略] → 源码形态设施路径(stdout)
+# ensure_nox_src → 源码形态设施路径(stdout)
 #
 # 【仅回归测试用】。test-so-lock.sh 的职责是"源码改对了没有"：
 # T20 要解析 nc_guard_boot.c 的契约常量，T22/T23/T27/T28/T32 要真编译
 # 那 5 个 .c —— 静态库形态做不了这些。
 #
-# 源码来源优先级：
-#   1. 本地 nox 仓库（../nox/scripts/so-guard）—— 开发者机器上就有，
-#      零成本、永远是最新版，且改完 nox 立刻能验证
-#   2. tools/nox-src.zip —— 无本地仓库时的兜底（CI 或他人克隆本仓库）
-#   3. 都没有 → 报错并给出获取提示
+# 源码来源：只有本地 nox 仓库（../nox/scripts/so-guard）一处。
+#   开发者机器上就有，零成本、永远是最新版，且改完 nox 立刻能验证。
 #
-# 为什么不再把源码包当唯一来源：本仓库与 nox 仓库都是公开的，
-# 把公开源码再打包存一份不提供任何额外保护，只是多一处要同步的副本。
-# 保留 zip 兜底是为了"只克隆 artifact-pipeline 的人也能跑测试"。
+# 【2026-11 删除 tools/nox-src.zip 兜底】
+#   该源码包已在 b655f0a 删除（本仓库与 nox 都公开，把公开源码再打包存一份
+#   不提供额外保护，只是多一处要同步的副本）。代码里留着 zip 分支就是
+#   "文档/代码说有兜底、实际包不存在"的死路径 —— 比直接报错更难查。
+#   代价（如实）：只克隆本仓库的人跑不了 test-so-lock.sh，必须先 clone nox。
+#   这里刻意不缓存副本：验证"nox 源码改对了没有"必须读上游真身。
 ensure_nox_src() {
-  # ① 本地 nox 仓库（开发机常态）
   local local_repo="$ROOT/../nox/scripts/so-guard"
   local_repo="$(cd "$local_repo" 2>/dev/null && pwd)" || local_repo=""
   if [[ -n "$local_repo" ]] && nox_guard_has_src "$local_repo"; then
@@ -196,21 +184,9 @@ ensure_nox_src() {
     return 0
   fi
 
-  # ② 兜底：解压源码包
-  local dest="$ROOT/tools/nox-src"
-  if nox_guard_has_src "$dest/nox/so-guard" 2>/dev/null; then
-    echo "$dest/nox/so-guard"
-    return 0
-  fi
-  if [[ -f "$NOX_SRC_ZIP" ]]; then
-    _unzip_nox "$NOX_SRC_ZIP" "$dest"
-    return 0
-  fi
-
-  # ③ 都没有
-  log_err "找不到 nox 源码（回归测试需要）："
-  log_err "  · 本地仓库: $ROOT/../nox/scripts/so-guard（推荐，git clone 该仓库即可）"
-  log_err "  · 或分发包: $NOX_SRC_ZIP"
+  log_err "找不到 nox 源码（回归测试需要）：$ROOT/../nox/scripts/so-guard"
+  log_err "  这是本仓库唯一接受的设施源码来源（tools/nox.zip 是静态库形态，无 .c）。"
+  log_err "  获取方式：git clone https://github.com/zzgs219G/nox 到本仓库同级目录"
   exit 1
 }
 
