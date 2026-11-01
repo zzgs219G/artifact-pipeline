@@ -59,11 +59,17 @@ def die(msg: str) -> "None":
 
 def http(method: str, url: str, token: str, body=None, raw: bytes = None,
          content_type: str = "application/json", timeout: int = 60,
-         retries: int = 3):
+         retries: int = 3, fatal: bool = True):
     """发一个请求，返回 (status, parsed_json_or_text)。
 
     网络层错误（连接重置/超时）自动重试 —— 移动网络下 Termux 出口不稳，
     实测单次轮询就可能 Connection reset by peer。业务错误（4xx/5xx）不重试。
+
+    fatal=True（默认）：重试耗尽后 die()（触发/上传这类"一次性"请求，失败即无意义）。
+    fatal=False：重试耗尽后返回 (None, None)，把"这次没拿到"交给调用方决定。
+      ⚠️ 轮询类请求必须用 False：轮询本来就是高频重复请求，单次网络抖动
+      不该终止整个等待（实测踩过：构建 122s 已成功，但轮询撞上一次握手超时
+      → die() → 用户拿不到产物，必须重新上传 4.8MB 重跑）。
     """
     data = None
     # ⚠️ 必须带 User-Agent：Cloudflare 的 Browser Integrity Check 会把
@@ -106,6 +112,8 @@ def http(method: str, url: str, token: str, body=None, raw: bytes = None,
                       file=sys.stderr)
                 time.sleep(wait)
                 continue
+    if not fatal:
+        return None, None
     die(f"请求失败 {method} {url}: {last_err}")
 
 
@@ -131,8 +139,9 @@ def build_config(args) -> str:
     """
     any_switch = any([args.sigcheck, args.dex2c, args.stringenc,
                       args.antidiff, args.envcheck, args.packer])
-
     if args.all:
+        # 「全量」= 所有保护强度项全开，含 --dex2c-stub（桩内核也抽进 so）。
+        # 2026-11-01 用户定：全模块就该勾满；+30~60s 的代价不该写进「全量」预设。
         on = dict(sigcheck=True, dex2c=True, stringenc=True,
                   antidiff=True, envcheck=True, packer=True)
     elif args.std:
@@ -197,7 +206,8 @@ def build_config(args) -> str:
                 "或 --stringenc-rules-file <文件>")
         cfg["stringenc"]["rules_file"] = enc_rules
         # 联动子选项：把桩内核也抽进 so（对应 schema 的 dex2c_stub）
-        if args.dex2c_stub:
+        # --all 隐含打开它：这是保护强度项，不是可选优化
+        if args.dex2c_stub or args.all:
             cfg["stringenc"]["dex2c_stub"] = True
 
     return json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
@@ -336,24 +346,37 @@ def download_file(url: str, dest_dir: str, token: str,
     #    'ascii' codec can't encode characters）。产物文件名里带中文是常态
     #    （"41176839128_模块勾选包.apk"），所以下载前必须百分号编码。
     safe_url = urllib.parse.quote(url, safe=":/?&=%@#+")
-    req = urllib.request.Request(safe_url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as f:
-            while True:
-                chunk = r.read(65536)
-                if not chunk:
-                    break
-                f.write(chunk)
-        size = os.path.getsize(dest)
-        print(f"  ✅ 已保存（{size} 字节）")
-        return dest
-    except Exception as e:  # noqa: BLE001
-        print(f"  ⚠ 下载失败（{e}），链接仍可手动访问")
+
+    # 重试 3 次：构建已经成功、链接已经拿到，此时因网络抖动丢掉产物最不值。
+    # 实测踩过整包 6.6MB 下载到一半握手超时 —— 必须从头重试，不能放弃。
+    last_err = None
+    for attempt in range(1, 4):
+        req = urllib.request.Request(safe_url, headers=headers)
         try:
-            os.remove(dest)
-        except OSError:
-            pass
-        return ""
+            with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as f:
+                while True:
+                    chunk = r.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            size = os.path.getsize(dest)
+            print(f"  ✅ 已保存（{size} 字节）")
+            return dest
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            try:
+                os.remove(dest)      # 半截文件必须删，否则下次误判"已下载"
+            except OSError:
+                pass
+            if attempt < 3:
+                wait = 3 * attempt
+                print(f"  ⚠ 下载失败（{e}），{wait}s 后重试 {attempt}/2",
+                      file=sys.stderr)
+                time.sleep(wait)
+
+    print(f"  ⚠ 下载失败（{last_err}），链接仍可手动访问")
+    print(f"     手动下载: {url}")
+    return ""
 
 
 def upload_apk(base: str, token: str, apk_path: str, key: str, dry: bool) -> str:
@@ -447,6 +470,8 @@ def main() -> int:
                          "不可写时退回 ~/Download）")
     ap.add_argument("--no-download", action="store_true",
                     help="只打印链接，不下载产物")
+    ap.add_argument("--no-sign", action="store_true",
+                    help="即使 --all 也【不】请求签名（--all 默认带签名，本开关用于关掉）")
     ap.add_argument("--sign", action="store_true",
                     help="请求流水线用仓库 Secrets 里的 keystore 重签产物"
                          "（产出可直接安装）。需要 KEYSTORE_BASE64 / "
@@ -486,7 +511,10 @@ def main() -> int:
         "dpt_extra_args": args.dpt_extra,
         "display_name": args.name or base_name,
     }
-    if args.sign:
+    # 签名：--all 默认带上（用户口径"默认签名"= 默认带 --sign 这个参数），
+    # 其他预设仍需显式 --sign，--no-sign 可强制关掉。
+    want_sign = (args.sign or args.all) and not args.no_sign
+    if want_sign:
         payload["sign"] = True
     print(f"  workflow: {args.workflow}")
     print(f"  模块:     {describe_plan(config)}")
@@ -513,8 +541,30 @@ def main() -> int:
     print("=== 3. 等待结果 ===")
     started = time.time()
     last_status = None
+    net_fail_streak = 0          # 连续网络失败次数（拿到响应即清零）
+    MAX_NET_FAIL_STREAK = 15     # 连续 15 次 × 20s ≈ 5 分钟全网络中断才放弃
     while time.time() - started < args.timeout:
-        status, resp = http("GET", f"{args.base}/api/status/{job_id}", token)
+        # fatal=False：轮询是高频重复请求，单次网络抖动不该终止等待。
+        # 实测踩过：构建 122s 已成功，轮询撞一次握手超时 → die() → 用户拿不到
+        # 产物，必须重新上传整包重跑。
+        status, resp = http("GET", f"{args.base}/api/status/{job_id}", token,
+                            fatal=False)
+        if status is None:
+            net_fail_streak += 1
+            elapsed = int(time.time() - started)
+            print(f"  [{elapsed:>4}s] 网络中断，重试中…"
+                  f"（连续 {net_fail_streak}/{MAX_NET_FAIL_STREAK}）")
+            if net_fail_streak >= MAX_NET_FAIL_STREAK:
+                print(f"  ❌ 连续 {net_fail_streak} 次网络失败，放弃等待。")
+                print(f"     构建可能仍在跑，稍后手动查：")
+                print(f"     curl -H 'Authorization: Bearer <令牌>' "
+                      f"{args.base}/api/status/{job_id}")
+                print(f"     或打开任务页: {args.base}/jobs/{job_id}")
+                return 1
+            time.sleep(20)
+            continue
+        net_fail_streak = 0
+
         if status != 200 or not isinstance(resp, dict):
             print(f"  ⚠ 查询失败 HTTP {status}，重试...")
             time.sleep(5)
@@ -539,7 +589,7 @@ def main() -> int:
                                               save_as=artifact_filename(args.apk))
                         if saved:
                             print(f"   本地: {saved}")
-                            _report_signature(saved, args.sign)
+                            _report_signature(saved, want_sign)
             else:
                 print(f"❌ 构建失败")
                 if resp.get("error"):
