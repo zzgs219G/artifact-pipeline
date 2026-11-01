@@ -67,6 +67,8 @@ for must in ("scripts/anti-diff/tests/test-smoke.sh",
 # 冻结模块的专项回归（2026-11-01 补）：inject-loadlib 历史事故最多
 assert "scripts/inject/tests/test_inject_loadlib.py" in truns, \
     "test job 缺 inject-loadlib 回归（冻结模块，历史 14 次事故）"
+assert "scripts/repack/tests/test_mark_native.py" in truns, \
+    "test job 缺 mark-native 回归（冻结模块，历史 11 次事故）"
 # 上限 25 分钟：第一/二/三批全部接进来了（so-lock 52 项 + sigcheck 四套）。
 # 本地实测合计约 9 分钟，CI 慢些，留 2 倍余量。
 # 再大说明该拆 job 了（例如把 so 层单独拆出去并行）。

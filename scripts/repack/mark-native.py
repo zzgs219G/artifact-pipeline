@@ -41,18 +41,38 @@ SO_NAME = 'nc'
 
 def parse_compiled_methods(path):
     """解析 compiled_methods.txt → {(类名, 方法名, 原型): True}
-    行格式: Lcom/a/B;onCreate(Landroid/os/Bundle;)V"""
+    行格式: Lcom/a/B;onCreate(Landroid/os/Bundle;)V（分号后【直接】跟方法名，无 ->）
+
+    ⚠️ 必须显式拒绝带 `->` 的行。原正则 `^(L[^;]+;)([^(]+)(\\(.*\\)\\S+)$` 会把
+    `Lcom/a/B;->onCreate()V` 解析成方法名 `->onCreate` —— 不报错、也不匹配任何
+    真实方法，最终只表现为所有目标都 miss → CLI 返回 3，非常难排查。
+    用户手写规则时写 `->` 是常见误写（dex2c 的 full_name 本就没有箭头，
+    而大多数人凭 smali 直觉会加上），所以这里必须 fail-loud。
+    """
     result = set()
+    n_arrow = 0
     with open(path) as fp:
-        for line in fp:
+        for lineno, line in enumerate(fp, 1):
             line = line.strip()
             if not line:
                 continue
             m = re.match(r'^(L[^;]+;)([^(]+)(\(.*\)\S+)$', line)
             if not m:
-                print(f'⚠️ 无法解析行: {line}', file=sys.stderr)
+                print(f'⚠️ 无法解析行(第 {lineno} 行): {line}', file=sys.stderr)
                 continue
-            result.add((m.group(1), m.group(2), m.group(3)))
+            cls, name, proto = m.group(1), m.group(2), m.group(3)
+            if name.startswith('->'):
+                # 报错二隐藏坑同型：换成 dcc 期望的形态并明确告警，
+                # 而不是静默产生一个永不可能匹配的条目。
+                n_arrow += 1
+                print(f'⚠️ 第 {lineno} 行含 "->"（dex2c full_name 没有箭头）: {line}',
+                      file=sys.stderr)
+                print(f'   应为: {cls}{name[2:]}{proto}', file=sys.stderr)
+                name = name[2:]      # 去掉 '->'，按正确语义解析
+            result.add((cls, name, proto))
+    if n_arrow:
+        print(f'⚠️ 共 {n_arrow} 行含 "->"。这些行已按 dex2c 规范自动纠正；'
+              f'请检查规则文件是否是手工写成 smali 风格。', file=sys.stderr)
     return result
 
 

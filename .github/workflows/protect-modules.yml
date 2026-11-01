@@ -137,6 +137,12 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/inject/tests/test_inject_loadlib.py
 
+      # mark-native 同为冻结模块，历史 11 次事故（报错十/十三/三十九），
+      # 此前只有 test-javacheck 的 [5b/9] 间接覆盖"native 壳跳过注入"一个点。
+      - name: mark-native 壳替换（42 断言，纯 stdlib）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/repack/tests/test_mark_native.py
+
       # ── 第二批（2026-11-01）：中等耗时，仍【不需要 nox / NDK】──────
       # 这些套件只依赖 JDK + 仓库内已入库的工具（apktool.jar / d8.jar），
       # 本地实测合计约 4 分钟。放进来能覆盖 dex 层与加壳层的回归，
