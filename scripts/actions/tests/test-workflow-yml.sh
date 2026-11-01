@@ -41,8 +41,19 @@ truns = "\n".join((s.get("run") or "") for s in tjobs)
 for must in ("test-docs-paths.py", "check-schema.py",
              "test-resolve-config.py", "test-workflow-yml.sh"):
     assert must in truns, f"test job 缺 {must}（回归防线被削弱）"
-assert d["jobs"]["test"].get("timeout-minutes", 99) <= 10, \
-    "test job 必须保持轻量（≤10 分钟），否则会被认为浪费流水线"
+# 第二批（2026-11-01）：stringenc/anti-diff/packer，不需要 nox/NDK
+for must in ("scripts/anti-diff/tests/test-smoke.sh",
+             "scripts/packer/tests/test-packer.sh",
+             "scripts/string-enc/tests/test-encrypt-smoke.sh",
+             "scripts/string-enc/tests/test-structure-resume.sh",
+             "scripts/string-enc/tests/test-stub-randomize.sh",
+             "scripts/string-enc/tests/test-keystream-crosscheck.sh",
+             "scripts/string-enc/tests/test-link-dex2c.sh"):
+    assert must in truns, f"test job 缺第二批套件 {must}（回归防线被削弱）"
+# 上限 15 分钟：第一批秒级 + 第二批（stringenc/anti-diff/packer，本地约 4 分钟）
+# 留 2 倍余量。再大说明把 11 分钟的重型套件（需 nox/NDK）也塞进来了，应另开 job。
+assert d["jobs"]["test"].get("timeout-minutes", 99) <= 15, \
+    "test job 必须保持轻量（≤15 分钟），重型套件应另开 job"
 print("yaml OK:", list(inputs))
 EOF
 else

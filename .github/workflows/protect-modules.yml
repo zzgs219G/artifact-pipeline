@@ -46,7 +46,9 @@ jobs:
   # 与 protect 并行，不拖慢出包。
   test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    # 第一批（秒级检查）+ 第二批（stringenc/anti-diff/packer，本地实测约 4 分钟）
+    # 留 2 倍余量：CI runner 比本地 Termux 慢，首次还要下载依赖。
+    timeout-minutes: 15
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -96,6 +98,38 @@ jobs:
       - name: dex 版本头 save/restore
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/repack/tests/test-patch-dex-version.sh
+
+      # ── 第二批（2026-11-01）：中等耗时，仍【不需要 nox / NDK】──────
+      # 这些套件只依赖 JDK + 仓库内已入库的工具（apktool.jar / d8.jar），
+      # 本地实测合计约 4 分钟。放进来能覆盖 dex 层与加壳层的回归，
+      # 而 Bug 1/Bug 2 那类"构建绿装机崩"的事故面主要在 stringenc/packer。
+      - name: anti-diff 冒烟（含报错三十一~四十一回归）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/anti-diff/tests/test-smoke.sh
+
+      - name: packer 冒烟（26 项，含 schema→arg 契约）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/packer/tests/test-packer.sh
+
+      - name: stringenc 冒烟（27 断言 + apktool 真汇编）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/string-enc/tests/test-encrypt-smoke.sh
+
+      - name: stringenc 续跑 + 桩结构不变量
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/string-enc/tests/test-structure-resume.sh
+
+      - name: stringenc 桩随机化（6 断言组）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/string-enc/tests/test-stub-randomize.sh
+
+      - name: stringenc 密钥流双端对拍（468 例）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/string-enc/tests/test-keystream-crosscheck.sh
+
+      - name: stringenc↔dex2c 联动端到端（7 断言）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/string-enc/tests/test-link-dex2c.sh
 
   protect:
     runs-on: ubuntu-24.04

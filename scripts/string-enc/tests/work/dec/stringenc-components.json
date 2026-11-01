@@ -1,9 +1,0 @@
-{
-  "version": 1,
-  "classes": [
-    {
-      "desc": "Lsx/if/n6/di;",
-      "src": "smali/sx/if/n6/di.smali"
-    }
-  ]
-}

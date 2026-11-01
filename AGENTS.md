@@ -178,12 +178,12 @@ git diff                          # 自查: 只含预期改动
 >
 > | 层 | 内容 | 触发 |
 > |---|---|---|
-> | `test` job（<10s） | 文档路径有效性 / schema 结构 / resolve-config 37 用例 / workflow yml / smali 参数槽 / dex 版本头 | 按改动范围过滤，与构建**并行** |
-> | 本地手工 | so-lock(52) / stringenc 五套 / javacheck(11) / sig-verify / sig-guard2 / lsgs-strings / packer(26) / packer-wiring / anti-diff | **CI 不跑**，改动后必须本地跑 |
+> | `test` job 第一批（<10s） | 文档路径 / schema 结构 / resolve-config 37 用例 / workflow yml / smali 参数槽 / dex 版本头 | 按改动范围过滤，与构建**并行** |
+> | `test` job 第二批（~4min） | anti-diff 冒烟 / packer 26 项 / **stringenc 五套**（含 apktool 真汇编、密钥流 468 例、联动端到端） | 仅改代码时跑 |
+> | 本地手工 | so-lock(52) / javacheck(11) / sig-verify / sig-guard2 / lsgs-strings / packer-wiring | **CI 不跑**，改动后必须本地跑 |
 >
-> 重型套件不进 CI 的原因：需要 `ndk-build` + `../nox` 源码仓库 + 约 11 分钟，
-> 且这些套件验证的是"nox 仓库源码改对了没有"，与出包链路并行跑意义有限。
-> **所以"CI 绿"仍然不等于"全绿"** —— 改了冻结模块务必本地跑对应套件。
+> 重型套件不进 CI 的原因：需要 `ndk-build` + `../nox` 源码仓库 + 约 11 分钟。
+> **所以"CI 绿"仍然不等于"全绿"** —— 改了 so 层或签名校验务必本地跑对应套件。
 > 全套清单见 `docs/流程文档.md` §6.0。
 
 ## 4. 模块化契约(新增模块时遵守)
