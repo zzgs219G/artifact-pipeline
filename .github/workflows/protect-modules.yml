@@ -11,6 +11,25 @@ name: APK加固-模块勾选
 # GitHub 网页兜底：不勾任何模块时可直接在 protect_config 手填 JSON（见 configs/v1/config-schema.json）。
 
 on:
+  # push 触发：只跑 test job（回归检查）。protect job 会被 job 级 if 挡住——
+  # 它是 workflow_dispatch 专用（需要 apk_url / protect_config 必填输入）。
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'configs/**'
+      - 'docs/**'
+      - '.github/**'
+      - '*.md'
+  # PR 也跑一遍：避免直接推 main 前的改动没被检查过
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'configs/**'
+      - 'docs/**'
+      - '.github/**'
+      - '*.md'
   workflow_dispatch:
     inputs:
       apk_url:
@@ -134,6 +153,10 @@ jobs:
   protect:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    # 只在手动触发（workflow_dispatch）时出包。
+    # push / pull_request 只跑上面的 test job —— 它们没有 apk_url 与 protect_config，
+    # 跑 protect 会因必填输入为空直接失败，变成无意义的红叉。
+    if: github.event_name == 'workflow_dispatch'
     env:
       R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
       R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}

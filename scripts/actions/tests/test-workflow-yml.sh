@@ -15,6 +15,20 @@ import sys, yaml
 d = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 # PyYAML 把裸 on 解析成布尔 True 键（YAML 1.1），两种键都接受
 trigger = d.get("on", d.get(True, {}))
+
+# 「推送自动跑测试」是 2026-11-01 的核心诉求：用户的原话是
+# 「推送不就自动跑了吗」——若 on 里没有 push，test job 永远不会被触发，
+# 那整套回归检查等于没接。这一条是防回退的关键断言。
+assert "push" in trigger, "on 缺 push：推送不会自动跑 test job（回归检查形同虚设）"
+assert "pull_request" in trigger, "on 缺 pull_request"
+assert "workflow_dispatch" in trigger, "on 缺 workflow_dispatch（出包入口）"
+
+# protect 是出包 job，需要 apk_url/protect_config 必填输入，
+# 只能手动触发。push 触发的 run 若也跑它，必然因为空输入而红。
+pif = d["jobs"]["protect"].get("if", "")
+assert "workflow_dispatch" in pif, \
+    "protect job 必须用 if 限制为 workflow_dispatch（否则 push 时因缺输入必然失败）"
+
 inputs = trigger["workflow_dispatch"]["inputs"]
 assert set(inputs) == {"apk_url", "protect_config", "dpt_extra_args", "sign"}, \
     f"inputs 应为 apk_url+protect_config+dpt_extra_args+sign: {list(inputs)}"

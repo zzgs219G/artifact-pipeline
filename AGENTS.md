@@ -176,6 +176,9 @@ git diff                          # 自查: 只含预期改动
 
 > ⚠️ **CI 的测试覆盖是分层的（2026-11-01 起）**：
 >
+> **触发方式**：`push`/`pull_request` 到 `main` → **只跑 test job**（自动，无需手动点）；
+> 出包（protect job）仍是 `workflow_dispatch` 手动触发，且用 job 级 `if` 隔离。
+>
 > | 层 | 内容 | 触发 |
 > |---|---|---|
 > | `test` job 第一批（<10s） | 文档路径 / schema 结构 / resolve-config 37 用例 / workflow yml / smali 参数槽 / dex 版本头 | 按改动范围过滤，与构建**并行** |
