@@ -64,10 +64,11 @@ for must in ("scripts/anti-diff/tests/test-smoke.sh",
              "scripts/string-enc/tests/test-keystream-crosscheck.sh",
              "scripts/string-enc/tests/test-link-dex2c.sh"):
     assert must in truns, f"test job 缺第二批套件 {must}（回归防线被削弱）"
-# 上限 15 分钟：第一批秒级 + 第二批（stringenc/anti-diff/packer，本地约 4 分钟）
-# 留 2 倍余量。再大说明把 11 分钟的重型套件（需 nox/NDK）也塞进来了，应另开 job。
-assert d["jobs"]["test"].get("timeout-minutes", 99) <= 15, \
-    "test job 必须保持轻量（≤15 分钟），重型套件应另开 job"
+# 上限 25 分钟：第一/二/三批全部接进来了（so-lock 52 项 + sigcheck 四套）。
+# 本地实测合计约 9 分钟，CI 慢些，留 2 倍余量。
+# 再大说明该拆 job 了（例如把 so 层单独拆出去并行）。
+assert d["jobs"]["test"].get("timeout-minutes", 99) <= 25, \
+    "test job 超过 25 分钟，应拆 job 并行（不要把全部套件压在一个 job 里）"
 print("yaml OK:", list(inputs))
 EOF
 else

@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-24.04
     # 第一批（秒级检查）+ 第二批（stringenc/anti-diff/packer，本地实测约 4 分钟）
     # 留 2 倍余量：CI runner 比本地 Termux 慢，首次还要下载依赖。
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -94,18 +94,57 @@ jobs:
               - 'tools/**'
               - '.github/**'
 
-      # 部分测试（patch-dex-version / encrypt-strings）需要 androguard，
-      # 它由 dex2c.zip 携带。CI 的干净树里没有解压产物，必须先解压 + 装依赖。
-      # 不装会报 ModuleNotFoundError: asn1crypto（首次上 CI 实测踩到）。
-      - name: 解压 dex2c 分发包（提供 androguard）
+      # ── 环境准备：与 protect job 保持一致 ─────────────────────────
+      # 用户口径："检查的环境和构建脚本环境一样不就好了"。这是对的：
+      # 测试因"少个依赖/少个解压产物"而红，全是噪音，和代码质量无关，
+      # 还会让人逐渐无视红色的 CI（破窗效应）。
+      # 所以下面按 protect job 的顺序原样复刻。
+      # 只改文档时全部跳过（if），不浪费时间。
+      - name: 安装 Android NDK（优先预装，零下载）
+        if: steps.scope.outputs.code == 'true'
+        id: ndk
+        uses: ./.github/actions/setup-ndk
+        with:
+          ndk-version: r27d
+
+      - name: 解压 dex2c 分发包
         if: steps.scope.outputs.code == 'true'
         run: |
           unzip -qo tools/dex2c.zip -d tools
           test -f tools/Dex2C/dcc.py || { echo "❌ dex2c.zip 解压产物异常"; exit 1; }
 
-      - name: 安装 python 依赖
+      - name: 解压 nox 分发包（so 段加密设施）
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          unzip -qo tools/nox.zip -d tools
+          test -f tools/nox/so-guard/nc_guard_layout.h \
+            || { echo "❌ nox.zip 缺契约头文件 nc_guard_layout.h"; exit 1; }
+
+      - name: 安装 python 依赖(dex2c)
         if: steps.scope.outputs.code == 'true'
         run: pip3 install -r tools/Dex2C/requirements.txt
+
+      # so 层测试（test-so-lock / test-lsgs-strings / test-javacheck）要源码形态
+      # （grep 契约常量 + 真编译那 5 个 .c），tools/nox.zip 是静态库形态。
+      # 锁 tag = tools/工具包版本.md 登记的 v0.4.2：不锁的话 nox 的 main 一变
+      # 就会出现"测的是新版、用的是旧版"的莫名红。
+      # clone 到 runner 的 workspace 之外（../nox），跑完随 runner 销毁，
+      # 不写进本仓库、不产生 git 变更。
+      - name: 检出 nox 源码（锁 tag，供 so 层测试）
+        if: steps.scope.outputs.code == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: zzgs219G/nox
+          ref: v0.4.2
+          path: ../nox
+          fetch-depth: 1
+
+      - name: 确认 nox 源码就位
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          test -f ../nox/scripts/so-guard/nc_guard_boot.c \
+            || { echo "❌ nox 源码未就位（so 层测试需要 .c 形态）"; exit 1; }
+          echo "✔ nox 源码: $(cat ../nox/VERSION 2>/dev/null || echo '(无 VERSION)')"
 
       - name: 文档路径有效性（改文档必跑）
         if: steps.scope.outputs.docs == 'true'
@@ -162,6 +201,29 @@ jobs:
       - name: stringenc↔dex2c 联动端到端（7 断言）
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/string-enc/tests/test-link-dex2c.sh
+
+      # ── 第三批（2026-11-01）：so 层与签名校验，需要 nox 源码 / clang ──
+      # 这批覆盖 Bug 1 那类"so 侧缺实现导致装机闪退"的事故面，
+      # 也是历史上唯一靠真机才能发现的地方 —— 现在至少有宿主端断言兜底。
+      - name: so 段加密设施（52 项，读 ../nox 源码）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/lib/tests/test-so-lock.sh
+
+      - name: 签名校验完整链路（sig_check.c，真实 APK）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/sigcheck/tests/test-sig-verify.sh
+
+      - name: sig_guard2 派生对拍
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/sigcheck/tests/test-sig-guard2.sh
+
+      - name: env_mem_readable 跨映射判定
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/sigcheck/tests/test-mem-readable.sh
+
+      - name: LSGS 特征串密文化（12 断言）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/sigcheck/tests/test-lsgs-strings.sh
 
   protect:
     runs-on: ubuntu-24.04

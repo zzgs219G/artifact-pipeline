@@ -71,8 +71,12 @@ pat = re.compile(
     r'const-string(?:/jumbo)?\s+(?:v\d+|p\d+)\s*,\s*"([^"\n]*)"\n'
     r'\s*invoke-static(?:/range)? \{[^}\n]*\}, Lcom/nc/strdec/StrDec;->d\(')
 seen = []
-for dirpath, _d, files in os.walk(root):
-    for f in files:
+# ⚠️ 必须排序遍历：os.walk/files 的顺序由文件系统决定（不同 fs、不同机器
+#   都不同）。下游 pairs1.tsv 用 zip(ciphers, plains) 直接配对，顺序一漂就
+#   整列错位——本机绿、CI 红（2026-11-01 首次上 CI 实测：4 条密文期望/实际
+#   全部两两错位，看着像"解密算法坏了"，实际只是顺序不同）。
+for dirpath, _d, files in sorted(os.walk(root)):
+    for f in sorted(files):
         if not f.endswith('.smali'):
             continue
         src = open(os.path.join(dirpath, f), encoding='utf-8').read()
