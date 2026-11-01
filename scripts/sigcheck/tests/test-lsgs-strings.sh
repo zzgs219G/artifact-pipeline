@@ -77,15 +77,24 @@ fi
 if [[ -n "$NDK_ROOT" ]]; then
     for tcdir in "$NDK_ROOT"/toolchains/llvm/prebuilt/*/bin; do
         if [[ -x "$tcdir/clang" ]]; then
-            CC="$tcdir/clang --target=aarch64-linux-android21"
-            echo "  （使用 NDK clang: $tcdir）"
+            NDK_CC="$tcdir/clang"
+            echo "  （NDK clang: $tcdir）"
             break
         fi
     done
 fi
 
+# ⚠️ 两类编译目标，编译器不能混用：
+#   ① 【要运行的】目标（$HOST_CC）：lsgs_decode_test.c 编出来必须在本机/CI 上
+#      执行，所以必须用宿主 clang。用 NDK 编出来是 Android arm64 ELF，
+#      在 ubuntu x86_64 上直接 "cannot execute binary file: Exec format error"
+#      （2026-11-01 第九次 CI 红，就是上一版把 CC 全局换成 NDK 引起的）。
+#   ② 【只检查产物的】目标（$NDK_CC）：sig_check.c/env_check.c 要编成 so 后
+#      用 grep 扫明文，不需要运行，用 NDK 编更贴近生产（且能拿到 android/log.h）。
+HOST_CC="$(command -v clang || command -v gcc)"
+
 # ── ④ 解码正确性(lsgs_decode_test.c,26 条 LSGS 与明文期望逐字节比对) ──
-if $CC -O2 -DSIGCHECK_HOST_TEST -I"$T" "$HERE/lsgs_decode_test.c" -o "$T/deco" 2>"$T/d.log"; then
+if $HOST_CC -O2 -DSIGCHECK_HOST_TEST -I"$T" "$HERE/lsgs_decode_test.c" -o "$T/deco" 2>"$T/d.log"; then
     DR="$("$T/deco" 2>&1 || true)"
     if [[ "$DR" == *"全部 26 条 LSGS 解码逐字节正确"* ]]; then
         ok "解码对拍:26 条 LSGS 全部逐字节正确"
@@ -98,7 +107,10 @@ fi
 
 # ── ⑤ 明文不入 so(攻击者视角,严格编译模式) ──
 # sig_check.c 一并编入全家桶(实际流水线组合),外围串零泄漏一体验证
-if $CC -shared -fPIC -O2 -DSIGCHECK_HOST_TEST -DNCLINK_HOST_TEST -I"$T" \
+# NDK 走 Android target；宿主 clang 不能带 --target，用数组区分
+SO_CC=(${NDK_CC:-$HOST_CC})
+[[ -n "${NDK_CC:-}" ]] && SO_CC+=(--target=aarch64-linux-android21)
+if "${SO_CC[@]}" -shared -fPIC -O2 -DSIGCHECK_HOST_TEST -DNCLINK_HOST_TEST -I"$T" \
       "$T/sig_check.c" "$T/env_check.c" -o "$T/libtest.so" -llog -fvisibility=hidden \
       -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all \
       2>"$T/c.log"; then
