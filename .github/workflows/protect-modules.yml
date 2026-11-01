@@ -30,6 +30,73 @@ on:
         default: false
 
 jobs:
+  # ── 秒级回归（2026-11-01 新增）────────────────────────────────────
+  # 为什么需要：CI 此前【一个测试都不跑】，只做构建。代价已经付过——
+  #   test-workflow-yml.sh（10-31 加 sign input 未同步断言）与
+  #   check-schema.py（10 月删 dcc 模块未同步断言）两个测试红了几个月，
+  #   没有任何人知道，因为没有任何机器在跑它们。
+  # AGENTS.md 写着"文字警告防不住文本级重写，只有回归测试能"——但前提是
+  # 测试真的在跑。本 job 补上这一环。
+  #
+  # 本 job 只放【秒级、零外部依赖】的检查，成本几乎为零：
+  #   不装 NDK / 不装 java / 不 clone nox，跑完 <10s。
+  # 重型套件（so-lock/stringenc/javacheck 等 11 分钟）见 AGENTS.md 的待办，
+  # 需要 clone nox 仓库才能跑，另行安排。
+  #
+  # 与 protect 并行，不拖慢出包。
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # 改个文档也跑全套检查没意义，但【文档检查本身必须跑】——
+      # 它校验的就是文档里的路径是否还存在，正是文档改动的把关点。
+      - name: 检测改动范围
+        id: scope
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            docs:
+              - 'docs/**'
+              - '*.md'
+            code:
+              - 'scripts/**'
+              - 'configs/**'
+              - 'tools/**'
+              - '.github/**'
+
+      - name: 文档路径有效性（改文档必跑）
+        if: steps.scope.outputs.docs == 'true'
+        run: python3 scripts/actions/tests/test-docs-paths.py
+
+      - name: schema 结构自检
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/actions/check-schema.py configs/v1/config-schema.json
+
+      - name: schema 解释器回归（37 用例）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/actions/tests/test-resolve-config.py
+
+      - name: workflow yml 结构自检
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/actions/tests/test-workflow-yml.sh
+
+      - name: smali 参数槽计数
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/lib/tests/test-smali-params.sh
+
+      - name: dex 版本头 save/restore
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/repack/tests/test-patch-dex-version.sh
+
   protect:
     runs-on: ubuntu-24.04
     timeout-minutes: 40

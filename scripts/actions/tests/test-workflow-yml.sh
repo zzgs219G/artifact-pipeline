@@ -31,6 +31,18 @@ names = [s.get("name", "") for s in steps]
 assert any("resolve-config.py" in (s.get("run") or "") for s in steps), "缺解析 step"
 assert not any("勾选前置校验" in n for n in names), "旧前置校验 step 应删除"
 assert not any("生成 Dex2C 规则" in n for n in names), "旧规则生成 step 应删除"
+
+# ── 回归 job（2026-11-01 新增）──────────────────────────────────
+# CI 此前不跑任何测试，导致 test-workflow-yml.sh / check-schema.py 红了几个月
+# 无人知晓。这里钉住"回归 job 存在且真的在跑断言"，防止它被顺手删掉。
+assert "test" in d["jobs"], "缺 test job（回归检查；见 yml 头注）"
+tjobs = d["jobs"]["test"]["steps"]
+truns = "\n".join((s.get("run") or "") for s in tjobs)
+for must in ("test-docs-paths.py", "check-schema.py",
+             "test-resolve-config.py", "test-workflow-yml.sh"):
+    assert must in truns, f"test job 缺 {must}（回归防线被削弱）"
+assert d["jobs"]["test"].get("timeout-minutes", 99) <= 10, \
+    "test job 必须保持轻量（≤10 分钟），否则会被认为浪费流水线"
 print("yaml OK:", list(inputs))
 EOF
 else

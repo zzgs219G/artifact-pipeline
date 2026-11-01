@@ -41,8 +41,8 @@ AI 不得"顺手优化"、"重构"、"重命名"、"整理格式"。它们的正
 
 > ⚠️ **2026-11 更正**：so 段加密设施的 C 源码已整体迁到上游仓库
 > `zzgs219G/nox`（2026-10-30 独立化），本仓库**不再保存副本**。
-> 本表此前列的 `scripts/so-guard/*`、`scripts/lib/so-section-lock.py`、
-> `scripts/lib/so_section_mark.py`、`scripts/sigcheck/src/nc_jni_register.c`
+> 本表此前列的一批本仓库内路径（原来在 `scripts/so-guard/`、`scripts/lib/`
+> 与 `scripts/sigcheck/src/` 下的 nc_guard_* 与 so-section 脚本）
 > 均已不存在。跨仓库边界见 §1.1，冻结契约随源码一起搬到 nox 的 `AGENTS.md`。
 
 ### 1.0 本仓库内的冻结清单
@@ -174,9 +174,16 @@ git diff                          # 自查: 只含预期改动
 (原 `tests/run-tests.sh` 与 module-guard.yml CI 守卫已移除;改动冻结模块
 仍需自查 diff,并在 docs/变更历史.md 留痕。)
 
-> ⚠️ **注意：CI 不跑任何回归测试**。`.github/workflows/protect-modules.yml`
-> 只做构建（解包→加固→回编→上传），不执行 `scripts/**/tests/`。
-> 所以"CI 绿"只代表构建通过，不代表测试通过；改动后必须**本地**跑相关套件。
+> ⚠️ **CI 的测试覆盖是分层的（2026-11-01 起）**：
+>
+> | 层 | 内容 | 触发 |
+> |---|---|---|
+> | `test` job（<10s） | 文档路径有效性 / schema 结构 / resolve-config 37 用例 / workflow yml / smali 参数槽 / dex 版本头 | 按改动范围过滤，与构建**并行** |
+> | 本地手工 | so-lock(52) / stringenc 五套 / javacheck(11) / sig-verify / sig-guard2 / lsgs-strings / packer(26) / packer-wiring / anti-diff | **CI 不跑**，改动后必须本地跑 |
+>
+> 重型套件不进 CI 的原因：需要 `ndk-build` + `../nox` 源码仓库 + 约 11 分钟，
+> 且这些套件验证的是"nox 仓库源码改对了没有"，与出包链路并行跑意义有限。
+> **所以"CI 绿"仍然不等于"全绿"** —— 改了冻结模块务必本地跑对应套件。
 > 全套清单见 `docs/流程文档.md` §6.0。
 
 ## 4. 模块化契约(新增模块时遵守)
