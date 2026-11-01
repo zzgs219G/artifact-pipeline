@@ -203,7 +203,15 @@ def inject_loadlib_to_entrypoints(class_name, decompiled_dir, so_name='nc'):
 def find_smali_file_by_class(decompiled_dir, class_name):
     """按 smali 类名(Lcom/a/B;)定位 .smali 文件路径。
     覆盖 smali / smali_classes2 / smali_classes3 ... 多 dex 目录。
-    找不到返回 None。"""
+    找不到返回 None。
+
+    class_name 允许不带结尾分号（与 inject_loadlib_to_class /
+    inject_loadlib_to_entrypoints 的入参约定一致）。
+    ⚠️ 必须自己剥分号，不能用 class_name[1:-1]：无分号时会多剥一个字符
+    （"Lcom/deep/D"[1:-1] == "com/deep/"），导致永远找不到文件。
+    """
+    if not class_name.endswith(';'):
+        class_name += ';'
     rel = class_name[1:-1] + '.smali'          # 去掉 L 与 ; → com/demo/B.smali
     pkg_path, basename = os.path.split(rel)    # pkg_path='com/demo', basename='B.smali'
     sub_dirs = pkg_path.split(os.sep) if pkg_path else []

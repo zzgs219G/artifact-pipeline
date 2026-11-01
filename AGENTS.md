@@ -54,7 +54,7 @@ AI 不得"顺手优化"、"重构"、"重命名"、"整理格式"。它们的正
 | `scripts/sigcheck/src/nc_link.c` | Java↔Native 判决核心 `nc_verify_t1` + 心跳记录侧 + `ncVerify`/`heartbeat` 两个 JNI 入口 | `test-javacheck.sh`(判决对拍/心跳语义)。**2026-10-19**:`nc_verify_t1` 进 `.ncx` 段,两张签名表进 `.ncxr`——**`ncVerify`/`heartbeat` 两个 JNI 入口绝不能标段**(它们是 unlock 调用方,标了即死锁);段标记必须条件化 `NC_GUARD_SECTIONED && !NCLINK_HOST_TEST`(否则宿主测试读到密文假红) |
 | `scripts/sigcheck/src/sig_guard2.c` | 签名校验**第二独立线**:独立派生(`sig_guard2.h`)/独立处置路径(`syscall(tgkill)` + watchdog),与 `sig_check.c` 零代码共享 | `scripts/sigcheck/tests/test-sig-guard2.sh`(`g2_derive()` 与 `make-sig-hash.sh` 的 python 生成侧逐字节对拍) |
 | `scripts/sigcheck/hash/extract-cert-fp.py` | 证书指纹提取(纯 stdlib 解析 APK Signing Block,v3 优先退 v2) | 无独立测试;由 `test-sig-verify.sh` + `test-so-lock.sh` 间接覆盖(**已知缺口,见本节末尾「冻结资产的能力边界」**) |
-| `scripts/inject/inject-loadlib.py` | loadLibrary 插桩(幂等、多 dex、AXMPrinter 解析二进制 Manifest) | 无独立测试;由 `test-javacheck.sh` 与流水线间接覆盖(**已知缺口,见本节末尾「冻结资产的能力边界」**)。`SMALI_DIR_RE` 与 `inject-javacheck.py` / `encrypt-strings.py` 同源,改一处必须 grep 另外两处(报错七) |
+| `scripts/inject/inject-loadlib.py` | loadLibrary 插桩(幂等、多 dex、AXMPrinter 解析二进制 Manifest) | `scripts/inject/tests/test_inject_loadlib.py`（69 断言，纯 stdlib；覆盖 SMALI_DIR_RE 多 dex/双重转义、寄存器策略、双保险互不连累、幂等、Manifest LAUNCHER 解析、CLI 参数） ✅CI。`SMALI_DIR_RE` 与 `inject-javacheck.py` / `encrypt-strings.py` 同源,改一处必须 grep 另外两处(报错七)——测试里已断言两份副本一致 |
 | `scripts/repack/mark-native.py` | native 壳替换 + loadLibrary 插桩 | 无脚本级独立测试;`test-javacheck.sh` 的 [5b/9] 钉住"native 壳必须跳过注入"的行为 |
 | `tools/apktool.jar` | 解包/重打包工具(apktool 3.0.3,git 跟踪独立文件) | 严禁替换版本(历史: 报错四/五)。升级必须回归「解包后 manifest 头 4 字节仍是 `03 00 08 00`」 |
 | `scripts/sigcheck/archive/nc_guard_unlock.c` | `.ncx` 段运行期自解密的**旧实现**(历史存档) | **不进 NDK 工程、不参与任何构建**。契约逐条过期(slot 80 字节/旧 XOR_KEY/`slot^XOR_KEY` 取钥),刻意保留旧段名——读到 `.ncguard` 说明那是旧版,不要照着改。现行实现见 §1.1 |
@@ -140,8 +140,8 @@ tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
 
 | 缺口 | 说明 |
 |---|---|
-| `extract-cert-fp.py` / `inject-loadlib.py` / `mark-native.py` 无独立测试 | 三者只被 `test-sig-verify.sh` / `test-so-lock.sh` / `test-javacheck.sh` 间接覆盖。历史上报错四/五/七/三十九都出在这几个文件上，补独立测试是待办 |
-| `test-so-lock.sh` / `stringenc` 五套 / `test-javacheck.sh` **只在本地跑** | CI 从不执行它们（workflow 只跑构建，不跑测试）。"本地全绿"≠"CI 全绿" |
+| `extract-cert-fp.py` / `mark-native.py` 无独立测试 | 两者只被 `test-so-lock.sh` / `test-javacheck.sh` 间接覆盖。历史上报错十三/三十九/五十八出在这两个文件上，补独立测试是待办。（`inject-loadlib.py` 已于 2026-11-01 补齐，见冻结表） |
+| `test-javacheck.sh` / `test-protect-packer-wiring.sh` **只在本地跑** | 需要真实 `ndk-build` / `zipalign`，CI 未接。其余套件（含 so-lock 52 项、stringenc 五套）已于 2026-11-01 接入 CI |
 
 ### 为什么"100% 正确"也必须冻结
 

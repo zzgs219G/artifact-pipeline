@@ -131,6 +131,12 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/repack/tests/test-patch-dex-version.sh
 
+      # inject-loadlib 是冻结模块，历史上出过 14 次事故（53 条报错里最多），
+      # 却一直没有独立测试。纯 stdlib，秒级，无外部依赖。
+      - name: inject-loadlib 插桩（69 断言，纯 stdlib）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/inject/tests/test_inject_loadlib.py
+
       # ── 第二批（2026-11-01）：中等耗时，仍【不需要 nox / NDK】──────
       # 这些套件只依赖 JDK + 仓库内已入库的工具（apktool.jar / d8.jar），
       # 本地实测合计约 4 分钟。放进来能覆盖 dex 层与加壳层的回归，
