@@ -38,6 +38,20 @@
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
+/*
+ * _GNU_SOURCE 必须在包含 <dlfcn.h> 之前定义。
+ * 原因（2026-11-01，CI 上暴露）：路径②用 Dl_info + dladdr() 反推本 so 路径，
+ * 而 Dl_info 在 glibc 里受 __USE_GNU 保护（只在 _GNU_SOURCE 下可见）。
+ * Android bionic / Termux / macOS 默认暴露它，所以本机一直能编过；
+ * 一旦在 glibc（如 ubuntu CI、或宿主端 clang 测试）上编译就报
+ *   error: use of undeclared identifier 'Dl_info'
+ *   error: call to undeclared function 'dladdr'
+ * NDK 构建同样需要它（bionic 虽然默认可见，但定义无害且更稳）。
+ * 用 #ifndef 包裹，避免与编译器 -D_GNU_SOURCE 重复定义告警。
+ */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <dlfcn.h>
 #include <stdint.h>
 #include <sys/syscall.h>
