@@ -94,6 +94,19 @@ jobs:
               - 'tools/**'
               - '.github/**'
 
+      # 部分测试（patch-dex-version / encrypt-strings）需要 androguard，
+      # 它由 dex2c.zip 携带。CI 的干净树里没有解压产物，必须先解压 + 装依赖。
+      # 不装会报 ModuleNotFoundError: asn1crypto（首次上 CI 实测踩到）。
+      - name: 解压 dex2c 分发包（提供 androguard）
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          unzip -qo tools/dex2c.zip -d tools
+          test -f tools/Dex2C/dcc.py || { echo "❌ dex2c.zip 解压产物异常"; exit 1; }
+
+      - name: 安装 python 依赖
+        if: steps.scope.outputs.code == 'true'
+        run: pip3 install -r tools/Dex2C/requirements.txt
+
       - name: 文档路径有效性（改文档必跑）
         if: steps.scope.outputs.docs == 'true'
         run: python3 scripts/actions/tests/test-docs-paths.py
