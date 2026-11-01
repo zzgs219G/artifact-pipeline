@@ -50,6 +50,19 @@ EXTS = (
     ".json", ".smali", ".java", ".toml", ".txt",
 )
 
+# 构建期解压产物（.gitignore 忽略，本地有 / CI 无）。
+# 文档引用它们是【正常】的：它们是构建链路的一部分，只是不入库。
+# 必须在 CI 里也跳过，否则本地绿、CI 红（首次上 CI 实测撞到过：
+# tools/Dex2C/requirements.txt 与 tools/Dex2C/dcc.py 两处）。
+BUILD_ARTIFACT_PREFIXES = (
+    "tools/Dex2C/",       # dex2c.zip 解压产物
+    "tools/executable/",  # dpt-shell.zip 解压产物
+    "tools/nox/",         # nox.zip 解压产物
+    "tools/nox-src/",
+    "tools/perftrace/",
+    "build/",
+)
+
 # 反引号包裹的内容；允许带后缀说明，如 `scripts/foo.sh:12`
 TICK_RE = re.compile(r"`([^`\n]+)`")
 
@@ -125,8 +138,11 @@ def main() -> int:
             for tok in TICK_RE.findall(line):
                 if not looks_like_repo_path(tok):
                     continue
-                checked += 1
                 path = re.sub(r":\d+(-\d+)?$", "", tok.strip())
+                # 构建期解压产物：本地可能有、CI 一定没有，不算失效
+                if path.startswith(BUILD_ARTIFACT_PREFIXES):
+                    continue
+                checked += 1
                 if not os.path.exists(os.path.join(ROOT, path)):
                     bad.append(f"{rel_doc}:{lineno}  {tok}")
 
