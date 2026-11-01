@@ -93,8 +93,14 @@ int main(void) {
 C
 
 CC="$(command -v clang || command -v gcc)"
+# ⚠️ -ldl 必须显式给：sig_guard2.c 用 dladdr/Dl_info 定位本 so 路径，
+#    在 Linux（CI 的 ubuntu runner）上 dladdr 在 libdl 里，不链接就报
+#    "use of undeclared identifier 'Dl_info'" + "call to undeclared function 'dladdr'"。
+#    本机 Termux/macOS 把它并进了 libc，所以本地一直是绿的 —— 又是"本地绿、
+#    CI 红"的典型（2026-11-01 第六次 CI 红）。
+#    -Wl,--no-as-needed 保证即使当前没直接引用也不被丢弃。
 if ! $CC -O1 -DSIGGUARD2_HOST_TEST -I"$T" -I"$GUARD_SRC" \
-        "$T/guard2_test.c" "$T/main.c" -o "$T/t" 2>"$T/cc.log"; then
+        "$T/guard2_test.c" "$T/main.c" -o "$T/t" -ldl 2>"$T/cc.log"; then
     echo "编译失败:"; head -20 "$T/cc.log"; bad "编译 sig_guard2.c"
 else
     ok "编译通过(clang/gcc, 宿主端)"
@@ -123,7 +129,7 @@ int main(void) {
     return 0;
 }
 C
-$CC -O1 -DSIGGUARD2_HOST_TEST -I"$T" -I"$GUARD_SRC" "$T/guard2_test.c" "$T/neg.c" -o "$T/tn" 2>"$T/neg.log" || true
+$CC -O1 -DSIGGUARD2_HOST_TEST -I"$T" -I"$GUARD_SRC" "$T/guard2_test.c" "$T/neg.c" -o "$T/tn" -ldl 2>"$T/neg.log" || true
 if [[ -x "$T/tn" ]]; then
     RN="$("$T/tn" 2>&1 || true)"
     if [[ "$RN" == "DIFF" ]]; then
