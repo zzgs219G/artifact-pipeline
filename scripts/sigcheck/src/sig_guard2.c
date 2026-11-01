@@ -29,6 +29,22 @@
  * 【性能】构造期一次解析 + SHA-256;watchdog 线程睡眠不耗 CPU。
  *   正常运行路径零开销。
  */
+/*
+ * _GNU_SOURCE 必须是文件里【第一个】生效的宏，且早于任何系统头文件。
+ * 原因（2026-11-01，CI 上暴露）：路径②用 Dl_info + dladdr() 反推本 so 路径，
+ * 而 Dl_info 在 glibc 里受 __USE_GNU 保护（只在 _GNU_SOURCE 下可见）。
+ * Android bionic / Termux / macOS 默认暴露它，所以本机总是能编过；
+ * 一旦在 glibc（ubuntu CI 的宿主端 clang 测试）上编译就报
+ *   error: use of undeclared identifier 'Dl_info'
+ *   error: call to undeclared function 'dladdr'
+ *
+ * ⚠️ 位置不能挪到 <dlfcn.h> 前面就算完：glibc 的 feature-test 宏在
+ *    【第一个系统头文件】被包含时就已经定型，之后定义无效。
+ *    所以必须在 <stdio.h> 之前 —— 第一次改就栽在这里。
+ */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,20 +54,6 @@
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
-/*
- * _GNU_SOURCE 必须在包含 <dlfcn.h> 之前定义。
- * 原因（2026-11-01，CI 上暴露）：路径②用 Dl_info + dladdr() 反推本 so 路径，
- * 而 Dl_info 在 glibc 里受 __USE_GNU 保护（只在 _GNU_SOURCE 下可见）。
- * Android bionic / Termux / macOS 默认暴露它，所以本机一直能编过；
- * 一旦在 glibc（如 ubuntu CI、或宿主端 clang 测试）上编译就报
- *   error: use of undeclared identifier 'Dl_info'
- *   error: call to undeclared function 'dladdr'
- * NDK 构建同样需要它（bionic 虽然默认可见，但定义无害且更稳）。
- * 用 #ifndef 包裹，避免与编译器 -D_GNU_SOURCE 重复定义告警。
- */
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
 #include <dlfcn.h>
 #include <stdint.h>
 #include <sys/syscall.h>

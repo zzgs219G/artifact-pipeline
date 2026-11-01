@@ -99,7 +99,11 @@ CC="$(command -v clang || command -v gcc)"
 #    本机 Termux/macOS 把它并进了 libc，所以本地一直是绿的 —— 又是"本地绿、
 #    CI 红"的典型（2026-11-01 第六次 CI 红）。
 #    -Wl,--no-as-needed 保证即使当前没直接引用也不被丢弃。
-if ! $CC -O1 -DSIGGUARD2_HOST_TEST -I"$T" -I"$GUARD_SRC" \
+# -D_GNU_SOURCE 命令行再加一次（源码里也定义了，双保险）：
+# 该测试用 sed 把 #include "sig_guard2.h" 替换成内联的 guard2_test.h，
+# 若哪天替换位置变化导致源码里的 _GNU_SOURCE 排到系统头之后，
+# 命令行这个还能兜住。Dl_info 在 glibc 下只在 _GNU_SOURCE 时可见。
+if ! $CC -O1 -D_GNU_SOURCE -DSIGGUARD2_HOST_TEST -I"$T" -I"$GUARD_SRC" \
         "$T/guard2_test.c" "$T/main.c" -o "$T/t" -ldl 2>"$T/cc.log"; then
     echo "编译失败:"; head -20 "$T/cc.log"; bad "编译 sig_guard2.c"
 else
@@ -129,7 +133,7 @@ int main(void) {
     return 0;
 }
 C
-$CC -O1 -DSIGGUARD2_HOST_TEST -I"$T" -I"$GUARD_SRC" "$T/guard2_test.c" "$T/neg.c" -o "$T/tn" -ldl 2>"$T/neg.log" || true
+$CC -O1 -D_GNU_SOURCE -DSIGGUARD2_HOST_TEST -I"$T" -I"$GUARD_SRC" "$T/guard2_test.c" "$T/neg.c" -o "$T/tn" -ldl 2>"$T/neg.log" || true
 if [[ -x "$T/tn" ]]; then
     RN="$("$T/tn" 2>&1 || true)"
     if [[ "$RN" == "DIFF" ]]; then
