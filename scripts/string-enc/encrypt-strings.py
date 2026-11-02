@@ -1163,29 +1163,57 @@ def _patch_stub_seed_from_shell(stub_smali: str, shell_jni_desc: str,
     return out
 
 
-def _stub_transpiled(compiled_methods: str, stub_path: str) -> bool:
-    """判断 dex2c 是否真的转译了桩类（按类描述符匹配）。
+def _stub_transpiled(compiled_methods: str, stub_path: str,
+                     stub_filter: str = "") -> bool:
+    """判断 dex2c 是否真的会转译桩类。
 
-    compiled_methods.txt 每行格式：`Lcom/pkg/Cls;method(args)ret`（无箭头）。
-    桩文件名形如 `.../el/za/jl/yh.smali`，描述符为 `Lel/za/jl/yh;`。
+    两条判据，任一成立即为 True：
 
-    为什么必须按类匹配而不是"文件存在就认为转译了"：
-      传了 compiled_methods 但里面只有业务类（桩没被 filter 命中）时，
-      native 化桩 = 声明了 native 却没有实现 → 运行期 ULE。
-      这种情况在「dex2c + stringenc + packer 且不勾 --dex2c-stub」下必现。
+    ① **filter 规则命中桩类**（首选，2026-11-02 新增）
+       联动时 protect.sh 用 `--emit-stub-filter` 产出 filter，
+       dex2c 就是按这份 filter 转译的 —— 只要 filter 里有桩类规则，
+       dex2c 就必然会转译那 4 个方法。这是【输入侧】判据，
+       在 dex2c 跑之前就能确定，不依赖 compiled_methods.txt 是否存在。
+       `--emit-stub-dex` 在前置轮（dex2c 之前）调用，
+       那时 compiled_methods.txt 尚不存在 → 旧判据恒 False → 桩永远
+       不 native 化 → 勾了「解密桩也抽进 so」也白勾（CI 41447382614 实证：
+       日志同时出现「桩未被 dex2c 转译」与「compiled_methods 剔除桩条目 4 条」
+       两句自相矛盾的话）。
 
-    边界：compiled_methods 为空/文件不存在 → 保守返回 False（不 native 化）。
-      代价是桩留在壳 dex 里以明文运行（少了"算法进 so"的收益），
-      但绝不会闪退 —— 正确性优先于强度。
+    ② **compiled_methods.txt 里有桩类条目**（原判据，保留作兼容）
+       用于 dex2c 已经跑完的场合（STEP5 复用同一解包目录等）。
+
+    为什么必须判断而不是"有桩就 native 化"：
+      不勾 --dex2c-stub 时 dex2c 的 filter 里没有桩类 → 桩不会进 so
+      → native 化 = 声明了 native 却没有实现 → 运行期 ULE（真机实证）。
+
+    边界：两条判据都不成立 → 返回 False（不 native 化）。代价是桩以明文
+      留在壳 dex（少了"算法进 so"的收益），但绝不会闪退 —— 正确性优先于强度。
     """
-    if not compiled_methods or not os.path.isfile(compiled_methods):
-        return False
     # stub_path: .../smali_classes2/el/za/jl/yh.smali → Lel/za/jl/yh;
     norm = stub_path.replace('\\', '/')
     m = re.search(r'/(smali[^/]*)/(.+)\.smali$', norm)
     if not m:
         return False
     desc = 'L' + m.group(2) + ';'
+
+    # ① filter 规则判据（输入侧，前置于 dex2c）
+    if stub_filter and os.path.isfile(stub_filter):
+        try:
+            with open(stub_filter, encoding='utf-8') as fp:
+                for line in fp:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    # filter 行形如 `Lel/za/jl/yh;dn(.*)` / `Lel/za/jl/yh;.*`
+                    if line.startswith(desc):
+                        return True
+        except OSError:
+            pass
+
+    # ② compiled_methods 判据（输出侧，dex2c 跑完之后才有效）
+    if not compiled_methods or not os.path.isfile(compiled_methods):
+        return False
     try:
         with open(compiled_methods, encoding='utf-8') as fp:
             for line in fp:
@@ -1198,7 +1226,9 @@ def _stub_transpiled(compiled_methods: str, stub_path: str) -> bool:
 
 def emit_stub_dex(decompiled_dir: str, out_path: str, repo_root: str,
                   seed_from_shell: bool = False,
-                  compiled_methods: str = "") -> bool:
+                  compiled_methods: str = "",
+                  stub_filter: str = "",
+                  assume_transpiled: bool = False) -> bool:
     """把【注入后的解密桩类】单独汇编成一个 dex 文件（packer 联动用）。
 
     为什么需要单独一个 dex：
@@ -1255,7 +1285,8 @@ def emit_stub_dex(decompiled_dir: str, out_path: str, repo_root: str,
         #
         #   不 native 化时桩保持明文 Java 方法，在壳 dex 里自给自足，
         #   根本不需要 libnc.so —— 这是「不勾联动」的正确行为。
-        stub_native_ok = _stub_transpiled(compiled_methods, stub_path)
+        stub_native_ok = assume_transpiled or _stub_transpiled(
+            compiled_methods, stub_path, stub_filter)
         if stub_native_ok:
             stub_smali = _make_stub_methods_native(stub_path, work)
             stub_methods_native = os.path.isfile(stub_smali)
@@ -1976,6 +2007,11 @@ def main():
     ap.add_argument('--stub-name',
                     help="固定桩名 '包名.类名[:方法名]'(如 com.nc.strdec.StrDec:d),"
                          "仅供测试/复现;不传 = 每包随机生成(生产默认,防引擎固定签名)")
+    ap.add_argument('--assume-stub-transpiled', action='store_true',
+                    help='声明"本次 dex2c 会转译桩内核"（由 protect.sh 在'
+                         '--dex2c-stub 联动时传入）。用于 --emit-stub-dex '
+                         '在前置轮（dex2c 之前）调用时判断是否 native 化 —— '
+                         '那时 compiled_methods.txt 还不存在')
     ap.add_argument('--emit-stub-filter',
                     metavar='OUT_PATH',
                     help="把解密桩内核的 dex2c/dcc filter 规则写入该路径(仅一行,"
@@ -2180,7 +2216,9 @@ def main():
             print(f'  🌱 SEED 已写出: {args.emit_seed} ({seed_int:016x})')
         wrote = emit_stub_dex(args.decompiled, args.emit_stub_dex, _ROOT,
                               seed_from_shell=args.stub_seed_from_shell,
-                              compiled_methods=args.compiled_methods)
+                              compiled_methods=args.compiled_methods,
+                              stub_filter=getattr(args, 'emit_stub_filter', '') or '',
+                              assume_transpiled=bool(getattr(args, 'assume_stub_transpiled', False)))
         if not args.quiet:
             if wrote:
                 size = os.path.getsize(args.emit_stub_dex)

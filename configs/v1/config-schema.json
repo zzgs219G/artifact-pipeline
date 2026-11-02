@@ -55,7 +55,7 @@
         {
           "key": "dex2c_stub",
           "label": "解密桩也抽进 so",
-          "desc": "需同时勾选 Dex2C，单独勾选整个任务会构建失败；勾选后解密桩内核 dn() 转译进 libnc.so，dex 里只剩 try/catch 壳，算法/种子不再以 Java 形式可见。不勾时桩留在 dex。",
+          "desc": "解密桩内核 dn()/mix64()/keyByte() 转译进 libnc.so，dex 里只剩 try/catch 壳，算法/种子不再以 Java 形式可见。无需勾选 Dex2C 模块（那是抽业务类用的）——本项自己调用转译接口，只处理解密桩。仅需同时勾选字符串加密；不勾时桩留在 dex。",
           "type": "checkbox",
           "default": false,
           "value_kind": "flag",

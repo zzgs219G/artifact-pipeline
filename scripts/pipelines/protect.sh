@@ -142,22 +142,29 @@ if [[ $TOTAL -eq 0 ]]; then
   exit 1
 fi
 
-# 联动子复选框的依赖校验(防呆):--dex2c-stub 单独勾选没有意义 ——
-# 它只是"把桩也交给 dex2c 转译"的修饰,必须同时有 stringenc(产出桩)
-# 与 dex2c(消费桩)。缺任何一个都是配置错误,fail-fast 说人话。
+# 联动子复选框的依赖校验(防呆)
+# ⚠️ 2026-11-02 架构修正：--dex2c-stub 只需要 --stringenc。
+#
+# 原代码还要求必须勾 --dex2c，理由是「桩要交给 dex2c 转译」——
+# 那把【dex2c 模块】和【dex2c 接口】混为一谈了：
+#   · 模块跑在 STEP2（桩尚未注入）→ 看不到桩，勾了也抽不到
+#   · 接口由 stringenc 在注入后自己调用 → 这才是真正干活的那条路
+# 所以「必须勾 --dex2c」不是需求，是历史误解；照它执行会让
+# 「只勾字符串加密 + 解密桩抽 so」这个合法组合直接报错退出。
 if [[ $WANT_DEX2C_STUB -eq 1 ]]; then
   if [[ $WANT_STRINGENC -eq 0 ]]; then
     log_err "--dex2c-stub 必须与 --stringenc 同时勾选(没有字符串加密就没有解密桩可抽)"
     exit 1
   fi
-  if [[ $WANT_DEX2C -eq 0 ]]; then
-    log_err "--dex2c-stub 必须与 --dex2c 同时勾选(桩要交给 dex2c 转译)"
-    exit 1
-  fi
 fi
 
 # 转译层统一变量:唯一引擎,共用同一套规则来源决策与 STEP3+ 下游(引擎无关)
+# ⚠️ 2026-11-02：dex2c_stub 只勾（无 dex2c 模块）时也要启动引擎 —— 那是
+# 「stringenc 调 dex2c 接口转译解密桩」这条内部通道，不涉及用户类名规则。
+# 用 WANT_ENGINE 表达「引擎要跑」，WANT_TRANSPILE 继续表达「抽用户指定的类」。
 WANT_TRANSPILE=$WANT_DEX2C
+WANT_ENGINE=0
+if [[ $WANT_DEX2C -eq 1 || $WANT_DEX2C_STUB -eq 1 ]]; then WANT_ENGINE=1; fi
 TRANSPILE_RULES="$DEX2C_RULES"
 
 # ── 入口契约校验：所有环境假设在开工前 fail-fast ────────────────────
@@ -169,11 +176,14 @@ repack_require_tools
 # 放在入口处一次性解压：protect.sh 的 22 处引用与 4 套回归测试都依赖该路径。
 GUARD_SRC="$(ensure_nox)"
 require_dir "$GUARD_SRC" "so 加密设施目录"
-if [[ $WANT_TRANSPILE -eq 1 ]]; then
+if [[ $WANT_ENGINE -eq 1 ]]; then
     DEX2C_DIR="$(ensure_dex2c)"             # 从 tools/dex2c.zip 解压(幂等)并取得 Dex2C 目录
     require_dir "$DEX2C_DIR" "dex2c 工具目录"
   # 规则文件:提供了就必须非空;没提供且未联合 sigcheck → 无类名来源,fail-fast
-  if [[ -n "$TRANSPILE_RULES" ]]; then
+  # ⚠️ 只在【dex2c 模块】勾选时校验；只勾 dex2c_stub 时无用户类名规则可言
+  if [[ $WANT_DEX2C -eq 0 ]]; then
+    :
+  elif [[ -n "$TRANSPILE_RULES" ]]; then
     require_nonempty_file "$TRANSPILE_RULES" "dex2c 规则文件"
   elif [[ $WANT_SIGCHECK -eq 0 ]]; then
     log_err "--dex2c 未提供规则文件且未勾选 --sigcheck,没有类名来源"
@@ -212,8 +222,24 @@ fi
 #   →回编成 APK'),dex2c 转译 APK' 就能命中桩;STEP5 再跳过一次 stringenc。
 #   代价:apktool 解包/回编从 1 次变 2 次(旧三总控合并时消除过的开销,
 #   为联动加回来;dex 8MB 量级约 +30~60s)。
+# ⚠️ 2026-11-02 架构修正：dex2c_stub 是【stringenc 调 dex2c 接口】的独立联动，
+# 不是「dex2c 模块的修饰符」。
+#
+# 两种角色的区别（这决定了本条件怎么写）：
+#   · dex2c 模块      —— 给客户端用。输入是【未加固的原始 APK】，只能抽
+#                        原始 dex 里【已存在】的类；类名由用户规则/主类决定。
+#   · dex2c 接口      —— 给我们内部模块用。任意时刻可调，能抽【流水线中途
+#                        注入】的类；目标固定，不接受用户类名。
+#
+# 解密桩就是「流水线中途注入」的典型：它不存在于原始 APK，
+# 所以 dex2c 模块（STEP2，跑在注入之前）根本看不到它；
+# 而 STEP2 跑完后模块已结束，无法再调。→ 只能由 stringenc 在注入后
+# 自己调【接口】完成转译。
+#
+# 因此本条件【不再要求 WANT_DEX2C】：只勾 dex2c_stub（+ stringenc）时，
+# 接口也要启动，只转译桩的 4 个方法。两模块可同时勾，filter 合并。
 LINK_STUB=0
-if [[ $WANT_DEX2C -eq 1 && $WANT_STRINGENC -eq 1 && $WANT_DEX2C_STUB -eq 1 ]]; then
+if [[ $WANT_STRINGENC -eq 1 && $WANT_DEX2C_STUB -eq 1 ]]; then
   LINK_STUB=1
 fi
 if [[ $LINK_STUB -eq 1 ]]; then
@@ -240,8 +266,18 @@ if [[ $LINK_STUB -eq 1 ]]; then
   # --remove-stub-only 调用）。
   PRE_ENC_ARGS2=()
   if [[ $WANT_PACKER -eq 1 ]]; then
+    # ⚠️ --assume-stub-transpiled（2026-11-02 修）：
+    #   本函数（emit_stub_dex）在前置轮调用，那时 dex2c 还没跑、
+    #   compiled_methods.txt 还不存在。旧判据 _stub_transpiled() 因此
+    #   恒返回 False → 桩永远不 native 化 → 用户勾了「解密桩也抽进 so」
+    #   也白勾（CI 41447382614 实证：日志同时出现「桩未被 dex2c 转译」
+    #   与「compiled_methods 剔除桩条目 4 条」两句自相矛盾的话）。
+    #   走到这里的前提是 LINK_STUB=1，而 LINK_STUB 的定义就是
+    #   `WANT_DEX2C && WANT_STRINGENC && WANT_DEX2C_STUB` —— 即 dex2c
+    #   必然会转译桩。所以这里传 assume 是【确定事实】而非猜测。
     PRE_ENC_ARGS2+=(--emit-stub-dex "$WORK/stub.dex" --keep-stub-in-dex
-                    --stub-seed-from-shell --emit-seed "$WORK/stub_seed.txt")
+                    --stub-seed-from-shell --emit-seed "$WORK/stub_seed.txt"
+                    --assume-stub-transpiled)
   fi
   python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
     "$WORK/pre" "$STRING_RULES" "${PRE_ENC_ARGS[@]}" "${PRE_ENC_ARGS2[@]}" \
@@ -260,12 +296,20 @@ else
   LINK_APK="$IN_APK"
 fi
 
-if [[ $WANT_TRANSPILE -eq 1 ]]; then
+if [[ $WANT_ENGINE -eq 1 ]]; then
   log_step 2 6 "核心方法转 C（dex2c）"
   # 类名来源决策(规则优先,修复:联合勾选 sigcheck 时无视用户规则的 bug):
+  #   0) 只勾 dex2c_stub（无 dex2c 模块）→ 不抽用户类，filter 只有桩（下方追加）
   #   1) 提供了用户规则 → 一律走用户规则(无论是否联合勾选)
   #   2) 未提供规则 + 联合勾选 sigcheck → Manifest 动态解析 LAUNCHER 自动生成 filter
-  if [[ -n "$TRANSPILE_RULES" ]]; then
+  if [[ $WANT_TRANSPILE -eq 0 ]]; then
+    # 只抽桩模式：先放一个空 filter，稍后由 stub_filter 追加。
+    # 这是「stringenc 调 dex2c 接口」的内部通道 —— 目标固定为解密桩的
+    # 4 个方法，不接受用户类名（用户类名是 dex2c 模块的职责）。
+    : > "$WORK/dcc_filter.txt"
+    DCC_FILTER="$WORK/dcc_filter.txt"
+    log_info "filter 来源: 仅 dex2c_stub（不抽用户类，只转译解密桩）"
+  elif [[ -n "$TRANSPILE_RULES" ]]; then
     log_info "filter 来源: 用户规则 $TRANSPILE_RULES"
     python3 "$ROOT/scripts/filter/rules-to-filter.py" "$TRANSPILE_RULES" \
       "$WORK/dcc_filter.txt" --classes "$WORK/activity_classes.txt"
@@ -304,6 +348,16 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
     cat "$WORK/stub_filter.txt" >> "$WORK/dcc_filter_linked.txt"
     DCC_FILTER="$WORK/dcc_filter_linked.txt"
     log_info "联动:桩内核已追加进 dex2c filter（$(grep -c . "$WORK/stub_filter.txt") 条: dn/mix64/keyByte）"
+  fi
+
+  # 引擎要跑，filter 就不能为空 —— dcc.py 对空 filter 只打
+  # `No methods compiled!` 然后不产出工程包，下游 require_file 才报错，
+  # 那时错误信息已指向"工程包缺失"而非"filter 为空"，难归因。
+  if [[ ! -s "$DCC_FILTER" ]] || ! grep -qv '^[[:space:]]*$' "$DCC_FILTER"; then
+    log_err "dex2c filter 为空：无任何类/方法可转译"
+    log_err "     勾了 dex2c 请提供类名规则或配合签名校验自动抽主类；"
+    log_err "     只勾 dex2c_stub 时应由 stringenc 前置轮产出桩 filter（检查规则是否命中业务类）"
+    exit 1
   fi
 
   # dex2c 的 dcc.py 要在自身目录运行 → 子 shell 隔离，主进程 cwd 不漂移。

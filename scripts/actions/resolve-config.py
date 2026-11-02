@@ -276,3 +276,37 @@ with open(args_path, "w", encoding="utf-8") as f:
 print(f"✅ resolve-config: {len(argv_out)} 个参数, {len(rule_files)} 个规则文件 → {args_path}")
 for a in argv_out:
     print(f"   {a}")
+
+# ── 人可读的模块勾选回执（2026-11-02 新增）──────────────────────────
+# 为什么需要：此前只有一行原始 JSON，用户「勾了什么」在日志里不可见——
+# 必须点进日志、grep schema_version、再自己解析 JSON 才能确认。
+# 而勾选与产物行为不一致时（实测：dex2c_stub 勾了但桩没进 so），
+# 连「到底勾没勾上」这一步都无法自查。
+# 格式刻意做成一眼可扫的清单，含子选项缩进。
+def _dump_plan(cfg):
+    print("=== 本次勾选的模块 ===")
+    yes = []
+    for mod in modules:
+        key = mod["key"]
+        val = cfg.get(key)
+        on = bool(val) if not isinstance(val, dict) else bool(val.get("enabled"))
+        mark = "✅" if on else "⬜"
+        print(f"  {mark} {mod.get('label', key)}")
+        if not on:
+            continue
+        yes.append(key)
+        if isinstance(val, dict):
+            for ch in mod.get("children", []):
+                ck = ch["key"]
+                if ck not in val:
+                    continue
+                cv = val[ck]
+                if ch.get("value_kind") in ("flag", "arg_value"):
+                    cm = "✅" if cv else "⬜"
+                    print(f"      {cm} {ch.get('label', ck)}")
+                else:
+                    shown = str(cv) if cv else "(空=自动)"
+                    print(f"      · {ch.get('label', ck)}: {shown}")
+    print(f"  合计 {len(yes)} 个模块: {', '.join(yes) if yes else '(无)'}")
+
+_dump_plan(config)
