@@ -642,14 +642,33 @@ if [[ -d "$WORK/project/libs" ]]; then
     # strip-all 不删 .comment（只删符号表），必须显式移除。
     # ⚠️ 必须在锁箱【之前】：objcopy 重排段布局，锁箱后跑会破坏
     #    slot 里已写好的链接期地址（sh_addr 失配 → 运行期基址计算崩）。
-    if command -v objcopy >/dev/null 2>&1; then
-      if objcopy --remove-section=.comment "$so" "$so" 2>/dev/null; then
-        echo "  [strip] .comment 已移除（工具链指纹归零）"
+    #
+    # ⚠️⚠️ 2026-11-02 修：此前只用 `command -v objcopy` 找 GNU objcopy，
+    #    在 GitHub Actions ubuntu runner 上【不存在】（只有 llvm-objcopy），
+    #    于是每次都走 else 分支打印一条警告后继续 —— 而 .comment 一直
+    #    留在产物里。实测 CI 日志：
+    #        [strip] ⚠️ .comment 移除失败（objcopy 异常）——继续但不阻塞
+    #    产物 strings 仍能扫出 clang 18.0.4 完整版本串与 LLVM commit hash。
+    #    「继续但不阻塞」是刻意设计（不让 strip 失败阻断出包），但它掩盖
+    #    了一个【每一版产物都失效】的防护。
+    # 修法：按 NDK llvm-objcopy → 系统 llvm-objcopy → GNU objcopy 顺序探测，
+    #      并在全部失败时输出 ERROR 级提示（仍不阻塞出包）。
+    _objcopy=""
+    for _cand in \
+        "${ANDROID_NDK_HOME:+$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy}" \
+        "${ANDROID_NDK_HOME:+$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-aarch64/bin/llvm-objcopy}" \
+        "$(command -v llvm-objcopy 2>/dev/null)" \
+        "$(command -v objcopy 2>/dev/null)"; do
+      if [[ -n "$_cand" && -x "$_cand" ]]; then _objcopy="$_cand"; break; fi
+    done
+    if [[ -n "$_objcopy" ]]; then
+      if "$_objcopy" --remove-section=.comment "$so" 2>/dev/null; then
+        echo "  [strip] .comment 已移除（$(basename "$_objcopy")，工具链指纹归零）"
       else
-        echo "  [strip] ⚠️ .comment 移除失败（objcopy 异常）——继续但不阻塞" >&2
+        echo "  [strip] ❌ .comment 移除失败（$_objcopy 报错）——产物将泄露 clang 版本" >&2
       fi
     else
-      echo "  [strip] ⚠️ 无 objcopy，.comment 残留（工具链版本泄露）" >&2
+      echo "  [strip] ❌ 找不到任何 objcopy（llvm-objcopy / objcopy 均不可用）——产物将泄露 clang 版本" >&2
     fi
     # 一级锁箱：.ncx 代码段 + .ncxr 常量表段（共用 k_so/同一个 MAC）
     #
