@@ -4,7 +4,7 @@
     {
       "key": "sigcheck",
       "label": "签名校验",
-      "desc": "防移动端98%",
+      "desc": "校验 APK 签名证书，不匹配则不启动",
       "type": "leaf",
       "default": true,
       "arg": "--sigcheck"
@@ -12,11 +12,11 @@
     {
       "key": "dex2c",
       "label": "Dex2C",
-      "desc": "java层代码抽至so层（唯一转译引擎）",
+      "desc": "将 Java 方法转译为 C，编译进 so 库",
       "type": "parent",
       "default": false,
       "arg": "--dex2c",
-      "group_label": "dex2c 类目保护规则",
+      "group_label": "转译范围",
       "children": [
         {
           "key": "rules_file",
@@ -27,20 +27,23 @@
           "value_kind": "rules_file",
           "required": {
             "when": "always",
-            "unless": { "key": "sigcheck", "is": true }
+            "unless": {
+              "key": "sigcheck",
+              "is": true
+            }
           },
-          "hint": "留空并勾选签名校验=自动抽主类；支持 com.test.** 定向；勿填 ** 全量（整个App转译，上游不支持）"
+          "hint": "留空并勾选签名校验：自动抽取主 Activity 类；也可填写 com.test.** 等定向规则。不支持 ** 全量（整个 App 转译，引擎不支持）"
         }
       ]
     },
     {
       "key": "stringenc",
       "label": "字符串加密",
-      "desc": "dex字符串加密（防字符串搜索）",
+      "desc": "加密 dex 中的字符串常量，运行时解码",
       "type": "parent",
       "default": false,
       "arg": "--stringenc",
-      "group_label": "字符串加密类目保护规则",
+      "group_label": "加密范围",
       "children": [
         {
           "key": "rules_file",
@@ -49,13 +52,15 @@
           "multiline": true,
           "default": "",
           "value_kind": "rules_file",
-          "required": { "when": "always" },
-          "hint": "每行一条，支持 **/com.test.** / activity*"
+          "required": {
+            "when": "always"
+          },
+          "hint": "每行一条，支持 ** / com.test.** / activity*"
         },
         {
           "key": "dex2c_stub",
           "label": "解密桩也抽进 so",
-          "desc": "解密桩内核 dn()/mix64()/keyByte() 转译进 libnc.so，dex 里只剩 try/catch 壳，算法/种子不再以 Java 形式可见。无需勾选 Dex2C 模块（那是抽业务类用的）——本项自己调用转译接口，只处理解密桩。仅需同时勾选字符串加密；不勾时桩留在 dex。",
+          "desc": "将解密桩内核（dn / mix64 / keyByte）一并转译为 C 编入 so，dex 中仅保留 native 声明。需同时启用字符串加密；不勾选时桩以 Java 形式留在 dex 中。",
           "type": "checkbox",
           "default": false,
           "value_kind": "flag",
@@ -66,15 +71,48 @@
     {
       "key": "antidiff",
       "label": "防对比混淆",
-      "desc": "dex层结构噪声",
+      "desc": "改写 dex 结构，降低原版与加固版的可比性",
       "type": "leaf",
       "default": false,
       "arg": "--anti-diff"
     },
-    { "key": "envcheck", "label": "环境检测", "desc": "Frida/Xposed/调试器", "type": "leaf", "default": false, "arg": "--envcheck" },
-    { "key": "packer", "label": "基础加壳", "desc": "dex整体加密（须最后执行）", "type": "parent", "default": false, "arg": "--packer", "group_label": "壳加固选项", "children": [
-      { "key": "smaller", "label": "体积优化", "desc": "性价比极高", "type": "checkbox", "default": true, "value_kind": "flag", "arg_on": "--packer-smaller" },
-      { "key": "exclude_x86", "label": "排除模拟器架构", "desc": "产物剔除 x86/x86_64 的 so 目录（多数手机只需 arm/arm64）；代价：x86 模拟器无法安装运行加壳包", "type": "checkbox", "default": true, "value_kind": "arg_value", "arg_on": "--exclude-abi", "arg_value": "x86,x86_64" }
-    ] }
+    {
+      "key": "envcheck",
+      "label": "环境检测",
+      "desc": "检测 Frida / Xposed / 调试器等运行环境",
+      "type": "leaf",
+      "default": false,
+      "arg": "--envcheck"
+    },
+    {
+      "key": "packer",
+      "label": "基础加壳",
+      "desc": "对整个 dex 加密（固定为最后一步）",
+      "type": "parent",
+      "default": false,
+      "arg": "--packer",
+      "group_label": "加壳选项",
+      "children": [
+        {
+          "key": "smaller",
+          "label": "体积优化",
+          "desc": "压缩产物体积，不改变防护强度",
+          "type": "checkbox",
+          "default": true,
+          "value_kind": "flag",
+          "arg_on": "--packer-smaller"
+        },
+        {
+          "key": "exclude_x86",
+          "label": "排除模拟器架构",
+          "desc": "产物不包含 x86 / x86_64 架构的 so。多数设备只需 arm / arm64；剔除后 x86 模拟器无法安装该包。",
+          "type": "checkbox",
+          "default": true,
+          "value_kind": "arg_value",
+          "arg_on": "--exclude-abi",
+          "arg_value": "x86,x86_64"
+        }
+      ]
+    }
   ]
 }
