@@ -334,6 +334,7 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
     --no-build \
     --disable-signing \
     --allow-global \
+    --dynamic-register \
     --filter "$DCC_FILTER"
 
   require_file "$WORK/dcc-project.zip" "dex2c 工程包（filter 可能未命中任何方法）"
