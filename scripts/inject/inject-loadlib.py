@@ -319,41 +319,79 @@ def find_launcher_classes(decompiled_dir, package_name=None):
 
 
 def _find_launchers_in_text(content, package_name=None):
-    """文本 XML → LAUNCHER activity smali 类名列表(AXMLPrinter 分支复用)。"""
+    """文本 XML → LAUNCHER activity smali 类名列表(AXMLPrinter 分支复用)。
+
+    ⚠️ 2026-11-02 修两处漏判（实测样本 com.app.lxkd20251026）：
+
+    ① **`<activity-alias>` 完全没被处理**
+       该 App 用「换图标」机制：
+           FirstActivity              enabled=false  ← 真正的业务入口
+           AliasIcon1~6 (activity-alias) target=FirstActivity
+       其中 AliasIcon1 enabled=true，是实际生效的图标入口。
+       原正则只匹配 `<activity\\b`，于是：
+         · 抽不到 AliasIcon1（不是 activity）
+         · FirstActivity 本来就在但 enabled=false，也没人管
+       两者叠加 → 抽到的类里没有任何方法 → dex2c `No methods compiled!`
+       → 构建失败。
+
+    ② **`enabled=false` 未跳过**
+       本文件既有测试 `test_inject_loadlib.py:340` 已明确记录：
+         "enabled=false 的跳过"，但 _find_launchers_in_text() 并未实现该判断。
+       注释承诺了但代码没做——这次一并补上。
+
+    修法：
+      · 同时匹配 `<activity>` 与 `<activity-alias>`
+      · alias 解析 android:targetActivity 并补全为全类名
+        （alias 自身没有代码，它是转发壳；native 化/注册必须落在 target 上）
+      · enabled="false" 的跳过（属性缺失 = 默认 true）
+      · 表达式里出现 ${...} 之类的占位符视为不可判定，按 enabled 处理
+    """
     if package_name is None:
         m = re.search(r'package="([^"]+)"', content)
         package_name = m.group(1) if m else ''
 
+    def full_name(name):
+        if name.startswith('.'):
+            return package_name + name
+        if '.' not in name:
+            return package_name + '.' + name
+        return name
+
     launchers = []
-    for am in re.finditer(r'<activity\b[^>]*>', content, re.S):
+    # 同时匹配 <activity> 与 <activity-alias>，自闭合形式 <x ... /> 也要认
+    for am in re.finditer(r'<(activity-alias|activity)(?=[\s>/])[^>]*?/?>', content, re.S):
+        tag_kind = am.group(1)
         tag = am.group(0)
+        if tag.rstrip().endswith('/>'):
+            continue                      # 自闭合无 intent-filter
         nm = re.search(r'android:name="([^"]+)"', tag)
         if not nm:
             continue
         name = nm.group(1)
-        # 相对类名补全
-        if name.startswith('.'):
-            full = package_name + name
-        elif '.' not in name:
-            full = package_name + '.' + name
-        else:
-            full = name
-        # 该 activity 要有 MAIN+LAUNCHER intent-filter:
-        # 看 <activity ...> 之后到 </activity> 之间的两个子标签
+
+        # enabled 判断：属性缺失 = 默认 true
+        en = re.search(r'android:enabled="([^"]+)"', tag)
+        if en and en.group(1).strip().lower() == 'false':
+            continue
+
+        # 取子标签区间找 MAIN + LAUNCHER
         tail_start = am.end()
-        end = content.find('</activity>', tail_start)
-        # 自闭合 <activity .../> 无 intent-filter,跳过
-        seg_end = end if (end != -1 and (content.find('/>', am.end(), end) == -1
-                                         or end == -1)) else am.end()
-        if end == -1:
-            seg = content[tail_start:tail_start + 4000]
-        else:
-            seg = content[tail_start:end]
-        has_main = re.search(r'action\s+android:name="android\.intent\.action\.MAIN"', seg) or \
-                   re.search(r'android:name="android\.intent\.action\.MAIN"', seg)
+        close_tag = '</%s>' % tag_kind
+        end = content.find(close_tag, tail_start)
+        seg = content[tail_start:end] if end != -1 else content[tail_start:tail_start + 4000]
+        has_main = re.search(r'android:name="android\.intent\.action\.MAIN"', seg)
         has_launcher = re.search(r'android:name="android\.intent\.category\.LAUNCHER"', seg)
-        if has_main and has_launcher:
-            launchers.append('L' + full.replace('.', '/') + ';')
+        if not (has_main and has_launcher):
+            continue
+
+        # alias：必须解析 targetActivity（alias 自身无代码）
+        if tag_kind == 'activity-alias':
+            tg = re.search(r'android:targetActivity="([^"]+)"', tag)
+            if not tg:
+                continue                  # 无 target 的 alias 是畸形，跳过
+            name = tg.group(1)
+
+        launchers.append('L' + full_name(name).replace('.', '/') + ';')
     return sorted(set(launchers))
 
 

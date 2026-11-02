@@ -14,6 +14,7 @@ activity,生成 dcc filter 文件(联合方案的"自动获取类名"环节)。
                          [--on-fail error|skip] [--all-activities]
 """
 import os
+import re
 import sys
 
 # 本脚本位于 scripts/filter/,dcc 从 tools/dcc.zip 分发 → 解压产物在
@@ -46,6 +47,28 @@ def load_apk(apk_path):
     sys.path.insert(0, dcc_dir)
     from androguard.core.bytecodes.apk import APK
     return APK(apk_path)
+
+
+def _read_manifest_text(apk_path):
+    """读 APK 内 AndroidManifest.xml 并转成文本 XML。失败返回空串。
+
+    为什么不用 androguard 的 get_main_activities()：见 main() 里
+    `_resolve_launchers` 的注释——它不处理 activity-alias、也不判 enabled。
+    这里直接拿 AXMLPrinter 转文本，自己做解析。
+
+    ⚠️ 必须收【路径字符串】而不是 APK 对象：androguard 的 APK 对象
+    不保证暴露原始文件路径（实测 getattr(filename) 拿不到），
+    传对象会导致静默返回空串 → 修正逻辑被跳过 → 又抽回 alias 类。
+    """
+    import zipfile
+    dcc_dir = _ensure_dcc_dir()
+    if dcc_dir not in sys.path:
+        sys.path.insert(0, dcc_dir)          # ← 漏了这行会 ModuleNotFoundError
+    from androguard.core.bytecodes.axml import AXMLPrinter
+    with zipfile.ZipFile(apk_path) as zf:
+        raw = zf.read('AndroidManifest.xml')
+    out = AXMLPrinter(raw).get_xml()
+    return out.decode('utf-8', 'replace') if isinstance(out, bytes) else str(out)
 
 
 def main() -> int:
@@ -94,7 +117,66 @@ def main() -> int:
             return package + '.' + name
         return name
 
-    mains = sorted(full_name(x) for x in main_acts)
+    # ── activity-alias / enabled=false 修正（2026-11-02）──────────────
+    # androguard 的 get_main_activities() 有两处会抽错类，实测样本
+    # com.app.lxkd20251026（「换图标」型 App）：
+    #
+    #   FirstActivity   enabled=false        ← 真正的业务入口
+    #   AliasIcon1~6    <activity-alias> target=FirstActivity
+    #   其中 AliasIcon1 enabled=true         ← 实际生效的图标入口
+    #
+    # get_main_activities() 返回 AliasIcon1，它是【alias 不是实现】：
+    # 本身没有任何方法，dex2c 去里面找 → "No methods compiled!"
+    # → dcc-project.zip 不生成 → 构建失败（CI 41430277787 实证）。
+    #
+    # 修法：解析 AXML 原始文本，把 alias 换成其 targetActivity，
+    # 并跳过 enabled="false"。不依赖 androguard 的那两个 API。
+    def _resolve_launchers() -> list:
+        try:
+            xml_text = _read_manifest_text(apk_path)
+        except Exception as e:                      # noqa: BLE001
+            print(f'⚠️ Manifest 原文读取失败，回退 androguard 结果: {e}',
+                  file=sys.stderr)
+            return []
+        if not xml_text:
+            return []
+        found = []
+        for m in re.finditer(r'<(activity-alias|activity)(?=[\s>/])[^>]*?/?>',
+                             xml_text, re.S):
+            kind, tag = m.group(1), m.group(0)
+            if tag.rstrip().endswith('/>'):
+                continue
+            nm = re.search(r'android:name="([^"]+)"', tag)
+            if not nm:
+                continue
+            en = re.search(r'android:enabled="([^"]+)"', tag)
+            if en and en.group(1).strip().lower() == 'false':
+                continue
+            start = m.end()
+            close = '</%s>' % kind
+            end = xml_text.find(close, start)
+            seg = xml_text[start:end] if end != -1 else xml_text[start:start + 4000]
+            if not (re.search(r'android\.intent\.action\.MAIN', seg)
+                    and re.search(r'android\.intent\.category\.LAUNCHER', seg)):
+                continue
+            name = nm.group(1)
+            if kind == 'activity-alias':
+                tg = re.search(r'android:targetActivity="([^"]+)"', tag)
+                if not tg:
+                    continue                        # 无 target 的畸形 alias
+                name = tg.group(1)
+            found.append(full_name(name))
+        return sorted(set(found))
+
+    resolved = _resolve_launchers()
+    if resolved:
+        if set(resolved) != set(full_name(x) for x in main_acts):
+            print(f'ℹ️ launcher 解析修正: androguard={sorted(full_name(x) for x in main_acts)}'
+                  f' → 实际={resolved}（已处理 activity-alias / enabled=false）',
+                  file=sys.stderr)
+        mains = resolved
+    else:
+        mains = sorted(full_name(x) for x in main_acts)
 
     if not mains:
         if on_fail == 'skip':

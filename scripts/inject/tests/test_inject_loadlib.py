@@ -336,12 +336,13 @@ check("非限定短名 SelfClose 补全（但无 LAUNCHER，不入选）",
 check("结果已排序去重", res == sorted(set(res)), str(res))
 
 # enabled=false 的 LAUNCHER
-# ⚠️ 已知差异（2026-11-01 测试发现）：docs/流程文档.md §2 步骤 3 写着
-#    "enabled=false 的跳过"，但 _find_launchers_in_text() 并未实现该判断，
-#    也没有对应的 androguard 分支处理。实测简盒样本 manifest 里没有
-#    enabled 属性，所以当前不影响真实产物。
-#    这里按【现状】断言（不跳过），把这个差异钉在测试里：
-#    哪天要真正实现，本用例会红，迫使改的人同步文档与两边实现。
+# ⚠️ 2026-11-02 行为变更：此前本用例断言「不跳过」，因为
+#    docs/流程文档.md §2 步骤 3 写着「enabled=false 的跳过」但代码没实现，
+#    测试把差异钉住等实现。**现已实现**（CI 41430277787 实证驱动）：
+#    com.app.lxkd20251026 的 FirstActivity enabled=false、AliasIcon1
+#    enabled=true 且是 activity-alias → 抽到 alias 类里没有任何方法
+#    → dex2c "No methods compiled!" → 构建失败。
+#    现在断言反转为「必须跳过」。
 man_dis = f'''<manifest package="com.d">
   <application>
     <activity android:name=".Disabled" android:enabled="false">
@@ -350,8 +351,44 @@ man_dis = f'''<manifest package="com.d">
   </application>
 </manifest>'''
 r_dis = IL._find_launchers_in_text(man_dis, None)
-check("已知差异：enabled=false 当前【不】跳过（文档说跳，代码未实现）",
-      "Lcom/d/Disabled;" in r_dis, str(r_dis))
+check("enabled=false 必须跳过（2026-11-02 实现）",
+      "Lcom/d/Disabled;" not in r_dis, str(r_dis))
+
+# activity-alias：必须解析 targetActivity（alias 自身无代码）
+man_alias = f'''<manifest package="com.f">
+  <application>
+    <activity android:name=".Real" android:enabled="false">
+      <intent-filter>{MAIN_LAUNCHER}</intent-filter>
+    </activity>
+    <activity-alias android:name=".Icon1" android:enabled="true"
+                    android:targetActivity="com.f.Real">
+      <intent-filter>{MAIN_LAUNCHER}</intent-filter>
+    </activity-alias>
+    <activity-alias android:name=".Icon2" android:enabled="false"
+                    android:targetActivity="com.f.Real">
+      <intent-filter>{MAIN_LAUNCHER}</intent-filter>
+    </activity-alias>
+  </application>
+</manifest>'''
+r_alias = IL._find_launchers_in_text(man_alias, None)
+check("activity-alias 解析为 targetActivity（实测样本同款结构）",
+      r_alias == ['Lcom/f/Real;'], str(r_alias))
+check("activity-alias 自身不得入选", "Lcom/f/Icon1;" not in r_alias)
+check("enabled=false 的 alias 也要跳过", "Lcom/f/Icon2;" not in r_alias)
+
+# 交替顺序回归：<(activity|activity-alias)\b 会让 activity 先命中，
+# 导致 activity-alias 被当成 activity 处理（找不到 </activity-alias>、
+# 也不解析 targetActivity）。本用例钉死顺序。
+man_order = f'''<manifest package="com.g">
+  <application>
+    <activity-alias android:name=".A" android:targetActivity="com.g.T">
+      <intent-filter>{MAIN_LAUNCHER}</intent-filter>
+    </activity-alias>
+  </application>
+</manifest>'''
+r_order = IL._find_launchers_in_text(man_order, None)
+check("正则交替顺序：activity-alias 不得被误判为 activity",
+      r_order == ['Lcom/g/T;'], str(r_order))
 
 # 没有 LAUNCHER → 空列表（调用方据此 exit 2）
 r_none = IL._find_launchers_in_text('<manifest package="com.e"><application/></manifest>', None)
