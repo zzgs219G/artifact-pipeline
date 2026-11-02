@@ -41,7 +41,7 @@ APP_CPPFLAGS += -fvisibility=hidden -fno-ident -Oz -ffunction-sections -fdata-se
 #     实测编入 54 条 paciasp/bti 指令，解锁链全通过。
 APP_CFLAGS   := -fvisibility=hidden -fno-ident -Oz -ffunction-sections -fdata-sections \
                 -fstack-protector-strong \
-                -DNC_GUARD_SECTIONED
+                -DNC_GUARD_SECTIONED -DNCG_PATH_STRICT
 APP_CFLAGS.arm64 += -mbranch-protection=standard
 APP_PLATFORM := android-21
 APP_ABI := armeabi-v7a arm64-v8a
