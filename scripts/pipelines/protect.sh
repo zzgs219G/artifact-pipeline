@@ -710,6 +710,30 @@ if [[ -d "$WORK/project/libs" ]]; then
       echo "❌ 二级锁箱失败（.ncxh 未标记？符号被 strip？）——unlock 本体仍可静态读取" >&2
       exit 1
     }
+    # ── 元数据清理（2026-11-02）：段与锁箱全部完成后才做 ──────────
+    # 删 .eh_frame / .eh_frame_hdr / .comment / .debug_*
+    #
+    # 为什么必须放在【最后】：
+    #   objcopy 会重写 ELF 文件。前面 lock/lock_head 已经往 .nck/.ncks
+    #   槽里写了链接期 sh_addr，若 objcopy 挪动它们，运行期基址计算全错。
+    #   实测确认 --remove-section 对本产物【不改任何 sh_addr/sh_offset】，
+    #   但顺序上仍放在最后最安全（不需要这个前提成立）。
+    #
+    # 删的价值（实测审计）：
+    #   .eh_frame 含 709 个 FDE，每条给出一个函数的精确起止地址 ——
+    #   加密了 6 个段，但异常表把 .ncx 里 15 个函数、.ncxh 里 8 个函数
+    #   的位置与大小全列出来了。
+    #   .comment 含 clang 18.0.4 完整版本串 + LLVM commit + PGO/BOLT/LTO
+    #   配置（这一项在 CI 上已失效三个月，见 protect.sh 上文 objcopy 注释）。
+    #
+    # 代价（如实）：失去 C++ 异常栈回溯。nc_guard/sig_check 全是 C，
+    # dex2c 产物的异常用 EX_LandingPad + 显式 goto 分发，不依赖 .eh_frame。
+    # 崩溃时 tombstone 的 backtrace 会残缺 —— 排障时用未清理的中间产物。
+    python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" --strip-meta \
+      2>&1 | sed 's/^/  [meta] /' || {
+      echo "❌ 元数据清理失败 —— 产物将泄露函数边界与工具链指纹" >&2
+      exit 1
+    }
   done
 fi
 
