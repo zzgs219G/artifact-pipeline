@@ -637,4 +637,66 @@ assert ran > 0, '5000 个种子都没触发置换,测试无效'
 print(f'  报错四十一回归 ✅ (类描述符包段零改写,C0+D 全链,{ran} 个种子)')
 PY
 
+# ── 报错五十七回归：字段类型描述符 `->f:I` 不得被当标签改名（2026-11-02）──
+# 真机实证：com.app.lxkd20251026（4893 个非 ASCII 类名/字段名）
+#   sget v1, Lcom/.../<non-ascii>;-><non-ascii>:I
+#   → 被改成 `->...:nc1cec5c` → apktool 回编
+#     `no viable alternative at input 'nc...'` → 整个构建失败。
+# 根因：_LABEL_REF_RE 的 `(?<![\w])` 对非 ASCII 字段名无效，
+#       冒号后的类型描述符 `:I` 被收进标签映射。
+python3 - "$HERE/../anti-diff.py" <<'PYREGRESS'
+import importlib.util, sys, random
+spec = importlib.util.spec_from_file_location('ad', sys.argv[1])
+ad = importlib.util.module_from_spec(spec)
+sys.argv = ['ad']
+try:
+    spec.loader.exec_module(ad)
+except SystemExit:
+    pass
+
+L = '\u06df\u06df\u06df\u06e5\u06a4'      # 芦恩文/阿拉伯文类名片段
+F = '\u06df\u06df\u06a4\u06e5\u06e0'      # 非 ASCII 字段名
+M = '\u06e1\u06e0\u06df\u06a4'
+
+cases = [
+    '    sget v1, Lcom/a;->f:I',
+    '    sget v1, Lcom/app/lxkd202510251/' + L + ';->' + F + ':I',
+    '    iget-object v2, v0, Lcom/a/B;->field:Ljava/lang/String;',
+    '    goto :goto_0',
+    '    if-eqz v0, :cond_0',
+]
+for c in cases:
+    prot, restore = ad._strip_field_types(c)
+    assert restore(prot) == c, 'mask/restore not reversible: ' + c
+for c in cases[:3]:
+    prot, _ = ad._strip_field_types(c)
+    tail = prot.split('->')[-1]
+    assert ':' not in tail, 'field type still has colon: ' + prot
+
+body = [
+    '.method public static ' + M + '(Ljava/lang/String;)Ljava/lang/String;',
+    '    .locals 2',
+    '',
+    '    sget v1, Lcom/app/lxkd202510251/' + L + ';->' + F + ':I',
+    '    const v0, -0x19e',
+    '    :goto_0',
+    '    xor-int/2addr v0, v1',
+    '    if-eqz v0, :cond_0',
+    '    goto :goto_0',
+    '    :cond_0',
+    '    return v0',
+    '.end method',
+]
+ran = 0
+for seed in range(500):
+    out, ch = ad._rename_labels(list(body), random.Random(seed))
+    if not ch:
+        continue
+    ran += 1
+    text = '\n'.join(out)
+    assert '->' + F + ':I' in text, 'seed=%d field type I rewritten' % seed
+assert ran > 0, 'no seed triggered label rename, test ineffective'
+print('  报错五十七回归 OK (字段类型零改写, %d 个种子)' % ran)
+PYREGRESS
+
 echo '✅ 冒烟测试全部通过'

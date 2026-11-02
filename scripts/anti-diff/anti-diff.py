@@ -199,6 +199,49 @@ _TRY_RE = re.compile(r'^\s*\.catch(?:all)?\s', re.M)
 _LABEL_DEF_RE = re.compile(r'^\s*(:[A-Za-z0-9_.$]+)\s*$')
 _LABEL_REF_RE = re.compile(r'(?<![\w])(:[A-Za-z0-9_.$]+)\b')
 
+# ⚠️ 2026-11-02 修【字段类型描述符被当标签改名 → 回编失败】
+#
+# smali 里 `:Xxx` 有两种完全不同的含义:
+#   ① 跳转标签引用：`goto :cond_0` / `if-eqz v0, :goto_0`
+#      → 冒号前一定是【空白或行首】
+#   ② 字段/方法的类型描述符：`sget v1, Lcom/a/B;->f:I`
+#      → 冒号前紧邻【字段名最后一个字符】，无空白
+#
+# _LABEL_REF_RE 用 `(?<![\w]):` 排除「前面是字母数字」的情况，但中文/芦恩文/
+# 阿拉伯文等非 ASCII 标识符不算 \w 的 ASCII 范围（Python 里 \w 是 Unicode
+# 感知的，但 `۠` 这类组合符仍可能被判定为 \w，实测漏了），于是：
+#
+#   原始: sget v1, Lcom/.../۟۟۟ۥۤ;->۟۟ۤۥ۠:I
+#   改后: sget v1, Lcom/.../۟۟۟ۥۤ;->۟۟ۤۥ۠:nc1cec5c   ← I 被换成标签名
+#
+# 回编报 `no viable alternative at input 'nc…'`（实测样本
+# com.app.lxkd20251026，该 App 有 4893 个非 ASCII 类名/字段名）。
+#
+# 同类坑已踩过两次（本文件上方 .local 调试行的注释）：描述符不是标签。
+# 这次补上【字段类型】这一处:判据是「冒号前一个字符不是空白」。
+_FIELD_TYPE_RE = re.compile(r'->[^\s]*:[A-Za-z0-9_$\[\]/;<>]+')
+
+
+def _strip_field_types(line):
+    """把 `->field:Type` 里的 `:Type` 换成占位符，避免被当标签改名。
+
+    返回 (替换后的行, 还原函数)。"""
+    saved = []
+
+    def _save(m):
+        saved.append(m.group(0))
+        return '->\x00%d\x00' % (len(saved) - 1)
+
+    new = _FIELD_TYPE_RE.sub(_save, line)
+
+    def restore(s):
+        for i, orig in enumerate(saved):
+            s = s.replace('->\x00%d\x00' % i, orig)
+        return s
+
+    return new, restore
+
+
 # smali 字符串字面量:值里允许 \" 转义(报错二十二式教训:_LABEL_REF_RE 原先
 # 对 const-string 行内的 ":xxx" 也做标签替换,把 jsoup CSS 选择器
 # ":not(%s)"、Compose "CC(remember):MainActivity.kt#9igjgp" 等 1391 处
@@ -262,7 +305,9 @@ def _rename_labels(method_lines, rng):
         # 指令行里的 label 引用(goto :x / if-eqz v0, :x / .packed-switch 后的目标等)
         # 只收"行内出现的、以冒号开头的 token",且不是字符串里的内容
         # smali 标签引用只出现在分支指令与 .packed-switch/.sparse-switch/.array-data 的目标行
-        for m2 in _LABEL_REF_RE.finditer(ln):
+        # ⚠️ 字段类型描述符 `->f:I` 必须先屏蔽,否则 `:I` 会被当标签(2026-11-02)
+        _ln_prot, _restore = _strip_field_types(ln)
+        for m2 in _LABEL_REF_RE.finditer(_ln_prot):
             tok = m2.group(1)
             # 排除误伤:字符串字面量里的冒号(如 "http://")已被上面
             # 行级正则限定在行内,且 label token 不会出现在引号内,因为
@@ -300,7 +345,9 @@ def _rename_labels(method_lines, rng):
         if _LOCAL_DEBUG_RE.match(ln):
             out.append(ln)
             continue
-        out.append(_replace_outside_strings(ln, _do))
+        # ⚠️ 字段类型描述符 `->f:I` 先屏蔽再替换,最后还原(2026-11-02)
+        _prot, _restore2 = _strip_field_types(ln)
+        out.append(_restore2(_replace_outside_strings(_prot, _do)))
     return out, len(mapping)
 
 
