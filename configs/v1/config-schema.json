@@ -4,7 +4,7 @@
     {
       "key": "sigcheck",
       "label": "签名校验",
-      "desc": "校验 APK 签名证书，不匹配则不启动。启动时一次性校验；运行期有独立心跳线程每 5 秒喂食一次，开销可忽略",
+      "desc": "签名不匹配直接拒绝启动。性能损耗：几乎为零",
       "type": "leaf",
       "default": true,
       "arg": "--sigcheck"
@@ -12,7 +12,7 @@
     {
       "key": "dex2c",
       "label": "Dex2C",
-      "desc": "将 Java 方法转译为 C，编译进 so 库。转译后是本地 C 调用，不经 JIT/AOT 解释，执行效率通常优于原字节码",
+      "desc": "Java 方法转成 C 编译进 so。性能：比原版更快（不再走解释执行）",
       "type": "parent",
       "default": false,
       "arg": "--dex2c",
@@ -32,14 +32,14 @@
               "is": true
             }
           },
-          "hint": "留空并勾选签名校验：自动抽取主 Activity 类；也可填写 com.test.** 等定向规则。不支持 ** 全量（整个 App 转译，引擎不支持）"
+          "hint": "留空并勾选签名校验：自动抽取主界面类；也可填写 com.test.** 等定向规则。不支持 ** 全量（整个 App 转译，引擎不支持）"
         }
       ]
     },
     {
       "key": "stringenc",
       "label": "字符串加密",
-      "desc": "加密 dex 中的字符串常量，运行时解码。首次解码后进进程内缓存，重复取用无额外开销；开启全量规则（**）且 App 极大时，首次解码量会相应增加（本项未实测）",
+      "desc": "dex 字符串常量加密，运行时自动解密。性能损耗：几乎为零（首次解密后走缓存）",
       "type": "parent",
       "default": false,
       "arg": "--stringenc",
@@ -60,7 +60,7 @@
         {
           "key": "dex2c_stub",
           "label": "解密桩也抽进 so",
-          "desc": "将解密桩内核（dn / mix64 / keyByte）一并转译为 C 编入 so，dex 中仅保留 native 声明。需同时启用字符串加密；不勾选时桩以 Java 形式留在 dex 中。性能影响可忽略：桩只在首次解码字符串时执行，结果进缓存",
+          "desc": "解密桩内核也编进 so，dex 里只剩声明。性能：无损（解密结果进缓存，只算一次）",
           "type": "checkbox",
           "default": false,
           "value_kind": "flag",
@@ -71,7 +71,7 @@
     {
       "key": "antidiff",
       "label": "防对比混淆",
-      "desc": "改写 dex 结构，降低原版与加固版的可比性。仅改静态结构，不增加运行期开销",
+      "desc": "改写 dex 结构，原版与加固版无法直接比对。性能损耗：零（只改文件结构）",
       "type": "leaf",
       "default": false,
       "arg": "--anti-diff"
@@ -79,7 +79,7 @@
     {
       "key": "envcheck",
       "label": "环境检测",
-      "desc": "检测 Frida / Xposed / 调试器等运行环境。启动时一次性检测；之后每 20 秒后台复查一次，开销可忽略",
+      "desc": "检测 Frida / Xposed / 调试器，发现即处置。性能损耗：几乎为零",
       "type": "leaf",
       "default": false,
       "arg": "--envcheck"
@@ -87,7 +87,7 @@
     {
       "key": "packer",
       "label": "基础加壳",
-      "desc": "对整个 dex 加密（固定为最后一步）。注意：dex 恢复为非标准形态后系统无法生成 AOT 产物，代码以解释方式执行，启动与高频路径会变慢。这是本项的主要代价",
+      "desc": "整个 dex 加密。性能代价：启动变慢（系统无法预编译 dex，代码解释执行）",
       "type": "parent",
       "default": false,
       "arg": "--packer",
@@ -96,7 +96,7 @@
         {
           "key": "smaller",
           "label": "体积优化",
-          "desc": "压缩产物体积，不改变防护强度，也不影响运行性能",
+          "desc": "压缩产物体积。性能：无影响",
           "type": "checkbox",
           "default": true,
           "value_kind": "flag",
@@ -105,7 +105,7 @@
         {
           "key": "exclude_x86",
           "label": "排除模拟器架构",
-          "desc": "产物不包含 x86 / x86_64 架构的 so。多数设备只需 arm / arm64；剔除后 x86 模拟器无法安装该包。对真机运行性能无影响",
+          "desc": "产物不带 x86 / x86_64。真机性能：无影响（只是少两个架构的 so）",
           "type": "checkbox",
           "default": true,
           "value_kind": "arg_value",
