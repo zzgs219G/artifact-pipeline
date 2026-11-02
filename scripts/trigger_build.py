@@ -166,6 +166,18 @@ def build_config(args) -> str:
         "packer": {"enabled": on["packer"]},
     }
 
+    # ── packer 子选项：--all / --packer 时显式带上（2026-11-02）────────
+    # 为什么显式写而不依赖 schema default：
+    #   · 用户明确要求「体积优化」与「排除模拟器架构」都默认勾上；
+    #   · schema default 只是 resolve-config 的兜底，CLI 不写会让
+    #     `--dry-run` 打印的 payload 与实际生效项不一致 —— 而 payload
+    #     正是用户/CI 用来核对"我到底勾了什么"的唯一可见载体。
+    # smaller       → --packer-smaller（体积优化）
+    # exclude_x86   → --exclude-abi x86,x86_64（剔除模拟器 so 目录）
+    if on["packer"]:
+        cfg["packer"]["smaller"] = True
+        cfg["packer"]["exclude_x86"] = True
+
     # ── 规则文件：值是【文件内容】而非路径 ───────────────────────────
     # resolve-config.py 的 value_kind=rules_file 语义：非空 → 写
     # schema_rules/<module>_<child>.txt，把路径追加在 arg 后；

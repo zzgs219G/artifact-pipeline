@@ -168,17 +168,22 @@ check("T6d config 缺 packer 键 → 视为 disabled(旧 App 向后兼容)",
 
 # T6e(报错四十三)packer 升 parent:子复选框 smaller(体积优化,默认 true)
 rc, args, files, err = run(cfg(packer={"enabled": True, "smaller": True}))
-check("T6e 勾 packer+smaller → --packer --packer-smaller",
-      rc == 0 and args == ["--packer", "--packer-smaller"], f"rc={rc} args={args} err={err}")
+# ⚠️ 2026-11-02：exclude_x86 的 schema default 改 false→true（用户拍板：
+# 体积排除也该默认勾上）。所以这三条断言的 args 末尾多了 --exclude-abi 两项。
+check("T6e 勾 packer+smaller → --packer --packer-smaller（exclude_x86 默认开）",
+      rc == 0 and args == ["--packer", "--packer-smaller", "--exclude-abi", "x86,x86_64"],
+      f"rc={rc} args={args} err={err}")
 
 # T6f 子键缺失 → 按 schema default(true)
 rc, args, files, err = run(cfg(packer={"enabled": True}))
 check("T6f 缺 smaller 子键 → 按 default(true) 吐 --packer-smaller",
-      rc == 0 and args == ["--packer", "--packer-smaller"], f"rc={rc} args={args} err={err}")
+      rc == 0 and args == ["--packer", "--packer-smaller", "--exclude-abi", "x86,x86_64"],
+      f"rc={rc} args={args} err={err}")
 
 # T6g 显式不勾 smaller → 只吐 --packer
 rc, args, files, err = run(cfg(packer={"enabled": True, "smaller": False}))
-check("T6g smaller=false → 仅 --packer", rc == 0 and args == ["--packer"],
+check("T6g smaller=false → 仅 --packer（exclude_x86 仍按默认开）",
+      rc == 0 and args == ["--packer", "--exclude-abi", "x86,x86_64"],
       f"rc={rc} args={args} err={err}")
 
 # T6h smaller 非布尔 → 报错退出(布尔校验)
@@ -202,10 +207,11 @@ check("T6k 勾 exclude_x86 → --packer --packer-smaller --exclude-abi x86,x86_6
       rc == 0 and args == ["--packer", "--packer-smaller", "--exclude-abi", "x86,x86_64"],
       f"rc={rc} args={args} err={err}")
 
-# T6l exclude_x86 缺失 → 按 schema default(false) 不追加
+# T6l exclude_x86 缺失 → 按 schema default(true) 追加（2026-11-02 改）
 rc, args, files, err = run(cfg(packer={"enabled": True, "smaller": True}))
-check("T6l 缺 exclude_x86 子键 → default(false) 不追加",
-      rc == 0 and args == ["--packer", "--packer-smaller"], f"rc={rc} args={args} err={err}")
+check("T6l 缺 exclude_x86 子键 → default(true) 追加 --exclude-abi",
+      rc == 0 and args == ["--packer", "--packer-smaller", "--exclude-abi", "x86,x86_64"],
+      f"rc={rc} args={args} err={err}")
 
 # T6m 显式不勾 → 不追加
 rc, args, files, err = run(cfg(packer={"enabled": True, "exclude_x86": False}))
