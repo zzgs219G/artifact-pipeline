@@ -309,11 +309,32 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   # dex2c 的 dcc.py 要在自身目录运行 → 子 shell 隔离，主进程 cwd 不漂移。
   # CLI: -i/-o 旗标式且 -o 必填(no-build 下 -o 不落地产物,传哑值),
   # 另传 --allow-global 对齐规则语义、--disable-signing 防御性关签名(no-build 下本就不执行)。
+  #
+  # ── --dynamic-register：业务方法名不进 .dynsym（2026-11-02）────────────
+  # 不开这个开关时 writer.py:111 生成 `extern "C" JNIEXPORT ... Java_xxx`，
+  # 而 JNIEXPORT 自带 visibility("default") → 对 -fvisibility=hidden 免疫 →
+  # 业务方法名 + 精确字节数全部躺在 .dynsym 里（实测 7 个导出，含
+  # MainActivity.k = 21700 B —— 这个数字本身就是情报，等于告诉逆向者
+  # 哪个方法最值得啃）。
+  #
+  # 开启后 writer.py:106 走另一分支，生成 `void Java_xxx(...)`，【不带
+  # JNIEXPORT】→ 恢复受 -fvisibility=hidden 支配 → 变 hidden → 不导出；
+  # 改由 DynamicRegister.cpp 的 FindClass + RegisterNatives 表在
+  # JNI_OnLoad 里注册（Dex2C.cpp:283 无条件调用）。
+  #
+  # ⚠️ 曾有前车之鉴（a7d9cbc，2026-10-19 回退动态注册）：那次崩的原因是
+  #    【constructor(200) 里调 FindClass】—— dlopen 内部执行，classloader
+  #    上下文未建立。本次走 JNI_OnLoad（ART 主动回调，会切到发起 load 的
+  #    loader），位置不同。真机实证（Redmi 2602BRT18C / Android 17 /
+  #    arm64，loadLibrary 在 <clinit> 里、FindClass 目标就是该 <clinit>
+  #    所属类）：EARLY FindClass OK / RegisterNatives -> 0。
+  #    不要把 constructor 的失败经验平移到 JNI_OnLoad 上。
   module_cd_run "$DEX2C_DIR" python3 dcc.py -i "$LINK_APK" -o "$WORK/dex2c-no-build.apk" \
     --project-archive "$WORK/dcc-project.zip" \
     --no-build \
     --disable-signing \
     --allow-global \
+    --dynamic-register \
     --filter "$DCC_FILTER"
 
   require_file "$WORK/dcc-project.zip" "dex2c 工程包（filter 可能未命中任何方法）"
