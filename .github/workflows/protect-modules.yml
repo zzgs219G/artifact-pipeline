@@ -325,7 +325,7 @@ jobs:
           [[ -n "$KEY_PASS"     ]] || missing+=("KEY_PASSWORD")
           if (( ${#missing[@]} > 0 )); then
             echo "❌ 请求了 sign=true 但缺少 Secrets: ${missing[*]}" | tee -a build.log
-            echo "   存法见 docs/CI签名.md" | tee -a build.log
+            echo "   存法见 docs/AI接手文档.md" | tee -a build.log
             exit 1
           fi
 

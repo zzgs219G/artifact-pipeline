@@ -257,7 +257,7 @@ def _report_signature(path: str, requested: bool) -> None:
     elif requested:
         print("   ❌ 请求了 --sign 但产物未签名！")
         print("      检查 Secrets 是否配齐、流水线「签名产物」步骤日志")
-        print("      详见 docs/CI签名.md")
+        print("      详见 docs/AI接手文档.md")
     else:
         print("   ℹ 未签名（本次未请求 --sign，符合默认契约）")
 
@@ -477,7 +477,7 @@ def main() -> int:
                          "（产出可直接安装）。需要 KEYSTORE_BASE64 / "
                          "KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD 四个 Secrets；"
                          "⚠️ keystore 必须与上传 APK 同源，否则证书绑定失败"
-                         "（见 docs/CI签名.md）")
+                         "（见 docs/AI接手文档.md）")
     args = ap.parse_args()
 
     if not os.path.isfile(args.apk):
