@@ -151,6 +151,10 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/anti-diff/tests/test-smoke.sh
 
+      - name: dex 容量检测（33 断言，含报错五十九回归）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/repack/tests/test_dex_capacity.py
+
       - name: packer 冒烟（26 项，含 schema→arg 契约）
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/packer/tests/test-packer.sh
