@@ -33,6 +33,17 @@ _RULES = _load_module('rules_to_filter', 'scripts/filter/rules-to-filter.py')
 # smali 目录名约定复用 inject-loadlib 的单一真相(报错七:别处不要另写一份正则)
 _INJECT = _load_module('inject_loadlib', 'scripts/inject/inject-loadlib.py')
 SMALI_DIR_RE = _INJECT.SMALI_DIR_RE
+# dex 容量判定(报错五十九):桩落点不能固定 smali/,大型包 classes.dex 会贴顶
+_DEX_CAPACITY = _load_module('dex_capacity', 'scripts/repack/dex-capacity.py')
+
+# 解密桩占用的方法数上界（用于 dex 容量判定）。
+# 桩骨架实测 5 个方法定义 + 少量外部引用（String/Base64 等），给 30 的上界；
+# dex-capacity 侧另有 2000 工程余量，这里不需要精确。
+_STUB_METHOD_BUDGET = 30
+
+# 原始 APK 路径（--apk）。给了就让容量判定读 dex header 得精确方法数；
+# 由 main() 在解析参数后赋值，_pick_smali_root() 读取。
+_APK_FOR_CAPACITY = None
 
 # ── 解密桩约定 ──────────────────────────────────────────────────────
 # 【桩随机化】以下 STUB_DESC/STUB_PKG_DIR/STUB_FILE/STUB_DECRYPT_METHOD 是
@@ -1565,14 +1576,20 @@ def read_existing_salt(decompiled_dir: str):
     return read_stub_seed(content), False
 
 def _pick_smali_root(decompiled_dir: str) -> str:
-    """桩落在哪个 smali 目录:优先 smali/,否则第一个 smali*/。"""
-    preferred = os.path.join(decompiled_dir, 'smali')
-    if os.path.isdir(preferred):
-        return preferred
-    for name in sorted(os.listdir(decompiled_dir)):
-        if SMALI_DIR_RE.match(name) and os.path.isdir(os.path.join(decompiled_dir, name)):
-            return os.path.join(decompiled_dir, name)
-    raise SystemExit(f'❌ 解包目录下找不到 smali/ 或 smali_classes*/ : {decompiled_dir}')
+    """桩落在哪个 smali 目录（报错五十九：按容量选，不再固定优先 smali/）。
+
+    旧实现固定优先 `smali/`（= classes.dex）。真实大型包经 R8 编译后
+    classes.dex 方法数贴顶（实测囤次元包 65519/65536，余量 17），桩写进去
+    会让 smali 汇编期报 "Unsigned short value out of range: 65536"。
+    （dex-capacity.py 文档有完整实测过程。）
+
+    现在：够写就仍用 smali/（与改动前逐字节一致）；不够就复用/新建注入
+    dex。返回值仍是绝对路径，调用方逻辑不变。
+    """
+    chosen = _DEX_CAPACITY.pick_target_dir(
+        decompiled_dir, need_methods=_STUB_METHOD_BUDGET,
+        apk_path=_APK_FOR_CAPACITY)
+    return os.path.join(decompiled_dir, chosen)
 
 def write_components_stamp(decompiled_dir: str, cls_desc: str) -> str:
     """记录本次注入的组件(类名 + 源文件路径)。
@@ -2042,6 +2059,9 @@ def main():
                          '用于 dex2c 联动的前置轮——桩必须留在 dex 里让 dex2c 转译内核，'
                          '摘除由 STEP5 的 --remove-stub-only 单独完成。')
     ap.add_argument('--quiet', action='store_true', help='只打错误')
+    ap.add_argument('--apk', metavar='PATH', default=None,
+                    help='原始 APK(报错五十九): 给了就从 dex header 读权威方法数,'
+                         '据此决定解密桩落在哪个 dex;不给则按扫描估算(保守上浮)')
     args = ap.parse_args(argv)
 
     if not os.path.isdir(args.decompiled):
@@ -2056,6 +2076,11 @@ def main():
     if not includes:
         print('❌ 规则文件没有产生任何包含规则(只有排除/注释?)', file=sys.stderr)
         return 1
+
+    # 报错五十九:把原始 APK 交给容量判定(读 dex header 得权威方法数)。
+    # 存放在模块级变量,供 _pick_smali_root() 取用;不设 = 回落扫描估算。
+    global _APK_FOR_CAPACITY
+    _APK_FOR_CAPACITY = args.apk
 
     exclude_methods = set()
     if args.exclude_methods:

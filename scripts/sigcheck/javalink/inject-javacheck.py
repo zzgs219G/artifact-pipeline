@@ -29,6 +29,25 @@ import json
 import os
 import re
 import sys
+import importlib.util
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_HERE)))   # javalink → sigcheck → scripts → 仓库根
+
+
+def _load_dex_capacity():
+    """加载 dex 容量模块（文件名带连字符，不能常规 import）。
+
+    路径从本文件位置推算（报错三教训：脚本移动后必须重算，别用相对 cwd）。
+    """
+    path = os.path.join(_ROOT, 'scripts', 'repack', 'dex-capacity.py')
+    spec = importlib.util.spec_from_file_location('dex_capacity', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+dex_capacity = _load_dex_capacity()
 
 MARKER = '# nc-javacheck-applied v1'
 CALL_MARKER = '# nc-javacheck-call'
@@ -574,7 +593,20 @@ def _create_oncreate_override(path, desc, super_desc):
 
 # ───────────────────────── 主流程 ─────────────────────────
 
-def do_inject(decompiled_dir, so_name, wrapper_override=None):
+def _javacheck_method_budget():
+    """本次注入要占用的方法数上界（用于 dex 容量判定）。
+
+    实测（把 Guard + NcLink + Guard$Hb 汇编进一个空 dex）：
+      method_ids 增量 = 25（3 个类定义 8 个方法 + 17 个新增外部方法引用）
+      string_ids 增量 = 59（不构成构建期失败条件，见 dex-capacity.py 文档）
+
+    这里给 40 的上界（>25），因为名字长度会影响 proto/type 去重结果，
+    上界留宽比"刚好"安全。dex-capacity 侧另有 2000 的工程余量。
+    """
+    return 40
+
+
+def do_inject(decompiled_dir, so_name, wrapper_override=None, apk_path=None):
     comp_path = os.path.join(decompiled_dir, COMPONENTS_JSON)
     if os.path.isfile(comp_path):
         print(f'ℹ️ 已注入过({COMPONENTS_JSON} 在位),幂等跳过')
@@ -589,9 +621,20 @@ def do_inject(decompiled_dir, so_name, wrapper_override=None):
         info['launchers'][0] if info['launchers'] else None)
     print(f'🏷️ 自适应命名: 逻辑类={wrapper} 桥接类={BRIDGE_DESC}')
 
-    wrapper_path = os.path.join(decompiled_dir, 'smali',
+    # ── 落点选择（报错五十九）────────────────────────────────────────
+    # 硬编码 'smali' 会在大型真实包上必然失败：classes.dex 经 R8 编译后
+    # 方法数几乎必然贴顶（实测囤次元包 65519/65536，余量 17），而 Guard +
+    # NcLink + Guard$Hb 实测要占 25 个方法 → 汇编期报
+    # "Unsigned short value out of range: 65536"（Instruction35c/方法索引）。
+    # 故先查容量：够就仍写 smali/（与改动前逐字节一致），不够就新建 n+1 目录。
+    target_dir = dex_capacity.pick_target_dir(
+        decompiled_dir, need_methods=_javacheck_method_budget(),
+        apk_path=apk_path)
+    target_root = os.path.join(decompiled_dir, target_dir)
+
+    wrapper_path = os.path.join(target_root,
                                 wrapper[1:-1].replace('/', '/') + '.smali')
-    bridge_path = os.path.join(decompiled_dir, 'smali',
+    bridge_path = os.path.join(target_root,
                                BRIDGE_DESC[1:-1] + '.smali')
     for p in (wrapper_path, bridge_path):
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -600,7 +643,7 @@ def do_inject(decompiled_dir, so_name, wrapper_override=None):
     with open(bridge_path, 'w', encoding='utf-8') as fp:
         fp.write(render_bridge(so_name))
     # 心跳喂食循环(daemon Thread 子类,与 Guard 同目录)
-    hb_path = os.path.join(decompiled_dir, 'smali',
+    hb_path = os.path.join(target_root,
                            (wrapper[1:-1] + '$Hb') + '.smali')
     with open(hb_path, 'w', encoding='utf-8') as fp:
         fp.write(render_hb(wrapper))
@@ -695,7 +738,7 @@ def main():
         return do_clean(argv[1])
 
     decompiled_dir = argv[0]
-    so_name, wrapper_override = 'nc', None
+    so_name, wrapper_override, apk_path = 'nc', None, None
     i = 1
     while i < len(argv):
         if argv[i] == '--so-name' and i + 1 < len(argv):
@@ -704,13 +747,18 @@ def main():
         elif argv[i] == '--wrapper-name' and i + 1 < len(argv):
             wrapper_override = argv[i + 1]
             i += 2
+        elif argv[i] == '--apk' and i + 1 < len(argv):
+            # 原始 APK：给了就能从 dex header 读权威方法数（20ms），
+            # 不给则回落到统计 smali 目录的 .method 数（偏乐观，但仍安全）。
+            apk_path = argv[i + 1]
+            i += 2
         else:
             print(f'未知参数: {argv[i]}', file=sys.stderr)
             return 1
     if not os.path.isdir(decompiled_dir):
         print(f'解包目录不存在: {decompiled_dir}', file=sys.stderr)
         return 1
-    return do_inject(decompiled_dir, so_name, wrapper_override)
+    return do_inject(decompiled_dir, so_name, wrapper_override, apk_path=apk_path)
 
 
 if __name__ == '__main__':

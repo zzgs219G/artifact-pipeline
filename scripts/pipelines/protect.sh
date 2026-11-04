@@ -281,6 +281,7 @@ if [[ $LINK_STUB -eq 1 ]]; then
   fi
   python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
     "$WORK/pre" "$STRING_RULES" "${PRE_ENC_ARGS[@]}" "${PRE_ENC_ARGS2[@]}" \
+    --apk "$IN_APK" \
     --emit-stub-filter "$WORK/stub_filter.txt"
   # 联动前提校验:桩必须真的存在(零加密 + 无旧桩 = 联动空转,fail-fast
   # 而非让用户以为生效)。encrypt-strings 在无桩时写空文件。
@@ -832,8 +833,14 @@ if [[ $WANT_SIGCHECK -eq 1 ]]; then
   #
   # 故：dex2c 组合 → 记警告放行；非 dex2c 组合 → 仍 fail-fast
   #   （那种场景没有 native 壳保护，注入不到就是真缺口，必须红）。
+  #
+  # --apk（报错五十九，2026-11-04）：把原始 APK 传进去，让注入器从 dex header
+  #   读权威方法数来决定落点。不给也能跑（回落到扫 .method × 1.25 的保守估算），
+  #   但给了才能精确判断 classes.dex 是否贴顶——真实大型包经 R8 编译后
+  #   classes.dex 常是 65519/65536（余量 17），固定写 smali/ 必炸
+  #   "Unsigned short value out of range: 65536"。
   if ! python3 "$ROOT/scripts/sigcheck/javalink/inject-javacheck.py" \
-      "$WORK/decompiled" --so-name nc; then
+      "$WORK/decompiled" --so-name nc --apk "$STEP5_APK"; then
     if [[ $WANT_TRANSPILE -eq 1 ]]; then
       log_warn "javacheck 无可用调用点 —— dex2c 组合下 onCreate 已是 native 壳（报错三十九防线跳过），放行；app 侧 <clinit> loadLibrary 兜底仍在"
     else
@@ -891,10 +898,12 @@ if [[ $WANT_STRINGENC -eq 1 ]]; then
     fi
     python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
       "$WORK/decompiled" "$STRING_RULES" "${STRING_ENC_ARGS[@]}" \
+      --apk "$STEP5_APK" \
       --emit-stub-dex "$WORK/stub.dex" ${_CM_ARG[@]+"${_CM_ARG[@]}"}
   else
     python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
-      "$WORK/decompiled" "$STRING_RULES" "${STRING_ENC_ARGS[@]}"
+      "$WORK/decompiled" "$STRING_RULES" "${STRING_ENC_ARGS[@]}" \
+      --apk "$STEP5_APK"
   fi
 fi
 fi
