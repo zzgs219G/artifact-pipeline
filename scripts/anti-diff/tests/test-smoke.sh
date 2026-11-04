@@ -699,4 +699,79 @@ assert ran > 0, 'no seed triggered label rename, test ineffective'
 print('  报错五十七回归 OK (字段类型零改写, %d 个种子)' % ran)
 PYREGRESS
 
+# ── 报错六十回归:超宽寄存器方法必须跳过变换 D ──────────────────────
+# 真实事故(CI 41895447940):`j$/time/chrono/l.smali#d0()[[I` 有 .locals 303、
+# 7903 行、用到 v302。原包 `move-object/16 v302, v16` 合法,但变换 D 置换
+# 寄存器号后 apktool 回编输出 `move-object/from16 v302, v3`,而 smali 汇编器
+# 把 /from16 的寄存器号卡在 v0..v255 → 整包回编失败
+# `Invalid register: v302. Must be between v0 and v255`。
+python3 - "$HERE" <<'PYREGRESS60'
+import importlib.util
+import os
+import sys
+
+import random
+
+# heredoc 走 stdin，__file__ 是 '<stdin>'，路径必须由 shell 传入（§HERE）
+HERE = sys.argv[1]
+ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
+spec = importlib.util.spec_from_file_location(
+    'ad', os.path.join(ROOT, 'scripts', 'anti-diff', 'anti-diff.py'))
+ad = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ad)
+
+# ① 检测函数本身
+wide = ['    .locals 303', '    move-object/16 v302, v16',
+        '    move-object/16 v300, v16', '    return-object v302']
+assert ad._has_register_above_255(wide) is True, 'v302 应被识别为超宽'
+narrow = ['    .locals 4', '    move-object/16 v15, v3', '    return-object v15']
+assert ad._has_register_above_255(narrow) is False, 'v15 不应被判超宽'
+assert ad._has_register_above_255(['    .locals 0']) is False, '无寄存器不应判超宽'
+# 边界:v255 是上限内，v256 越界
+assert ad._has_register_above_255(['    move-object/from16 v255, v3']) is False,     'v255 是 smali 上限内，不应跳过'
+assert ad._has_register_above_255(['    move-object/from16 v256, v3']) is True,     'v256 越界，必须跳过'
+# 注释行不算
+assert ad._has_register_above_255(['    # move-object/16 v302, v16']) is False,     '注释里的寄存器不应触发跳过'
+
+# ② 端到端:超宽方法经 _process_method_block 后，寄存器编号必须原样保留
+method = [
+    '.method public static d0()[[I',
+    '    .locals 303',
+    '',
+    '    move-object/16 v302, v16',
+    '    move-object/16 v275, v16',
+    '    :goto_0',
+    '    goto :goto_0',
+    '    return-object v302',
+    '.end method',
+]
+ad._WIDE_SKIP_STAT['n'] = 0
+out, _ch = ad._process_method_block(list(method), random.Random(7), 1, 1, False)
+text = '\n'.join(out)
+assert ad._WIDE_SKIP_STAT['n'] == 1, '应记录一次跳过，实得 %d' % ad._WIDE_SKIP_STAT['n']
+assert 'v302' in text, '超宽方法的 v302 不得被改写：\n' + text
+assert 'v275' in text, '超宽方法的 v275 不得被改写：\n' + text
+
+# ③ 对照:窄方法仍要做置换（不能因为加了保护就整体失效）
+narrow_method = [
+    '.method public static n0()V',
+    '    .locals 6',
+    '',
+    '    move-object/16 v5, v3',
+    '    return-void',
+    '.end method',
+]
+changed_any = False
+for seed in range(50):
+    ad._WIDE_SKIP_STAT['n'] = 0
+    out2, _c = ad._process_method_block(list(narrow_method), random.Random(seed),
+                                        1, 1, False)
+    if '\n'.join(out2) != '\n'.join(narrow_method):
+        changed_any = True
+        break
+assert changed_any, '窄方法应当仍被置换（保护不应误伤正常方法）'
+
+print('  报错六十回归 OK (v>255 跳过 D, v<=255 照常置换, 记账可见)')
+PYREGRESS60
+
 echo '✅ 冒烟测试全部通过'

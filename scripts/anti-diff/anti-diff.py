@@ -1340,6 +1340,40 @@ def _method_name(block_lines):
     return m.group(1) if m else ''
 
 
+# 报错六十统计：因寄存器号 >255 而跳过变换 D 的方法数（主流程汇总打日志）
+_WIDE_SKIP_STAT = {'n': 0}
+
+# smali 汇编器对 22x（/from16）形态寄存器号的实际上限。
+# 规范写的是 v65535，但 apktool 3.0.3 内置的 smali 实现限制在 v0..v255——
+# 实测报 `Invalid register: v302. Must be between v0 and v255, inclusive.`
+# 以"实测行为"为准，不按规范推断（照规范写 v65535 会漏掉这个 bug）。
+_SMALI_REG_LIMIT = 255
+
+
+def _has_register_above_255(method_lines):
+    """方法体是否出现 v256 及以上的寄存器号（报错六十）。
+
+    为什么需要这个检查：变换 D 只改寄存器号、不改指令形态，但 apktool
+    回编时会按新的操作数重新选形态。某些超大方法（实测
+    `j$/time/chrono/l.smali#d0()[[I`：.locals 303、7903 行）原包里用
+    `move-object/16 v302, v16`（apktool 接受），置换后寄存器号一变，
+    回编倾向输出 `move-object/from16`，而该形态被 smali 汇编器卡在
+    v0..v255 → `Invalid register`。
+
+    只做文本级 token 扫描：'->' 之后的部分（方法名/字段名）与字符串
+    字面量里可能出现形似寄存器的内容，但那种情况最多让本检查多跳过几个
+    方法（少做点置换），不会产生错误产物——宁可保守。
+    """
+    for ln in method_lines:
+        s = ln.strip()
+        if not s or s.startswith('#'):
+            continue
+        for m in re.finditer(r'\bv(\d+)\b', s):
+            if int(m.group(1)) > _SMALI_REG_LIMIT:
+                return True
+    return False
+
+
 def _method_is_native(block_lines):
     return any(' native ' in ln or ln.rstrip().endswith(' native')
                for ln in block_lines[:1])
@@ -1375,7 +1409,29 @@ def _process_method_block(block_lines, rng, max_per_method, max_cond_flip,
             # 用 v0..v3 局部寄存器,若在 D 之后再插,v0..v3 依然指向局部区,
             # 安全;D 先做能让 E/C 的新指令也落在置换后的坐标系,增加噪声)
             body = lines[1:-1]
-            new_body, nd = _permute_registers(body, rng)
+            # 报错六十(v255 上限,2026-11-04):超宽方法整方法跳过 D。
+            #
+            # 根因:某些 R8/Kotlin 产物方法寄存器数远超 255(实测
+            # `j$/time/chrono/l.smali#d0()[[I` 有 .locals 303、7903 行、
+            # 用到 v302)。原包里这类寄存器走 `move-object/16 v302, v16`
+            # —— `/16` 是 16 位寄存器形态,apktool 接受。但变换 D 会按
+            # 寄存器号替换 token,替换后 apktool 重新选形态时倾向输出
+            # `move-object/from16 v302, v3`,而 **smali 汇编器把 /from16
+            # 的寄存器号限制在 v0..v255**,于是回编报
+            # `Invalid register: v302. Must be between v0 and v255`。
+            #
+            # 为什么选择"整方法跳过"而不是别的修法:
+            #   · 把置换域上界压到 255 → v256+ 的寄存器无法参与置换,但
+            #     它们与原寄存器混在同一方法里,半数动半数不动会让 wide
+            #     对/别名关系更难推理(报错三十五/三十八的坑);
+            #   · 改写时保留 /16 形态 → 要自己重编码指令格式,风险最高;
+            #   · 这类超宽方法在真实包里极少(本包 46778 个类里只命中 1 个),
+            #     跳过它只是少一点防对比噪声,不影响正确性。
+            if _has_register_above_255(body):
+                new_body, nd = body, False
+                _WIDE_SKIP_STAT['n'] += 1
+            else:
+                new_body, nd = _permute_registers(body, rng)
             if nd:
                 lines = [lines[0]] + new_body + [lines[-1]]
                 changes += 1
@@ -1546,6 +1602,12 @@ def main(argv):
           f' {n_excluded} 个系统/依赖类白名单排除),'
           f' 标签/垃圾指令/条件反折改动 {total_ac} 处,'
           f' 块重排移动 {total_moved} 块')
+    if _WIDE_SKIP_STAT['n']:
+        # 报错六十：显式记账，不静默跳过。静默跳过同样是坑——将来发现
+        # "这个方法怎么没被混淆"时，日志里必须有据可查。
+        print(f'ℹ️ 超宽寄存器方法 {_WIDE_SKIP_STAT["n"]} 个跳过寄存器置换'
+              f'（含 v>={_SMALI_REG_LIMIT + 1} 的寄存器，回编会报 '
+              f'Invalid register；其余变换照常进行）')
     return 0
 
 
