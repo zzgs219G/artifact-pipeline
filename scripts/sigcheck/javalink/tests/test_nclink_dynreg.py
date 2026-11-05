@@ -83,7 +83,7 @@ def main():
     link = read(LINK_C)
     java = read(JAVA)
 
-    print("[1/5] XOR 表还原后与 NcLink.java 逐字一致")
+    print("[1/6] XOR 表还原后与 NcLink.java 逐字一致")
     tabs = parse_xor_tables(src)
     check(f"解析出 6 张表（实得 {len(tabs)}）", len(tabs) == 6,
           str(sorted(tabs)))
@@ -116,7 +116,7 @@ def main():
         check(f"kName_{name} 还原 == {name!r}", got == want,
               f"实得 {got!r}，期望 {want!r}")
 
-    print("[2/5] 签名表与 Java 返回类型一致")
+    print("[2/6] 签名表与 Java 返回类型一致")
     sig_pairs = [
         ('kSig_ncVerify', 'ncVerify'),
         ('kSig_void', 'heartbeat'),
@@ -128,7 +128,7 @@ def main():
         check(f"{tab} 还原 == {java_decl.get(meth)!r}（{meth}）", got == want,
               f"实得 {got!r}，期望 {want!r}")
 
-    print("[3/5] 短名符号已从源码消失（防改回去）")
+    print("[3/6] 短名符号已从源码消失（防改回去）")
     for sym in ('Java_com_nc_link_NcLink_ncVerify',
                 'Java_com_nc_link_NcLink_heartbeat',
                 'Java_com_nc_link_NcLink_selftest'):
@@ -150,7 +150,7 @@ def main():
     check("heartbeat 实现不带 JNIEXPORT",
           not re.search(r'JNIEXPORT[^;\n{]*nc_link_jni_heartbeat', nc_code))
 
-    print("[4/5] 注册调用点与开关组合互斥")
+    print("[4/6] 注册调用点与开关组合互斥")
     check("nc_link_jni.c 定义了 nc_link_register_natives",
           'int nc_link_register_natives(JNIEnv *env)' in src)
     check("头文件声明了同一签名",
@@ -166,7 +166,7 @@ def main():
     check("整文件中 JNI_OnLoad 定义只出现一次",
           len(re.findall(r'JNIEXPORT\s+jint\s+JNICALL\s+JNI_OnLoad', src)) == 1)
 
-    print("[5/5] selftest 缺失时不影响主链路（报错四十九纪律）")
+    print("[5/6] selftest 缺失时不影响主链路（报错四十九纪律）")
     check("selftest 用 weak 引用（未编入时不炸链接）",
           'nc_link_jni_selftest' in src and '__attribute__((weak))' in src)
     # 注册表容量：3 个方法，数组不能小
@@ -174,6 +174,29 @@ def main():
           re.search(r'JNINativeMethod\s+tab\s*\[\s*(\d+)\s*\]', src)
           and int(re.search(r'JNINativeMethod\s+tab\s*\[\s*(\d+)\s*\]',
                             src).group(1)) >= 3)
+
+    print("[6/6] selftest 定义必须带 retain（否则被 --gc-sections 回收）")
+    # 2026-11-04 实测：改动态注册后 selftest 没有任何直接调用者，
+    # 下游只有 weak 引用 → weak 不构成强依赖 → 静态库形态 + --gc-sections
+    # 时链接器把整段回收 → 构建全绿但 selftest 永远 ULE（静默失效）。
+    # 唯一有效的修法是在定义侧加 used+retain（属性对 extern 声明无效）。
+    nox_jni = os.path.join(os.path.dirname(ROOT), 'nox', 'scripts', 'so-guard',
+                           'nc_guard_jni.c')
+    if not os.path.isfile(nox_jni):
+        print(f"  ⚠️ 跳过：找不到上游 {nox_jni}（CI 未 clone ../nox 时正常）")
+    else:
+        ns = read(nox_jni)
+        m = re.search(r'(__attribute__\(\([^)]*\)\)\s*)?\n?jint\s+nc_link_jni_selftest',
+                      ns)
+        check("nc_link_jni_selftest 定义前有 __attribute__",
+              m is not None and m.group(1) is not None,
+              "缺属性 → --gc-sections 下会被回收")
+        if m and m.group(1):
+            check("属性里同时有 used 与 retain",
+                  'used' in m.group(1) and 'retain' in m.group(1),
+                  m.group(1))
+        check("selftest 定义不再带 JNIEXPORT",
+              not re.search(r'JNIEXPORT[^;\n{]*nc_link_jni_selftest', ns))
 
     print()
     print(f"通过 {PASS}，失败 {FAIL}")
