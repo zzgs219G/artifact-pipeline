@@ -425,6 +425,28 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   unzip -q "$WORK/dcc-project.zip" -d "$WORK/project"
 fi
 
+if [[ $WANT_SIGCHECK -eq 1 ]]; then
+  # 联合时并入 dcc 工程 jni/nc/；单独时放 jni/ 根 —— ndk_write_mk 的两级
+  # wildcard 都收（报错十一/十三教训），两种布局等价
+  # nc_link.c = Java 层判决式联动(§3.11):标准值比对在 so 内,零新头文件依赖
+  if [[ $WANT_TRANSPILE -eq 1 ]]; then
+    mkdir -p "$WORK/project/jni/nc"
+    SIG_DST="$WORK/project/jni/nc"
+  else
+    mkdir -p "$WORK/project/jni"
+    SIG_DST="$WORK/project/jni"
+  fi
+  cp "$ROOT/scripts/sigcheck/src/sig_check.c"    "$SIG_DST/"
+  cp "$ROOT/scripts/sigcheck/src/nc_link.c"      "$SIG_DST/"
+  cp "$ROOT/scripts/sigcheck/src/nc_link_jni.c"  "$SIG_DST/"
+  cp "$ROOT/scripts/sigcheck/src/nc_link_jni.h"  "$SIG_DST/"
+  cp "$ROOT/scripts/sigcheck/src/sig_guard2.c"   "$SIG_DST/"
+  cp "$GUARD_SRC/nc_guard_layout.h"              "$SIG_DST/"
+  cp "$WORK/sig_hash.h"                          "$SIG_DST/"
+  cp "$WORK/sig_guard2.h"                        "$SIG_DST/"
+  cp "$WORK/sig_log_data.h"                      "$SIG_DST/"
+fi
+
 # ── NcLink 动态注册的 JNI_OnLoad 归属（2026-11-04）─────────────────────
 # 目标：NcLink 的三个 native 入口不再以短名（Java_com_nc_link_NcLink_*）
 # 出现在 .dynsym —— 那几个符号名等于告诉逆向者"从这里开始读"。
@@ -495,27 +517,6 @@ PYEOF
     # 默认开启的方式给出，见下）。这里只做提示。
     echo "[jni] 未勾 dex2c → nc_link_jni.c 提供 JNI_OnLoad"
   fi
-fi
-if [[ $WANT_SIGCHECK -eq 1 ]]; then
-  # 联合时并入 dcc 工程 jni/nc/；单独时放 jni/ 根 —— ndk_write_mk 的两级
-  # wildcard 都收（报错十一/十三教训），两种布局等价
-  # nc_link.c = Java 层判决式联动(§3.11):标准值比对在 so 内,零新头文件依赖
-  if [[ $WANT_TRANSPILE -eq 1 ]]; then
-    mkdir -p "$WORK/project/jni/nc"
-    SIG_DST="$WORK/project/jni/nc"
-  else
-    mkdir -p "$WORK/project/jni"
-    SIG_DST="$WORK/project/jni"
-  fi
-  cp "$ROOT/scripts/sigcheck/src/sig_check.c"    "$SIG_DST/"
-  cp "$ROOT/scripts/sigcheck/src/nc_link.c"      "$SIG_DST/"
-  cp "$ROOT/scripts/sigcheck/src/nc_link_jni.c"  "$SIG_DST/"
-  cp "$ROOT/scripts/sigcheck/src/nc_link_jni.h"  "$SIG_DST/"
-  cp "$ROOT/scripts/sigcheck/src/sig_guard2.c"   "$SIG_DST/"
-  cp "$GUARD_SRC/nc_guard_layout.h"              "$SIG_DST/"
-  cp "$WORK/sig_hash.h"                          "$SIG_DST/"
-  cp "$WORK/sig_guard2.h"                        "$SIG_DST/"
-  cp "$WORK/sig_log_data.h"                      "$SIG_DST/"
 fi
 if [[ $WANT_ENVCHECK -eq 1 ]]; then
   # 环境检测(Frida/Xposed/调试器):与 sigcheck 同型并入同一 libnc.so(constructor 天然共存)

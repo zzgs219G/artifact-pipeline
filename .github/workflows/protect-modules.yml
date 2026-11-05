@@ -155,9 +155,13 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/repack/tests/test_dex_capacity.py
 
-      - name: NcLink 动态注册（20 断言，含 XOR 表与 Java 一致性）
+      - name: NcLink 动态注册（23 断言，含 XOR 表与 Java 一致性）
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/sigcheck/javalink/tests/test_nclink_dynreg.py
+
+      - name: protect.sh 变量定义/使用顺序（set -u 防崩，bash -n 查不出）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/actions/tests/test_protect_sh_vars.py
 
       - name: packer 冒烟（26 项，含 schema→arg 契约）
         if: steps.scope.outputs.code == 'true'
