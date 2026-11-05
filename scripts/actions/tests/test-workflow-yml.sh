@@ -48,6 +48,21 @@ assert inputs["amice_probe"].get("default") is False, \
     "amice_probe 默认必须 false（848MB 下载不该拖慢正常出包）"
 assert inputs["amice_probe"].get("type") == "boolean", "amice_probe 应为 boolean 类型"
 assert "amice-probe" in d["jobs"], "缺 amice-probe job"
+assert "amice-integrate" in d["jobs"], "缺 amice-integrate job（真实 so 接入验证）"
+aif = d["jobs"]["amice-integrate"].get("if", "")
+assert "amice_probe" in aif, "amice-integrate job 必须由 inputs.amice_probe 门控"
+# 三步锁箱不能合并传参（so-section-lock.py 是互斥分支）——
+# 2026-11-05 实测：同时传 --lock-head --strip-meta 会只做二级锁箱，
+# .ncx 保持明文 ARM64（熵 5.5），看起来"锁了"实际没锁。
+aisteps = "\n".join((s.get("run") or "") for s in d["jobs"]["amice-integrate"]["steps"])
+assert "--section .ncx" in aisteps, "amice-integrate 缺一级锁箱（--section .ncx）"
+assert "--lock-head" in aisteps, "amice-integrate 缺二级锁箱（--lock-head）"
+assert "--strip-meta" in aisteps, "amice-integrate 缺元数据清理"
+# 互斥分支：--lock-head 与 --section 不能出现在同一条 python3 调用里
+for ln in aisteps.split("\n"):
+    if "so-section-lock.py" in ln and "--lock-head" in ln:
+        assert "--section" not in ln, \
+            "so-section-lock.py 的 --lock-head 与 --section 是互斥分支，不能同传"
 apif = d["jobs"]["amice-probe"].get("if", "")
 assert "amice_probe" in apif, "amice-probe job 必须由 inputs.amice_probe 门控"
 ppif = d["jobs"]["protect"].get("if", "")

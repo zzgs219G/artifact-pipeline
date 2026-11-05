@@ -371,6 +371,205 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
+  # ── Amice 真实接入验证（2026-11-05）────────────────────────────────
+  # 第一步 probe 已证明"插件能加载"（run 42042744635 五项全过）。
+  # 本 job 回答第二个问题：**用 Amice 编译我们真实的 so，壳还能不能解锁。**
+  #
+  # 为什么这一步是必须的（不能跳过直接接主流程）：
+  #   nox 的锁箱链有 CRC 自绑定 —— k_stub 混入了 crc32(.text)，
+  #   代码改一位 → CRC 变 → k_stub 变 → .ncxh 解出乱码 → SIGILL。
+  #   而混淆恰恰会大幅改变 .text 内容。所以必须先验证：
+  #     · .ncx / .ncxh / .nck / .ncks 四段还在（__attribute__((section)) 未被破坏）
+  #     · 混淆后 selftest 仍返回 59（解锁→解密→执行密文段全链路）
+  #
+  # 本 job 不开任何混淆 pass（AMICE_* 全关），只验证"换编译器不破坏结构"。
+  # 混淆开关留到结构验证通过后再单独测 —— 否则崩了分不清是哪个原因。
+  amice-integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    if: github.event_name == 'workflow_dispatch' && inputs.amice_probe
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 取 Amice bundle（复用 probe 的 cache）
+        uses: actions/cache@v4
+        with:
+          path: ~/amice-bundle
+          key: amice-r29-v0.1.6-beta.1
+
+      - name: 若 cache 未命中则下载
+        run: |
+          set -euo pipefail
+          if [[ -f ~/amice-bundle/amice/env.sh ]]; then
+            echo "✅ cache 命中"; exit 0
+          fi
+          mkdir -p ~/amice-bundle && cd ~/amice-bundle
+          URL=https://github.com/fuqiuluo/amice/releases/download/v0.1.6-beta.1/amice-android-ndk-r29-linux-x86_64.tar.gz
+          curl -fL --retry 3 -o a.tar.gz "$URL"
+          curl -fsSL -o a.sha256 "$URL.sha256"
+          WANT=$(awk '{print $1}' a.sha256); GOT=$(sha256sum a.tar.gz | awk '{print $1}')
+          [[ "$WANT" == "$GOT" ]] || { echo "❌ sha256 不符"; exit 1; }
+          tar xzf a.tar.gz && rm -f a.tar.gz
+          SRC=$(find . -maxdepth 1 -type d -name 'amice-android-ndk-*' | head -1)
+          mv "$SRC"/* . && rmdir "$SRC"
+          echo "✅ 解压完成"
+
+      - name: 取 nox 源码（锁箱必需）
+        run: |
+          set -euo pipefail
+          # nox 是独立上游仓库，与本仓库同级（见 docs/上游仓库-nox.md）
+          git clone --depth 1 https://github.com/zzgs219G/nox.git "$GITHUB_WORKSPACE/../nox"
+          ls ../nox/scripts/so-guard/nc_guard_boot.c
+
+      - name: 用 Amice clang 编译真实 so（四段 + 锁箱）
+        run: |
+          set -euo pipefail
+          cd ~/amice-bundle
+          source ./amice/env.sh
+          echo "=== Amice clang 版本 ==="
+          ./amice/bin/aarch64-linux-android-clang --version | head -2
+
+          R="$GITHUB_WORKSPACE"
+          G="$GITHUB_WORKSPACE/../nox/scripts/so-guard"
+          W=/tmp/ncbuild
+          rm -rf "$W" && mkdir -p "$W/jni"
+
+          # 只取锁箱四件套 + 契约头（不取 sig_check/nc_link，那个组合要 JNI 表，
+          # 本步骤只验"结构 + 解锁"，与 sigcheck 无关）
+          cp "$G/nc_guard_boot.c" "$G/nc_guard_probe.c" "$G/nc_guard_key.c" \
+             "$G/nc_guard_paths.c" "$G/nc_guard_jni.c" "$W/jni/"
+          cp "$G/nc_guard_layout.h" "$G/nc_guard_key.h" "$G/nc_guard_paths.h" "$W/jni/"
+
+          cd "$W/jni"
+          # 与 lib-ndk.sh 的 CFLAGS 逐字对齐（除编译器换成 Amice 的）
+          FLAGS="-fPIC -fvisibility=hidden -fno-ident -Oz -ffunction-sections \
+                 -fdata-sections -fstack-protector-strong -DNC_GUARD_SECTIONED \
+                 -DNCG_PATH_STRICT -Wall"
+          echo "=== 编译（不带任何 AMICE_* 开关，纯验证换编译器不破结构）==="
+          CC="$HOME/amice-bundle/amice/bin/aarch64-linux-android-clang"
+          "$CC" -shared $FLAGS *.c -o libnc.so -Wl,--gc-sections 2>&1 | tee /tmp/compile.log
+          ls -la libnc.so
+
+      - name: 断言 .ncx/.ncxh/.nck/.ncks 四段仍在
+        run: |
+          set -euo pipefail
+          SO=/tmp/ncbuild/jni/libnc.so
+          list=$(readelf -S "$SO")
+          fail=0
+          # 只断言【本 job 编译的 5 个文件能产生的段】。
+          # .ncxr 不在此列 —— 它只由 nc_link.c 的 NC_VERIFY_TABLE_SECTION
+          # 标记（sigcheck 模块），本 job 不编 nc_link.c（要 JNI 表，与本步无关）。
+          for seg in .ncx .ncxh .nck .ncks .ncxhr; do
+            if echo "$list" | grep -q " $seg "; then
+              echo "  ✅ $seg"
+            else
+              echo "  ❌ $seg 缺失（__attribute__((section)) 被破坏？）"; fail=1
+            fi
+          done
+          if echo "$list" | grep -q " .ncxr "; then
+            echo "  ℹ️ .ncxr 存在（本 job 不该有，说明拷多了文件）"
+          else
+            echo "  ✅ .ncxr 不存在（预期：本 job 不编 nc_link.c）"
+          fi
+          [[ $fail -eq 0 ]] || { echo "=== 实际段表 ==="; echo "$list" | head -40; exit 1; }
+          echo "✅ 五个加密段全部保留"
+
+      - name: 锁箱（三步，顺序与 protect.sh:849-866 一致）
+        run: |
+          set -euo pipefail
+          G="$GITHUB_WORKSPACE/../nox/scripts/so-guard"
+          SO=/tmp/ncbuild/jni/libnc.so
+          cd "$G"
+
+          # ⚠️⚠️ 这三步是互斥分支，不能合并传参 ——
+          #   so-section-lock.py:1453 是 `if args.strip_meta: ... if args.lock_head:
+          #   ... return lock(...)`，传了 --lock-head 就【只】做二级锁箱，
+          #   一级 .ncx 加密会被跳过。实测踩过：同时传 --lock-head --strip-meta
+          #   导致 .ncx 保持明文 ARM64 指令（熵 5.5），看起来"锁了"实际没锁。
+          #
+          # 需要一份真实 APK 提供证书与包名。nox 自带的 fixtures/sample.apk
+          # 只有 1.5KB，AXML 无 string pool → manifest_package 抛
+          # 'AXML 无 string pool'（实测）。改用本仓库入库的 scripts/样本.apk。
+          APK="$GITHUB_WORKSPACE/scripts/样本.apk"
+          [[ -f "$APK" ]] || { echo "❌ 缺 $APK"; ls "$GITHUB_WORKSPACE/scripts/"*.apk; exit 1; }
+
+          echo "=== 步骤 1/3：一级锁箱 .ncx ==="
+          python3 so-section-lock.py "$SO" "$SO" --section .ncx --from-apk "$APK" \
+            2>&1 | tee /tmp/lock1.log | tail -8
+
+          echo "=== 步骤 2/3：二级锁箱 --lock-head（.ncxh）==="
+          python3 so-section-lock.py "$SO" "$SO" --lock-head \
+            2>&1 | tee /tmp/lock2.log | tail -8
+
+          echo "=== 步骤 3/3：元数据清理 --strip-meta ==="
+          python3 so-section-lock.py "$SO" "$SO" --strip-meta \
+            2>&1 | tee /tmp/lock3.log | tail -5
+
+          echo "=== 锁箱后段表 ==="
+          readelf -S "$SO" | grep -E "\.nc"
+
+      - name: 断言锁箱后结构正确（静态；执行类须真机，见步骤内说明）
+        run: |
+          set -euo pipefail
+          # ⚠️ 本 job **不能**验证 selftest==59：CI 是 x86_64，产物是 ARM64，
+          #    dlopen 不了。nox 自己的 test.sh 在这里也是同一个取舍
+          #    （test.sh:105 "产出的 so 是 ARM，宿主跑不起来 → V5/V6/V7 必须跳过"）。
+          #    执行类验证（真解锁 → 解 .ncx → 执行密文段）只能在真机做。
+          #    本步只验"混淆/换编译器后，静态结构没被破坏"——那是本 job 的目的。
+          SO=/tmp/ncbuild/jni/libnc.so
+          echo "=== 1) 段仍存在 ==="
+          readelf -S "$SO" | grep -cE "\.ncks|\.nck|\.ncxh"
+          echo "=== 2) .ncx 熵 > 7.0（确认是密文）==="
+          python3 - "$SO" <<'PY'
+          import sys, math, struct
+          from collections import Counter
+          d = open(sys.argv[1], 'rb').read()
+          e_shoff = struct.unpack_from('<Q', d, 0x28)[0]
+          e_shentsize = struct.unpack_from('<H', d, 0x3a)[0]
+          e_shnum = struct.unpack_from('<H', d, 0x3c)[0]
+          e_shstrndx = struct.unpack_from('<H', d, 0x3e)[0]
+          def sh(i): return struct.unpack_from('<IIQQQQIIQQ', d, e_shoff + i*e_shentsize)
+          stroff = sh(e_shstrndx)[4]
+          segs = {}
+          for i in range(e_shnum):
+              s = sh(i)
+              name = d[stroff+s[0]:d.index(b'\0', stroff+s[0])].decode('latin1')
+              if s[1] != 8: segs[name] = (s[4], s[5])
+          # 判据：用"距离理论上限有多近"，不能用固定的 7.0。
+          # 均匀分布下 n 个样本能观测到的最大熵 ≈ log2(min(n,256))，
+          # 所以小段（本 job 的 .ncx 只有 176 字节 → 上限 7.459）永远到不了 8.0。
+          # 实测：正确锁箱后 .ncx 熵 6.983（上限 7.459，差 0.48）；
+          #       未锁箱时是同长度明文 ARM64 指令，熵约 5.5。
+          # 故判据取 "上限 - 0.8"，既能过正确锁箱，又能抓住"根本没加密"。
+          bad = 0
+          for k in ('.ncx', '.ncxh'):
+              if k not in segs:
+                  print(f"  ❌ {k} 缺失"); bad = 1; continue
+              o, sz = segs[k]
+              b = d[o:o+sz]
+              c = Counter(b); n = len(b)
+              e = -sum((v/n)*math.log2(v/n) for v in c.values()) if n else 0
+              lim = math.log2(min(n, 256)) if n else 0
+              ok = e > lim - 0.8
+              print(f"  {'✅' if ok else '❌'} {k}: {sz}B 熵={e:.3f} (上限 {lim:.3f})")
+              if not ok: bad = 1
+          sys.exit(bad)
+          PY
+          echo "✅ 加密段为真实密文"
+
+      - name: 上传产物与日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: amice-integrate-artifact
+          path: |
+            /tmp/ncbuild/jni/libnc.so
+            /tmp/compile.log
+            /tmp/lock.log
+          if-no-files-found: warn
+          retention-days: 3
+
   protect:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
