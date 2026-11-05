@@ -158,6 +158,24 @@ def main():
     # 默认开启 OWN_ONLOAD（没勾 dex2c 的常态组合要能自洽）
     check("默认识别 NC_LINK_JNI_NO_ONLOAD 并给出 OWN_ONLOAD",
           'NC_LINK_JNI_NO_ONLOAD' in src and 'NC_LINK_JNI_OWN_ONLOAD 1' in src)
+
+    # 幂等判据必须匹配【注入行的完整形态】，不能只匹配宏名。
+    # 2026-11-05 CI run 42030806689 实测：判据写成
+    #   grep -q 'NC_LINK_JNI_NO_ONLOAD'
+    # 而源码自身第 46 行就有 `#if !defined(NC_LINK_JNI_NO_ONLOAD)` → 恒真
+    # → 永远跳过注入 → 两个 JNI_OnLoad 同时存在 →
+    #   ld.lld: error: duplicate symbol: JNI_OnLoad
+    protect_sh = os.path.join(ROOT, 'scripts', 'pipelines', 'protect.sh')
+    if os.path.isfile(protect_sh):
+        ps = read(protect_sh)
+        check("protect.sh 的幂等判据匹配完整 #define 形态（防恒真）",
+              re.search(r"grep\s+-qE\s+'[^']*#define[^']*NC_LINK_JNI_NO_ONLOAD", ps)
+              is not None,
+              "如果只 grep 宏名，会被源码里的 #if !defined(...) 命中")
+        check("protect.sh 不再用裸宏名做幂等判断",
+              not re.search(r"grep\s+-q\s+'NC_LINK_JNI_NO_ONLOAD'",
+                            '\n'.join(ln for ln in ps.splitlines()
+                                      if not ln.lstrip().startswith('#'))))
     # 两个 JNI_OnLoad 必须由宏隔开，不能无条件同时存在
     own_blocks = re.findall(r'#if defined\(NC_LINK_JNI_OWN_ONLOAD\)(.*?)#endif',
                             src, re.S)

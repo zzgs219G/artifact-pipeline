@@ -463,7 +463,13 @@ if [[ $WANT_SIGCHECK -eq 1 ]]; then
     # 勾了 dex2c：Dex2C.cpp 会提供唯一 JNI_OnLoad → 关掉本文件自带的那份，
     # 否则同 so 里两个 JNI_OnLoad = 重复符号 = 链接失败。
     # 用源码默认开启 + 这里显式关闭（比"默认关、靠 -D 打开"少一条 mk 注入通道）。
-    if ! grep -q 'NC_LINK_JNI_NO_ONLOAD' "$_jni_c"; then
+    #
+    # ⚠️⚠️ 2026-11-05 修（CI run 42030806689）：
+    #   幂等判据原为 `grep -q 'NC_LINK_JNI_NO_ONLOAD'`，而源码自身第 46 行就有
+    #   `#if !defined(NC_LINK_JNI_NO_ONLOAD)` —— 恒真 → 永远跳过注入 →
+    #   两个 JNI_OnLoad 同时存在 → `ld.lld: error: duplicate symbol: JNI_OnLoad`。
+    #   判据必须匹配【我们注入的那行】的完整形态（#define + 值），不能只匹配宏名。
+    if ! grep -qE '^#define[[:space:]]+NC_LINK_JNI_NO_ONLOAD[[:space:]]+1' "$_jni_c"; then
       python3 - "$_jni_c" <<'PYEOF2'
 import sys
 p = sys.argv[1]
