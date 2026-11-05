@@ -172,6 +172,10 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/actions/tests/test_obfuscate_args.py
 
+      - name: nox 源码拷贝清单完整性（拆 .c 后必查）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/actions/tests/test_nox_copy_list.py
+
       - name: packer 冒烟（26 项，含 schema→arg 契约）
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/packer/tests/test-packer.sh
