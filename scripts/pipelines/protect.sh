@@ -424,29 +424,98 @@ fi
 if [[ $WANT_TRANSPILE -eq 1 ]]; then
   unzip -q "$WORK/dcc-project.zip" -d "$WORK/project"
 fi
+
+# ── NcLink 动态注册的 JNI_OnLoad 归属（2026-11-04）─────────────────────
+# 目标：NcLink 的三个 native 入口不再以短名（Java_com_nc_link_NcLink_*）
+# 出现在 .dynsym —— 那几个符号名等于告诉逆向者"从这里开始读"。
+#
+# 一个 so 里只能有一个 JNI_OnLoad：
+#   · 勾了 dex2c → Dex2C.cpp 已经提供了（它自己也要注册业务方法），
+#                  我们不能重复定义 → 在它的 OnLoad 尾部插一行调用我们的
+#                  注册函数（sed 追加，保持幂等）。
+#   · 没勾 dex2c → 没人提供 → 由 nc_link_jni.c 提供（宏 NC_LINK_JNI_OWN_ONLOAD）。
+# 两种情况都在编译期定死，无运行期分支。
+if [[ $WANT_SIGCHECK -eq 1 ]]; then
+  _jni_c="$SIG_DST/nc_link_jni.c"
+  if [[ $WANT_TRANSPILE -eq 1 ]]; then
+    # 勾了 dex2c：Dex2C.cpp 会提供唯一 JNI_OnLoad → 关掉本文件自带的那份，
+    # 否则同 so 里两个 JNI_OnLoad = 重复符号 = 链接失败。
+    # 用源码默认开启 + 这里显式关闭（比"默认关、靠 -D 打开"少一条 mk 注入通道）。
+    if ! grep -q 'NC_LINK_JNI_NO_ONLOAD' "$_jni_c"; then
+      python3 - "$_jni_c" <<'PYEOF2'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+anchor = '#include "nc_link_jni.h"\n'
+if anchor not in s:
+    sys.exit('❌ nc_link_jni.c 里找不到 include 锚点')
+s = s.replace(anchor,
+              anchor + '\n/* 由 protect.sh 注入（勾了 dex2c）：JNI_OnLoad 由 Dex2C.cpp 提供 */\n'
+              '#define NC_LINK_JNI_NO_ONLOAD 1\n', 1)
+open(p, 'w', encoding='utf-8').write(s)
+print('[jni] nc_link_jni.c 已关闭自带 JNI_OnLoad（改由 Dex2C.cpp 调用注册）')
+PYEOF2
+    fi
+    _dex2c_cpp="$WORK/project/jni/nc/Dex2C.cpp"
+    if [[ -f "$_dex2c_cpp" ]] \
+       && ! grep -q 'nc_link_register_natives' "$_dex2c_cpp"; then
+      # 用 python 而不是 sed：要精确锚定"JNI_OnLoad 函数体内"那一处，
+      # 而文件里别处也可能有 return JNI_VERSION_1_6（sed 会全改）。
+      python3 - "$_dex2c_cpp" <<'PYEOF'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+i = s.find('JNI_OnLoad')
+if i < 0:
+    sys.exit('❌ Dex2C.cpp 里找不到 JNI_OnLoad')
+tail = s[i:]
+m = re.search(r'\n(\s*)return\s+JNI_VERSION_1_6\s*;', tail)
+if not m:
+    sys.exit('❌ Dex2C.cpp 的 JNI_OnLoad 里找不到 return JNI_VERSION_1_6;')
+ind = m.group(1)
+ins = ('\n' + ind + '/* 2026-11-04: NcLink 动态注册（避免短名进 .dynsym）。\n'
+       + ind + ' * 返回值忽略：注册失败不应影响 dex2c 自己的注册结果，\n'
+       + ind + ' * NcLink 侧拿不到实现会由 Guard 的 ULE 分支 fail-closed。 */\n'
+       + ind + 'extern int nc_link_register_natives(JNIEnv *env);\n'
+       + ind + '(void)nc_link_register_natives(env);\n')
+pos = i + m.start()
+s = s[:pos] + ins + s[pos:]
+open(p, 'w', encoding='utf-8').write(s)
+print('[jni] Dex2C.cpp 已插入 NcLink 动态注册调用')
+PYEOF
+      if ! grep -q 'nc_link_register_natives' "$_dex2c_cpp"; then
+        echo "❌ Dex2C.cpp 注入 NcLink 注册失败——产物会用短名导出，与用户要求不符" >&2
+        exit 1
+      fi
+    else
+      echo "[jni] Dex2C.cpp 已含 NcLink 注册调用，跳过（幂等）"
+    fi
+  else
+    # 没勾 dex2c：由 nc_link_jni.c 自己提供 JNI_OnLoad（宏在源码里以
+    # 默认开启的方式给出，见下）。这里只做提示。
+    echo "[jni] 未勾 dex2c → nc_link_jni.c 提供 JNI_OnLoad"
+  fi
+fi
 if [[ $WANT_SIGCHECK -eq 1 ]]; then
   # 联合时并入 dcc 工程 jni/nc/；单独时放 jni/ 根 —— ndk_write_mk 的两级
   # wildcard 都收（报错十一/十三教训），两种布局等价
   # nc_link.c = Java 层判决式联动(§3.11):标准值比对在 so 内,零新头文件依赖
   if [[ $WANT_TRANSPILE -eq 1 ]]; then
     mkdir -p "$WORK/project/jni/nc"
-    cp "$ROOT/scripts/sigcheck/src/sig_check.c" "$WORK/project/jni/nc/"
-  cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/nc/"
-    cp "$ROOT/scripts/sigcheck/src/nc_link.c"   "$WORK/project/jni/nc/"
-    cp "$ROOT/scripts/sigcheck/src/sig_guard2.c" "$WORK/project/jni/nc/"
-    cp "$WORK/sig_hash.h"               "$WORK/project/jni/nc/"
-    cp "$WORK/sig_guard2.h"             "$WORK/project/jni/nc/"
-    cp "$WORK/sig_log_data.h"           "$WORK/project/jni/nc/"
+    SIG_DST="$WORK/project/jni/nc"
   else
     mkdir -p "$WORK/project/jni"
-    cp "$ROOT/scripts/sigcheck/src/sig_check.c" "$WORK/project/jni/"
-  cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/"
-    cp "$ROOT/scripts/sigcheck/src/nc_link.c"   "$WORK/project/jni/"
-    cp "$ROOT/scripts/sigcheck/src/sig_guard2.c" "$WORK/project/jni/"
-    cp "$WORK/sig_hash.h"               "$WORK/project/jni/"
-    cp "$WORK/sig_guard2.h"             "$WORK/project/jni/"
-    cp "$WORK/sig_log_data.h"           "$WORK/project/jni/"
+    SIG_DST="$WORK/project/jni"
   fi
+  cp "$ROOT/scripts/sigcheck/src/sig_check.c"    "$SIG_DST/"
+  cp "$ROOT/scripts/sigcheck/src/nc_link.c"      "$SIG_DST/"
+  cp "$ROOT/scripts/sigcheck/src/nc_link_jni.c"  "$SIG_DST/"
+  cp "$ROOT/scripts/sigcheck/src/nc_link_jni.h"  "$SIG_DST/"
+  cp "$ROOT/scripts/sigcheck/src/sig_guard2.c"   "$SIG_DST/"
+  cp "$GUARD_SRC/nc_guard_layout.h"              "$SIG_DST/"
+  cp "$WORK/sig_hash.h"                          "$SIG_DST/"
+  cp "$WORK/sig_guard2.h"                        "$SIG_DST/"
+  cp "$WORK/sig_log_data.h"                      "$SIG_DST/"
 fi
 if [[ $WANT_ENVCHECK -eq 1 ]]; then
   # 环境检测(Frida/Xposed/调试器):与 sigcheck 同型并入同一 libnc.so(constructor 天然共存)

@@ -196,20 +196,26 @@ int nc_verify_t1(const unsigned char *t1, int len)
 }
 
 #ifndef NCLINK_HOST_TEST
-/* JNI 入口:Java_com_nc_link_NcLink_ncVerify([B)Z
- * 类名固定 com.nc.link.NcLink(桥接类,与 StrDec 同为工具基础设施命名),
- * JNI 短名绑定构建期即可确定,无需 RegisterNatives。 */
-/* ⚠️ 2026-10-19 真机实证：动态注册方案会导致启动崩溃（sig_check 通过后
- * 进程立即消失，selftest 从未被调用）。根因是 constructor 里调
- * FindClass("com/nc/link/NcLink") —— so 由 Application.onCreate 触发加载，
- * 此时 Application 类正在初始化，该时机 FindClass 不安全。
+/* ── JNI 入口实现（2026-11-04 改为动态注册）──────────────────────────
  *
- * 回退为 JNI 短名绑定（ART 原生机制，不涉时机问题）。
- * 代价：符号名仍在 .dynsym —— 这是 JNI 短名绑定的硬要求，
- * 想隐藏就必须动态注册，而动态注册在此时机不安全。
- * 取舍：宁可保留符号名，也不能让 App 起不来。 */
-JNIEXPORT jboolean JNICALL
-Java_com_nc_link_NcLink_ncVerify(JNIEnv *env, jclass clazz, jbyteArray measured)
+ * 曾经是短名绑定：JNIEXPORT jboolean JNICALL
+ *                 Java_com_nc_link_NcLink_ncVerify(...)
+ * 符号名会进 .dynsym —— 等于给逆向者一张地图（`nm -D` 即知三个入口）。
+ * JNIEXPORT 自带 visibility("default")，对 -fvisibility=hidden 免疫，
+ * 靠 version script 也收敛不掉（lib-ndk.sh:155 记过三种写法均失败）。
+ *
+ * 现在：这三个函数【不再带 JNIEXPORT】（→ 受 -fvisibility=hidden 支配
+ * → hidden），改由 nc_link_jni.c 的 nc_link_register_natives() 在
+ * JNI_OnLoad 里 RegisterNatives。函数名也删掉了 Java_ 前缀，改叫
+ * nc_link_jni_*,使"按名字猜入口"这条路径也断掉。
+ *
+ * 为什么可以动态注册（2026-10-19 曾失败）：那次是在 constructor 里
+ * FindClass，动态链接器执行 constructor 时 classloader 上下文未建立。
+ * 本次走 JNI_OnLoad（ART 回调，会切到发起 load 的 loader），位置不同。
+ * 详见 nc_link_jni.c 头部注释与 nc_link_jni.h 的契约说明。 */
+
+/* ncVerify([B)Z 的实现体 */
+jboolean nc_link_jni_ncVerify(JNIEnv *env, jclass clazz, jbyteArray measured)
 {
     jsize len;
     jbyte *buf;
@@ -234,13 +240,13 @@ Java_com_nc_link_NcLink_ncVerify(JNIEnv *env, jclass clazz, jbyteArray measured)
  * 被删/被绕过 → 走 delayed_kill。记录侧只做原子时间戳(纳秒级,零开销)。
  * ⚠️ 身份校验防冒充:攻击者 patch 掉 Java 校验后自己喂 ping 即可绕过整个
  * 心跳机制 —— 所以 clazz 必须是 NcLink 本类(IsSameObject 锁死),
- * 这是 Xop shell_heartbeat_ok 的同款纪律。 */
-JNIEXPORT void JNICALL
-Java_com_nc_link_NcLink_heartbeat(JNIEnv *env, jclass clazz)
+ * 这是 Xop shell_heartbeat_ok 的同款纪律。
+ * ⚠️ 动态注册下这层校验更必要:RegisterNatives 表在运行期可被重复注册,
+ * 身份校验是"谁在调"这一侧的纵深。 */
+void nc_link_jni_heartbeat(JNIEnv *env, jclass clazz)
 {
     jclass self;
-    /* 仅允许 NcLink 本类调用(短名绑定的调用类必然正确,这里是纵深:
-     * 防 RegisterNatives 重绑/反射冒充)。self 为 NULL 时视为异常环境,
+    /* 仅允许 NcLink 本类调用。self 为 NULL 时视为异常环境,
      * 不记录本次心跳(watchdog 超时路径自会兜底,fail-closed)。 */
     self = (*env)->FindClass(env, "com/nc/link/NcLink");
     if (self != NULL) {
