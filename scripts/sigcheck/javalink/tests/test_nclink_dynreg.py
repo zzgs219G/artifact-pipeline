@@ -155,6 +155,19 @@ def main():
           'int nc_link_register_natives(JNIEnv *env)' in src)
     check("头文件声明了同一签名",
           'int nc_link_register_natives(JNIEnv *env);' in read(JNI_H))
+
+    # ⚠️ extern "C" 守卫必须存在。
+    # 2026-11-05 CI run 42031354532 实测：Dex2C.cpp（C++）里本地声明
+    #   extern int nc_link_register_natives(JNIEnv *env);
+    # 会按 C++ 规则 mangled，而实现侧导出的是 C 符号 → 链接期报
+    #   ld.lld: error: undefined symbol: nc_link_register_natives(_JNIEnv*)
+    # 修法是 include 头文件（带 extern "C" 守卫），不是本地重声明。
+    jh = read(JNI_H)
+    check("nc_link_jni.h 有 extern \"C\" 守卫（C++ 调用方必需）",
+          'extern "C"' in jh and '__cplusplus' in jh)
+    check("守卫成对（open/close 各一处）",
+          jh.count('extern "C"') >= 2, f"实得 {jh.count('extern \"C\"')} 处")
+
     # 默认开启 OWN_ONLOAD（没勾 dex2c 的常态组合要能自洽）
     check("默认识别 NC_LINK_JNI_NO_ONLOAD 并给出 OWN_ONLOAD",
           'NC_LINK_JNI_NO_ONLOAD' in src and 'NC_LINK_JNI_OWN_ONLOAD 1' in src)
@@ -176,6 +189,15 @@ def main():
               not re.search(r"grep\s+-q\s+'NC_LINK_JNI_NO_ONLOAD'",
                             '\n'.join(ln for ln in ps.splitlines()
                                       if not ln.lstrip().startswith('#'))))
+
+        # Dex2C.cpp 的注入必须 include 头文件，不能本地声明（C++ 会 mangled）
+        code_only = '\n'.join(ln for ln in ps.splitlines()
+                              if not ln.lstrip().startswith('#'))
+        check("protect.sh 往 Dex2C.cpp 插的是 include 而非 extern 声明",
+              'include "nc_link_jni.h"' in code_only)
+        check("protect.sh 不再往 Dex2C.cpp 写本地 extern 声明",
+              not re.search(r"extern\s+int\s+nc_link_register_natives", code_only),
+              "本地声明的函数在 C++ 里会 mangled → undefined symbol")
     # 两个 JNI_OnLoad 必须由宏隔开，不能无条件同时存在
     own_blocks = re.findall(r'#if defined\(NC_LINK_JNI_OWN_ONLOAD\)(.*?)#endif',
                             src, re.S)

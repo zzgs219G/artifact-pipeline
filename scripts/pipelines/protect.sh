@@ -489,6 +489,16 @@ PYEOF2
        && ! grep -q 'nc_link_register_natives' "$_dex2c_cpp"; then
       # 用 python 而不是 sed：要精确锚定"JNI_OnLoad 函数体内"那一处，
       # 而文件里别处也可能有 return JNI_VERSION_1_6（sed 会全改）。
+      #
+      # ⚠️⚠️ 2026-11-05 修（CI run 42031354532）：
+      #   第一版插入的是
+      #     extern int nc_link_register_natives(JNIEnv *env);
+      #   而 Dex2C.cpp 是【C++ 文件】—— 函数声明会按 C++ 规则做名称修饰
+      #   （mangled），而 nc_link_jni.c 导出的 `nc_link_register_natives` 是
+      #   C 符号（未修饰）→ 链接期报
+      #     ld.lld: error: undefined symbol: nc_link_register_natives(_JNIEnv*)
+      #   （错误信息里带参数类型 = 典型的 mangled name 找不到对应）。
+      #   修法：include 头文件（头里有 extern "C" 守卫），不要本地重声明。
       python3 - "$_dex2c_cpp" <<'PYEOF'
 import re, sys
 p = sys.argv[1]
@@ -501,15 +511,29 @@ m = re.search(r'\n(\s*)return\s+JNI_VERSION_1_6\s*;', tail)
 if not m:
     sys.exit('❌ Dex2C.cpp 的 JNI_OnLoad 里找不到 return JNI_VERSION_1_6;')
 ind = m.group(1)
-ins = ('\n' + ind + '/* 2026-11-04: NcLink 动态注册（避免短名进 .dynsym）。\n'
-       + ind + ' * 返回值忽略：注册失败不应影响 dex2c 自己的注册结果，\n'
+# ① 文件级 include（供 extern "C" 生效），插在第一个 #include 之后
+inc_anchor = re.search(r'^#include[^\n]*\n', s, re.M)
+if inc_anchor is None:
+    sys.exit('❌ Dex2C.cpp 里找不到 #include 锚点')
+if 'nc_link_jni.h' not in s:
+    s = (s[:inc_anchor.end()]
+         + '/* 2026-11-05: NcLink 动态注册（避免短名进 .dynsym）。\n'
+           ' * 必须 include 头文件而不是本地声明 —— 本文件是 C++，本地声明的\n'
+           ' * 函数会按 C++ 规则 mangled，而 nc_link_jni.c 导出的是 C 符号。 */\n'
+           '#include "nc_link_jni.h"\n'
+         + s[inc_anchor.end():])
+    # include 插入改变了偏移，重新定位 JNI_OnLoad
+    i = s.find('JNI_OnLoad')
+    tail = s[i:]
+    m = re.search(r'\n(\s*)return\s+JNI_VERSION_1_6\s*;', tail)
+    ind = m.group(1)
+ins = ('\n' + ind + '/* 返回值忽略：注册失败不应影响 dex2c 自己的注册结果，\n'
        + ind + ' * NcLink 侧拿不到实现会由 Guard 的 ULE 分支 fail-closed。 */\n'
-       + ind + 'extern int nc_link_register_natives(JNIEnv *env);\n'
        + ind + '(void)nc_link_register_natives(env);\n')
 pos = i + m.start()
 s = s[:pos] + ins + s[pos:]
 open(p, 'w', encoding='utf-8').write(s)
-print('[jni] Dex2C.cpp 已插入 NcLink 动态注册调用')
+print('[jni] Dex2C.cpp 已插入 NcLink 注册调用（include 头文件，非本地声明）')
 PYEOF
       if ! grep -q 'nc_link_register_natives' "$_dex2c_cpp"; then
         echo "❌ Dex2C.cpp 注入 NcLink 注册失败——产物会用短名导出，与用户要求不符" >&2

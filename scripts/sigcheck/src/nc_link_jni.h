@@ -17,6 +17,18 @@
 
 #include <jni.h>
 
+/* ⚠️⚠️ 2026-11-05（CI run 42031354532）：extern "C" 守卫是【必须】的。
+ *
+ * 本头文件既被 nc_link_jni.c（C）include，也被 Dex2C.cpp（C++）include。
+ * 没有守卫时，C++ 侧的声明会按 C++ 规则做名称修饰（mangled），
+ * 而实现侧导出的是 C 符号 → 链接期报
+ *   ld.lld: error: undefined symbol: nc_link_register_natives(_JNIEnv*)
+ * （错误信息里带参数类型，就是 mangled name 找不到对应符号的典型形态）
+ */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 把 NcLink 的 native 方法注册到 JVM。返回 0 = 全部注册成功。
  *
  * 必须在 JNI_OnLoad 里调用（不能放 constructor）：
@@ -29,5 +41,9 @@
  * UnsatisfiedLinkError（fail-closed，与"so 缺失"同路径）。
  */
 int nc_link_register_natives(JNIEnv *env);
+
+#ifdef __cplusplus
+}   /* extern "C" */
+#endif
 
 #endif /* _NC_LINK_JNI_H_ */
