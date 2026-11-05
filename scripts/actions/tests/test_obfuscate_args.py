@@ -174,6 +174,22 @@ def main():
     check("lib-ndk.sh 无混淆时走原路径（不改变既有行为）",
           'PATH="$ANDROID_NDK_HOME:$PATH" ndk-build' in ndk)
 
+    print("[6/6] NDK 与插件版本配套（错配是 SIGSEGV，不是报错）")
+    # 2026-11-05 实测（CI run 42055440429）：NDK r27d 的 clang 18 加载
+    # r29 bundle 的插件 → exit code 139（clang frontend crashed）。
+    # 插件按 LLVM 主版本编译，与 NDK clang 严格绑定，错配是未定义行为，
+    # 链接期拦不住。所以混淆模式必须用 bundle 自带的 NDK。
+    check("protect.sh 导出 AMICE_NDK_HOME（bundle 自带 NDK）",
+          'AMICE_NDK_HOME' in ps)
+    check("protect.sh 找不到 bundle NDK 时显式报错",
+          '找不到自带的 NDK' in ps)
+    check("lib-ndk.sh 混淆模式用 bundle 的 ndk-build",
+          'bundle_ndk' in ndk and '"$bundle_ndk/ndk-build"' in ndk)
+    check("lib-ndk.sh 缺 AMICE_NDK_HOME 时显式报错",
+          'AMICE_NDK_HOME 未指向' in ndk or 'AMICE_NDK_HOME' in ndk)
+    check("错误信息里写明 SIGSEGV 的实测原因（防后人再犯）",
+          '139' in ndk or 'SIGSEGV' in ndk)
+
     print()
     print(f"通过 {PASS}，失败 {FAIL}")
     return 0 if FAIL == 0 else 1

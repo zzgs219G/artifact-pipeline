@@ -313,20 +313,44 @@ EOF
 # 这两点由本函数统一处理，调用方只需确认 AMICE_PLUGIN 已指向插件本体。
 ndk_build() {
   local project="$1"
-  ndk_require
+
   if [[ -n "${AMICE_PLUGIN:-}" ]]; then
+    # ── 混淆模式：必须用 bundle 自带的 NDK ──────────────────────────
+    # ⚠️⚠️ 2026-11-05 实测（CI run 42055440429）：
+    #   用 NDK r27d 的 clang 18 加载 r29 bundle 的插件 → exit code 139
+    #   （SIGSEGV，clang frontend crashed，附带 crash stack）。
+    #   根因：Amice 插件按 LLVM 主版本编译，与 NDK clang 严格绑定：
+    #     r27d → clang 18.x  → 需 libamice-android-ndk-r27d-*.so
+    #     r29  → clang 21.x  → 需 libamice-android-ndk-r29-*.so
+    #   版本错配不是"报个错"，是段错误 —— 因为插件走 LLVM 的 C++ ABI，
+    #   ABI 不兼容时是未定义行为，不是链接期能拦住的。
+    #
+    #   所以混淆模式统一改用 bundle 里的 android-ndk-rXX：
+    #   bundle 的 NDK 与插件是配套发布、配套验证过的，不存在错配。
+    #   非混淆模式仍走 $ANDROID_NDK_HOME（预装 r27d，零下载）。
     if [[ -z "${AMICE_LLVM_LIB:-}" || ! -d "${AMICE_LLVM_LIB:-}" ]]; then
       echo "❌ 开了混淆但 AMICE_LLVM_LIB 未指向 bundle 的 amice/llvm-lib" >&2
       echo "   该目录提供插件依赖的 host libLLVM.so（官方 NDK 不含）" >&2
       return 1
     fi
-    echo "  [ndk] 混淆模式: LD_LIBRARY_PATH=$AMICE_LLVM_LIB"
-    PATH="$ANDROID_NDK_HOME:$PATH" \
+    local bundle_ndk="${AMICE_NDK_HOME:-}"
+    if [[ -z "$bundle_ndk" || ! -x "$bundle_ndk/ndk-build" ]]; then
+      echo "❌ 开了混淆但 AMICE_NDK_HOME 未指向 bundle 自带的 NDK" >&2
+      echo "   期望 <bundle>/android-ndk-rXX/ndk-build 可执行" >&2
+      echo "   为什么必须用它：插件按 LLVM 主版本编译，与 NDK clang 绑定。" >&2
+      echo "   用 r27d 的 clang 18 加载 r29 插件 = SIGSEGV（实测 exit 139）。" >&2
+      return 1
+    fi
+    echo "  [ndk] 混淆模式: NDK=$bundle_ndk"
+    echo "  [ndk] LD_LIBRARY_PATH=$AMICE_LLVM_LIB"
+    PATH="$bundle_ndk:$PATH" \
       LD_LIBRARY_PATH="$AMICE_LLVM_LIB:${LD_LIBRARY_PATH:-}" \
       AMICE_MBA="${AMICE_MBA:-false}" \
       AMICE_FLATTEN="${AMICE_FLATTEN:-false}" \
-      ndk-build -j"$(nproc)" -C "$project"
+      "$bundle_ndk/ndk-build" -j"$(nproc)" -C "$project"
     return $?
   fi
+
+  ndk_require
   PATH="$ANDROID_NDK_HOME:$PATH" ndk-build -j"$(nproc)" -C "$project"
 }

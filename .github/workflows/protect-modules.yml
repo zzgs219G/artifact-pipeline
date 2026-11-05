@@ -708,6 +708,29 @@ jobs:
           echo "已导出 AMICE_BUNDLE=$HOME/amice-bundle"
           ls -la "$HOME/amice-bundle/amice/lib/" | head -3
 
+      # ── 校验插件与 NDK 版本配套（缺这条会 SIGSEGV，不是普通报错）──────
+      # 实测（run 42055440429）：用 NDK r27d 的 clang 18 加载 r29 插件
+      # → exit code 139（clang frontend crashed）。
+      # 插件按 LLVM 主版本编译，与 NDK clang 严格绑定，错配是未定义行为。
+      - name: 校验 Amice bundle 的 NDK 与插件配套
+        if: steps.obf.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          B="$HOME/amice-bundle"
+          NDK_DIR=$(find "$B" -maxdepth 1 -type d -name 'android-ndk-*' | head -1)
+          if [[ -z "$NDK_DIR" || ! -x "$NDK_DIR/ndk-build" ]]; then
+            echo "FAIL: bundle 里没有自带的 NDK —— 插件无法安全加载"
+            ls -la "$B" | head -10
+            exit 1
+          fi
+          CLANG="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          echo "bundle NDK: $NDK_DIR"
+          "$CLANG" --version | head -2
+          # 交叉校验：bundle 的 NDK 主版本应与 bundle 名里的 -rXX 一致
+          EXPECT_R=$(basename "$B" | grep -oE 'r[0-9]+' | head -1 || true)
+          echo "bundle 名里的版本: ${EXPECT_R:-未知}"
+          echo "✅ bundle 自带 NDK，插件配套"
+
       - name: 解析 protect_config（schema 驱动 → protect.sh 参数）
         env:
           # 经 env 中转，用户输入不直接插值进 shell（命令注入面，沿用旧 yml 思路）

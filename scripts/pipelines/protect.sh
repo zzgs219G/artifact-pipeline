@@ -686,6 +686,21 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   }
   export AMICE_PLUGIN="$_bundle/amice/lib/libamice.so"
   export AMICE_LLVM_LIB="$_bundle/amice/llvm-lib"
+  # ⚠️ 必须用 bundle 自带的 NDK，不能用预装的 r27d：
+  #   插件按 LLVM 主版本编译，与 NDK clang 严格绑定。
+  #   实测（CI run 42055440429）：r27d 的 clang 18 加载 r29 插件 → SIGSEGV
+  #   （exit code 139，clang frontend crashed）。
+  #   bundle 里的 android-ndk-rXX 与插件是配套发布的，不存在错配。
+  #
+  # 定位：bundle 根目录下唯一名为 android-ndk-* 的子目录。
+  _bundle_ndk="$(find "$_bundle" -maxdepth 1 -type d -name 'android-ndk-*' | head -1)"
+  if [[ -z "$_bundle_ndk" || ! -x "$_bundle_ndk/ndk-build" ]]; then
+    log_err "bundle 里找不到自带的 NDK（期望 <bundle>/android-ndk-rXX/ndk-build）"
+    log_err "     插件与 NDK clang 必须配套 —— 用预装 NDK 会段错误（实测）"
+    ls -la "$_bundle" | head -10 >&2
+    exit 1
+  fi
+  export AMICE_NDK_HOME="$_bundle_ndk"
   # 子项默认：MBA 开（低风险，默认勾选），flatten 关（高风险，显式才开）。
   # 注意"父模块勾了但没勾任何子项"的情形：schema 里 mba 默认 true，
   # 正常不会发生；但命令行直调时可能出现，此处按"什么都没勾=不开混淆"处理，
@@ -699,6 +714,7 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   export AMICE_MBA="$([[ $OBF_MBA -eq 1 ]] && echo true || echo false)"
   export AMICE_FLATTEN="$([[ $OBF_FLATTEN -eq 1 ]] && echo true || echo false)"
   log_info "代码混淆: $_OBF_SPEC（AMICE_MBA=$AMICE_MBA AMICE_FLATTEN=$AMICE_FLATTEN）"
+  log_info "混淆用 NDK: $AMICE_NDK_HOME（bundle 自带，与插件配套）"
 fi
 
 ndk_write_mk "$WORK/project/jni" nc "$GUARD_LIB_DIR" "$_OBF_SPEC"   # mk 模板唯一来源（报错十一），模块名固定 nc
