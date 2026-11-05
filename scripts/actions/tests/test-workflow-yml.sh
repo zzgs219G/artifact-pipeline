@@ -30,8 +30,9 @@ assert "workflow_dispatch" in pif, \
     "protect job 必须用 if 限制为 workflow_dispatch（否则 push 时因缺输入必然失败）"
 
 inputs = trigger["workflow_dispatch"]["inputs"]
-assert set(inputs) == {"apk_url", "protect_config", "dpt_extra_args", "sign"}, \
-    f"inputs 应为 apk_url+protect_config+dpt_extra_args+sign: {list(inputs)}"
+assert set(inputs) == {"apk_url", "protect_config", "dpt_extra_args", "sign",
+                       "amice_probe"}, \
+    f"inputs 应为 apk_url+protect_config+dpt_extra_args+sign+amice_probe: {list(inputs)}"
 assert inputs["protect_config"]["required"] is True
 assert inputs["dpt_extra_args"]["required"] is False, "dpt_extra_args 应可选(报错四十三通用通道)"
 assert "dpt.jar" in inputs["dpt_extra_args"]["description"], "dpt_extra_args 描述缺用途说明"
@@ -40,6 +41,18 @@ assert "dpt.jar" in inputs["dpt_extra_args"]["description"], "dpt_extra_args 描
 # 默认 true 会破坏「产出未签名包」的既有契约。
 assert inputs["sign"].get("default") is False, "sign 默认必须 false(未签名契约)"
 assert inputs["sign"].get("type") == "boolean", "sign 应为 boolean 类型"
+# amice_probe（2026-11-05）：Amice 混淆插件探路开关。
+# 默认必须 false —— 它要下 848MB bundle，绝不能占每次手动出包的时间。
+# 且 protect job 必须在 probe 模式下被排除，否则会因缺 apk_url 空跑。
+assert inputs["amice_probe"].get("default") is False, \
+    "amice_probe 默认必须 false（848MB 下载不该拖慢正常出包）"
+assert inputs["amice_probe"].get("type") == "boolean", "amice_probe 应为 boolean 类型"
+assert "amice-probe" in d["jobs"], "缺 amice-probe job"
+apif = d["jobs"]["amice-probe"].get("if", "")
+assert "amice_probe" in apif, "amice-probe job 必须由 inputs.amice_probe 门控"
+ppif = d["jobs"]["protect"].get("if", "")
+assert "amice_probe" in ppif, \
+    "protect job 必须排除 amice_probe 模式（否则 probe 时缺 apk_url 空跑变红）"
 steps = d["jobs"]["protect"]["steps"]
 names = [s.get("name", "") for s in steps]
 assert any("resolve-config.py" in (s.get("run") or "") for s in steps), "缺解析 step"

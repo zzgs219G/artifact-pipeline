@@ -47,6 +47,11 @@ on:
         required: false
         type: boolean
         default: false
+      amice_probe:
+        description: '仅跑 Amice 混淆插件探路（不下载 APK、不出包）。用于验证 848MB bundle 在本环境能否加载插件'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   # ── 秒级回归（2026-11-01 新增）────────────────────────────────────
@@ -212,13 +217,168 @@ jobs:
       # 待办：把一份小体积已签名 APK 作为夹具入库（<200KB），再接入。
       # 见 AGENTS.md「冻结资产的能力边界」。
 
+  # ── Amice 混淆插件探路（2026-11-05）────────────────────────────────
+  # 目的：回答一个二元问题 —— Amice 能不能在我们这套 NDK 环境里用。
+  # 不碰主流程：独立 job，失败不影响 protect/test。
+  #
+  # 为什么需要它：当前防护三层里「读」这一层几乎裸奔（明文 .text 里
+  # 200 行解密逻辑，符号被 strip 但 bti c 标出函数边界）。Amice 是
+  # LLVM Pass 插件，能用 __attribute__((annotate(...))) 只混淆指定函数，
+  # 不需要自建 LLVM 工具链（stock NDK clang 不认识 -fla 那套）。
+  #
+  # 为什么要在 CI 里跑：848MB bundle 本地下载不动（实测 130KB/s + TLS 断连），
+  # 而 runner 到 GitHub 是内网，约 10-30 秒。
+  #
+  # 只验三件事（不做任何构建接入）：
+  #   ① 插件能加载（无 "unable to load plugin" —— 缺 libLLVM.so 时就是这个错）
+  #   ② 命令级混淆生效（MBA/平坦化不报错且产物能编译出来）
+  #   ③ 能编出 arm64 Android 目标（说明 bundle 的 NDK 可用）
+  amice-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # 只在手动触发时跑：848MB 下载不该占用每次 push 的时间。
+    if: github.event_name == 'workflow_dispatch' && inputs.amice_probe
+    steps:
+      - name: 下载 Amice bundle（带缓存）
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/amice-bundle
+          key: amice-r29-v0.1.6-beta.1
+
+      - name: 解压 Amice bundle
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/amice-bundle && cd ~/amice-bundle
+          URL=https://github.com/fuqiuluo/amice/releases/download/v0.1.6-beta.1/amice-android-ndk-r29-linux-x86_64.tar.gz
+          echo "下载 $URL"
+          curl -fL --retry 3 --retry-delay 5 -o amice.tar.gz "$URL"
+          echo "=== 校验 sha256（官方值见 release 资产 .sha256）==="
+          curl -fsSL -o amice.tar.gz.sha256 "$URL.sha256" || true
+          if [[ -s amice.tar.gz.sha256 ]]; then
+            WANT=$(awk '{print $1}' amice.tar.gz.sha256)
+            GOT=$(sha256sum amice.tar.gz | awk '{print $1}')
+            [[ "$WANT" == "$GOT" ]] \
+              || { echo "❌ sha256 不符: want=$WANT got=$GOT"; exit 1; }
+            echo "✅ sha256 一致: $GOT"
+          else
+            echo "⚠️ 无 .sha256 资产，跳过校验"
+          fi
+          tar xzf amice.tar.gz
+          rm -f amice.tar.gz
+          # 展平成固定路径，便于后续 step 引用
+          SRC=$(find . -maxdepth 1 -type d -name 'amice-android-ndk-*' | head -1)
+          [[ -n "$SRC" ]] || { echo "❌ 解压后找不到 bundle 目录"; exit 1; }
+          mv "$SRC"/* . 2>/dev/null || true
+          echo "=== bundle 顶层 ==="
+          ls -la
+
+      - name: 断言 bundle 含插件与 llvm-lib（缺一即不可用）
+        run: |
+          set -euo pipefail
+          cd ~/amice-bundle
+          fail=0
+          [[ -f amice/lib/libamice.so ]] || { echo "❌ 缺 amice/lib/libamice.so"; fail=1; }
+          [[ -d amice/llvm-lib ]]       || { echo "❌ 缺 amice/llvm-lib（这是 848MB 的主要构成）"; fail=1; }
+          [[ -f amice/env.sh ]]         || { echo "❌ 缺 amice/env.sh"; fail=1; }
+          [[ -x amice/bin/aarch64-linux-android-clang ]] \
+            || { echo "❌ 缺 aarch64 wrapper"; fail=1; }
+          if [[ $fail -ne 0 ]]; then
+            echo "=== 实际内容 ==="
+            find . -maxdepth 2 -type d | head -20
+            exit 1
+          fi
+          echo "✅ bundle 结构完整"
+          ls -la amice/lib/ | head -5
+          du -sh amice/llvm-lib
+
+      - name: 编译探针（断言插件加载 + 混淆生效 + arm64 目标）
+        run: |
+          set -euo pipefail
+          cd ~/amice-bundle
+          source ./amice/env.sh
+
+          cat > /tmp/probe.c <<'SRC'
+          /* 探针目标：一个函数带标记字符串，开了字符串加密后
+           * `strings` 应搜不到标记；再开 MBA/平坦化验证 pass 不崩。 */
+          #include <stdio.h>
+          __attribute__((annotate("amice_mba"), annotate("amice_flatten")))
+          int calc(int a, int b) {
+              int x = a * 2 + b;
+              int y = (x ^ 0x5A5A) - (b << 1);
+              return x + y;
+          }
+          int main(void) {
+              const char *marker = "AMICE_PROBE_MARKER_20261105";
+              printf("%s %d\n", marker, calc(3, 4));
+              return 0;
+          }
+          SRC
+
+          echo "=== 1) 不带插件先编一遍（基线，确认工具链本身可用）==="
+          ./amice/bin/aarch64-linux-android-clang /tmp/probe.c -o /tmp/probe_plain 2>&1 | tee /tmp/plain.log
+          file /tmp/probe_plain
+          if strings -a /tmp/probe_plain | grep -q AMICE_PROBE_MARKER_20261105; then
+            echo "✅ 基线：标记串明文存在（预期）"
+          else
+            echo "❌ 基线异常：明文编译也没有标记串"
+            exit 1
+          fi
+
+          echo "=== 2) 带插件 + 开关编第二遍 ==="
+          export AMICE_STRING_ENCRYPTION=true
+          export AMICE_MBA=true
+          export AMICE_INDIRECT_CALL=true
+          export AMICE_INDIRECT_BRANCH=true
+          ./amice/bin/aarch64-linux-android-clang /tmp/probe.c -o /tmp/probe_amice 2>&1 | tee /tmp/amice.log
+          file /tmp/probe_amice
+
+          echo "=== 3) 断言：插件真的加载了（没有 load 失败）==="
+          if grep -qiE "unable to load plugin|libLLVM\.so: cannot open" /tmp/amice.log; then
+            echo "❌ 插件加载失败（通常是 libLLVM.so 不匹配）"
+            exit 1
+          fi
+          echo "✅ 插件加载无错"
+
+          echo "=== 4) 断言：混淆生效（标记串消失）==="
+          if strings -a /tmp/probe_amice | grep -q AMICE_PROBE_MARKER_20261105; then
+            echo "❌ 标记串仍为明文 —— 字符串加密没生效"
+            exit 1
+          fi
+          echo "✅ 标记串已加密（strings 零命中）"
+
+          echo "=== 5) 断言：产物是 arm64 ==="
+          file /tmp/probe_amice | grep -q "ARM aarch64" \
+            || { echo "❌ 产物不是 aarch64"; file /tmp/probe_amice; exit 1; }
+          echo "✅ 目标是 arm64"
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ Amice 在本环境可用"
+          echo "   bundle: r29 / v0.1.6-beta.1"
+          echo "   插件加载、字符串加密、arm64 目标 三项全过"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: 上传日志（无论成败）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: amice-probe-log
+          path: |
+            /tmp/plain.log
+            /tmp/amice.log
+          if-no-files-found: warn
+          retention-days: 3
+
   protect:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     # 只在手动触发（workflow_dispatch）时出包。
     # push / pull_request 只跑上面的 test job —— 它们没有 apk_url 与 protect_config，
     # 跑 protect 会因必填输入为空直接失败，变成无意义的红叉。
-    if: github.event_name == 'workflow_dispatch'
+    # 同时排除 amice_probe 模式：那个模式只做插件探路，不下 APK、不出包。
+    if: github.event_name == 'workflow_dispatch' && !inputs.amice_probe
     env:
       R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
       R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
