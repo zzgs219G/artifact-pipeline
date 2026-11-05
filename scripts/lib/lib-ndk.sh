@@ -17,14 +17,26 @@ ndk_require() {
   require_env ANDROID_NDK_HOME "指向 NDK 根目录，由 workflow 的 setup-ndk 提供"
 }
 
-# ndk_write_mk <jni目录> [模块名=nc] [静态库目录] — 写入统一的 Application.mk / Android.mk
+# ndk_write_mk <jni目录> [模块名=nc] [静态库目录] [混淆规格] — 写入 Application.mk / Android.mk
 # Android.mk wildcard 收 jni 目录下 *.cpp/*.c（sigcheck-only 原本自包含的 mk 逻辑）
 #
 # 第 3 参数 guard_lib_dir（可选）：so 加密设施的静态库形态（上游 nox 发 .a 时用）。
 #   给定时不编设施源码，改为链接 <dir>/lib/<abi>/libnox.a。
 #   不给时维持原行为（设施源码在 jni/ 下，由 wildcard 收进来编）。
+#
+# 第 4 参数 obf_spec（可选）：Amice 混淆规格，形如 "mba" / "mba,flatten" / ""。
+#   非空时往 APP_CFLAGS 追加：
+#     -DNC_AMICE_ANNOTATE             让 nox 的 NC_OBF 展开成 annotate(...)
+#     -fpass-plugin=<AMICE_PLUGIN>    加载混淆插件
+#   其中 AMICE_PLUGIN 由调用方（protect.sh）经环境变量提供；本函数只负责
+#   把它写进 mk。**不在这里探测文件是否存在** —— 那是 protect.sh 的职责
+#   （它才知道 bundle 解压到哪）。
+#
+#   ⚠️ 混淆是编译期 pass，不改 ELF 段结构，所以不影响 .ncx/.ncxh 等六段。
+#      但它改变 .text 内容 → crc32(.text) 变化是【预期】的，锁箱期重算
+#      code_len 即自洽（前提：.text 内零重定位，见 verify_text_crc_ready.py）。
 ndk_write_mk() {
-  local jni="$1" mod="${2:-nc}" guard_lib_dir="${3:-}"
+  local jni="$1" mod="${2:-nc}" guard_lib_dir="${3:-}" obf_spec="${4:-}"
   cat > "$jni/Application.mk" <<'EOF'
 APP_STL := c++_static
 # NC_GUARD_SECTIONED: 让判决核心（nc_verify_t1）与签名表进 .ncx 加密段。
@@ -46,6 +58,33 @@ APP_CFLAGS.arm64 += -mbranch-protection=standard
 APP_PLATFORM := android-21
 APP_ABI := armeabi-v7a arm64-v8a
 EOF
+  # ── Amice 混淆（2026-11-05）──────────────────────────────────────
+  # 为什么追加而不是改上面的 heredoc：上面的 APP_CFLAGS 是 'EOF' 单引号
+  # heredoc（不展开变量），而这里要用 $obf_spec 做条件判断，混在一起会让
+  # 已收敛的模板可读性变差，也容易被后续改动误伤。
+  # 用 >> 追加，行序不影响 make 语义（同名单赋值后者覆盖，+= 累积）。
+  if [[ -n "$obf_spec" ]]; then
+    local _obf_flags="-DNC_AMICE_ANNOTATE"
+    [[ -n "${AMICE_PLUGIN:-}" ]] || {
+      echo "❌ 开了混淆但 AMICE_PLUGIN 未设置 —— 插件路径未知，无法加载 pass" >&2
+      return 1
+    }
+    _obf_flags="$_obf_flags -fpass-plugin=$AMICE_PLUGIN"
+    # AMICE_* 是运行时环境变量（编译期被插件读取），不是 CFLAGS。
+    # 但 ndk-build 的子进程能继承，所以写成 APP_CFLAGS 里的注释说明来源，
+    # 真正的开关由 protect.sh 在调用 ndk_build 时 export。
+    cat >> "$jni/Application.mk" <<OBFEOF
+
+# ── Amice 混淆（规格: $obf_spec）─────────────────────────────────
+# NC_AMICE_ANNOTATE 让 nc_guard_boot.c 的 NC_OBF 展开成
+#   __attribute__((noinline, annotate("+mba")))
+# -fpass-plugin 加载插件本体（需 LD_LIBRARY_PATH 指向 amice/llvm-lib）
+APP_CFLAGS  += $_obf_flags
+APP_CPPFLAGS += $_obf_flags
+OBFEOF
+    echo "  [mk] Amice 混淆: $obf_spec（plugin=$AMICE_PLUGIN）"
+  fi
+
   cat > "$jni/Android.mk" <<EOF
 LOCAL_PATH := \$(call my-dir)
 
@@ -263,8 +302,31 @@ EOF
 }
 
 # ndk_build <工程根目录> — 执行 ndk-build，产物在 <工程根>/libs/<abi>/
+# ndk_build <工程目录>
+#
+# 混淆模式（AMICE_PLUGIN 非空时）需要额外两步，缺一即插件加载失败：
+#   ① LD_LIBRARY_PATH 指向 bundle 的 amice/llvm-lib —— 插件依赖 host
+#      libLLVM.so，而官方 NDK 不带它（实测 find $NDK -name libLLVM* 为空）。
+#      缺了报 "unable to load plugin: libLLVM.so: cannot open shared object file"。
+#   ② AMICE_* 环境变量是【编译期被插件读取】的开关，必须 export 到
+#      ndk-build 的子进程环境里（写成 CFLAGS 无效 —— 它们不是编译器参数）。
+# 这两点由本函数统一处理，调用方只需确认 AMICE_PLUGIN 已指向插件本体。
 ndk_build() {
   local project="$1"
   ndk_require
+  if [[ -n "${AMICE_PLUGIN:-}" ]]; then
+    if [[ -z "${AMICE_LLVM_LIB:-}" || ! -d "${AMICE_LLVM_LIB:-}" ]]; then
+      echo "❌ 开了混淆但 AMICE_LLVM_LIB 未指向 bundle 的 amice/llvm-lib" >&2
+      echo "   该目录提供插件依赖的 host libLLVM.so（官方 NDK 不含）" >&2
+      return 1
+    fi
+    echo "  [ndk] 混淆模式: LD_LIBRARY_PATH=$AMICE_LLVM_LIB"
+    PATH="$ANDROID_NDK_HOME:$PATH" \
+      LD_LIBRARY_PATH="$AMICE_LLVM_LIB:${LD_LIBRARY_PATH:-}" \
+      AMICE_MBA="${AMICE_MBA:-false}" \
+      AMICE_FLATTEN="${AMICE_FLATTEN:-false}" \
+      ndk-build -j"$(nproc)" -C "$project"
+    return $?
+  fi
   PATH="$ANDROID_NDK_HOME:$PATH" ndk-build -j"$(nproc)" -C "$project"
 }

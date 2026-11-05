@@ -99,6 +99,11 @@ EXCLUDE_ABI=""          # 带值参数标准件(报错四十四):--exclude-abi �
 WANT_STRINGENC=0; STRING_RULES=""
 WANT_ANTIDIFF=0
 WANT_DEX2C_STUB=0     # 联动子复选框:把解密桩内核 dn() 也抽进 dex2c(见 STEP2 顺序手术)
+# Amice 混淆（2026-11-05）：编译期 pass，作用于 so 的 .text。
+# 只影响 NDK 编译参数，不影响 dex 层任何步骤。
+WANT_OBFUSCATE=0
+OBF_MBA=0
+OBF_FLATTEN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sigcheck) WANT_SIGCHECK=1; shift ;;
@@ -132,13 +137,18 @@ while [[ $# -gt 0 ]]; do
 
     --anti-diff) WANT_ANTIDIFF=1; shift ;;
     --dex2c-stub) WANT_DEX2C_STUB=1; shift ;;
+    # Amice 混淆（2026-11-05）。子复选框隐含父模块开启（与 --packer-smaller 同惯例）。
+    # 值为空时由 lib-ndk.sh 按"父模块开、子项默认"取默认组合（MBA on / flatten off）。
+    --obfuscate) WANT_OBFUSCATE=1; shift ;;
+    --obfuscate-mba) WANT_OBFUSCATE=1; OBF_MBA=1; shift ;;
+    --obfuscate-flatten) WANT_OBFUSCATE=1; OBF_FLATTEN=1; shift ;;
     *)          log_err "未知参数: $1"; usage ;;
   esac
 done
 
-TOTAL=$((WANT_SIGCHECK + WANT_DEX2C + WANT_PACKER + WANT_ENVCHECK + WANT_STRINGENC + WANT_ANTIDIFF))
+TOTAL=$((WANT_SIGCHECK + WANT_DEX2C + WANT_PACKER + WANT_ENVCHECK + WANT_STRINGENC + WANT_ANTIDIFF + WANT_OBFUSCATE))
 if [[ $TOTAL -eq 0 ]]; then
-  log_err "未勾选任何模块（--sigcheck / --dex2c [规则] / --stringenc 规则 / --envcheck / --anti-diff / --packer）"
+  log_err "未勾选任何模块（--sigcheck / --dex2c [规则] / --obfuscate[mba|flatten] / --stringenc 规则 / --envcheck / --anti-diff / --packer）"
   exit 1
 fi
 
@@ -166,6 +176,17 @@ WANT_TRANSPILE=$WANT_DEX2C
 WANT_ENGINE=0
 if [[ $WANT_DEX2C -eq 1 || $WANT_DEX2C_STUB -eq 1 ]]; then WANT_ENGINE=1; fi
 TRANSPILE_RULES="$DEX2C_RULES"
+
+# obfuscate 是编译期 pass，必须作用于 so。没有 so 来源时它无事可做。
+# 不静默跳过（那会让用户以为混淆生效了），直接 fail-fast。
+if [[ $WANT_OBFUSCATE -eq 1 \
+      && $WANT_SIGCHECK -eq 0 && $WANT_TRANSPILE -eq 0 && $WANT_ENVCHECK -eq 0 ]]; then
+  log_err "勾选了代码混淆（--obfuscate），但没有可混淆的 so"
+  log_err "     混淆作用于 libnc.so，请同时勾选其中至少一个："
+  log_err "       签名校验(--sigcheck) / Dex2C(--dex2c) / 环境检测(--envcheck)"
+  exit 1
+fi
+
 
 # ── 入口契约校验：所有环境假设在开工前 fail-fast ────────────────────
 IN_APK="$(normalize_path "$IN_APK")"
@@ -401,6 +422,9 @@ fi
 # 否则 ndk_write_mk 会往一个从未创建的 jni/ 目录里 cat > Application.mk,
 # 报 "No such file or directory"(报错信息里的 tmp.XXX/project/jni 路径即此)。
 # 有 so 需求的组合:sigcheck / 转译(--dex2c) / envcheck 任一勾选。
+# obfuscate（2026-11-05）也在其列 —— 它是编译期 pass，必须有 so 可编。
+# ⚠️ 但单独勾 obfuscate 而不勾任何 so 来源，等于没有可混淆的对象。
+#    那种组合在下面有显式 fail-fast（不能静默跑一遍没效果的流程）。
 if [[ $WANT_SIGCHECK -eq 1 || $WANT_TRANSPILE -eq 1 || $WANT_ENVCHECK -eq 1 ]]; then
 log_step 3 6 "组装 NDK 工程"
 mkdir -p "$WORK/project"
@@ -635,7 +659,49 @@ if [[ -n "$_guard_dst" ]]; then
   fi
 fi
 
-ndk_write_mk "$WORK/project/jni" nc "$GUARD_LIB_DIR"   # mk 模板唯一来源（报错十一），模块名固定 nc
+# ── Amice 混淆：解析 bundle 位置并导出环境变量（2026-11-05）──────────
+# 三个变量分别解决三件事，缺一即失败（都是 fail-fast，不静默降级）：
+#   AMICE_PLUGIN    —— 插件本体路径，写进 -fpass-plugin
+#   AMICE_LLVM_LIB  —— host libLLVM.so 所在目录（官方 NDK 不含，必须来自 bundle）
+#   AMICE_MBA/FLATTEN —— 编译期被插件读取的功能开关（不是 CFLAGS）
+#
+# bundle 位置来源（按优先级）：
+#   ① 环境变量 AMICE_BUNDLE（CI 里由 workflow 指向解压目录）
+#   ② 报错退出 —— 不做"找不到就静默跳过混淆"的降级：
+#      用户勾了混淆却没生效，比构建失败危险得多（以为防了其实没防）。
+_OBF_SPEC=""
+if [[ $WANT_OBFUSCATE -eq 1 ]]; then
+  _bundle="${AMICE_BUNDLE:-}"
+  if [[ -z "$_bundle" || ! -d "$_bundle/amice" ]]; then
+    log_err "勾选了代码混淆，但找不到 Amice bundle"
+    log_err "     请设置 AMICE_BUNDLE 指向解压后的 amice-android-ndk-* 目录"
+    log_err "     （该目录下应有 amice/lib/libamice.so 与 amice/llvm-lib/）"
+    exit 1
+  fi
+  require_file "$_bundle/amice/lib/libamice.so" "Amice 插件本体"
+  [[ -d "$_bundle/amice/llvm-lib" ]] || {
+    log_err "bundle 缺 amice/llvm-lib —— 插件依赖的 host libLLVM.so 在此"
+    log_err "     官方 NDK 不带它，缺了插件加载必失败"
+    exit 1
+  }
+  export AMICE_PLUGIN="$_bundle/amice/lib/libamice.so"
+  export AMICE_LLVM_LIB="$_bundle/amice/llvm-lib"
+  # 子项默认：MBA 开（低风险，默认勾选），flatten 关（高风险，显式才开）。
+  # 注意"父模块勾了但没勾任何子项"的情形：schema 里 mba 默认 true，
+  # 正常不会发生；但命令行直调时可能出现，此处按"什么都没勾=不开混淆"处理，
+  # 并明确报错而不是静默跑一遍没效果的编译。
+  if [[ $OBF_MBA -eq 0 && $OBF_FLATTEN -eq 0 ]]; then
+    log_err "勾选了代码混淆，但没选任何混淆强度（--obfuscate-mba / --obfuscate-flatten）"
+    exit 1
+  fi
+  [[ $OBF_MBA -eq 1 ]] && _OBF_SPEC="mba"
+  [[ $OBF_FLATTEN -eq 1 ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}flatten"
+  export AMICE_MBA="$([[ $OBF_MBA -eq 1 ]] && echo true || echo false)"
+  export AMICE_FLATTEN="$([[ $OBF_FLATTEN -eq 1 ]] && echo true || echo false)"
+  log_info "代码混淆: $_OBF_SPEC（AMICE_MBA=$AMICE_MBA AMICE_FLATTEN=$AMICE_FLATTEN）"
+fi
+
+ndk_write_mk "$WORK/project/jni" nc "$GUARD_LIB_DIR" "$_OBF_SPEC"   # mk 模板唯一来源（报错十一），模块名固定 nc
 
 # ── 通用段标记（2026-10 设施化第2层）──────────────────────────────
 # 让 dex2c 转译产物吃上 .ncx 加密：用规则把 JNI 函数打进加密段。

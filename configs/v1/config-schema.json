@@ -37,6 +37,35 @@
       ]
     },
     {
+      "key": "obfuscate",
+      "label": "代码混淆",
+      "desc": "用 MBA/扁平化改写 so 里的解密逻辑，让逆向者难以读懂。性能：启动稍慢（首次解锁时执行的代码变大）",
+      "type": "parent",
+      "default": false,
+      "arg": "--obfuscate",
+      "group_label": "混淆强度",
+      "children": [
+        {
+          "key": "mba",
+          "label": "算术混淆（MBA）",
+          "desc": "把算术/逻辑运算换成等价但难读的形式。性能：轻微（只在解锁路径上）",
+          "type": "checkbox",
+          "default": true,
+          "value_kind": "flag",
+          "arg_on": "--obfuscate-mba"
+        },
+        {
+          "key": "flatten",
+          "label": "控制流扁平化",
+          "desc": "把代码块顺序打散成状态机。强度最高，但风险也最高——出问题极难排查，建议先用 MBA 验证真机稳定后再开",
+          "type": "checkbox",
+          "default": false,
+          "value_kind": "flag",
+          "arg_on": "--obfuscate-flatten"
+        }
+      ]
+    },
+    {
       "key": "stringenc",
       "label": "字符串加密",
       "desc": "dex 字符串常量加密，运行时自动解密。性能损耗：几乎为零（首次解密后走缓存）",

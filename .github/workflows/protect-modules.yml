@@ -168,6 +168,10 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/actions/tests/test_protect_sh_vars.py
 
+      - name: obfuscate 参数契约（schema→resolver→protect.sh 三处同步）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/actions/tests/test_obfuscate_args.py
+
       - name: packer 冒烟（26 项，含 schema→arg 契约）
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/packer/tests/test-packer.sh
@@ -634,6 +638,75 @@ jobs:
         with:
           ndk-version: r27d
           nox-source: 'false'
+
+      # ── Amice bundle（仅当 protect_config 勾选 obfuscate 时）────────────
+      # 混淆是编译期 LLVM pass，需要 bundle 里的 libamice.so + host libLLVM.so。
+      # 后者官方 NDK 不带（实测 find $NDK -name libLLVM* 为空），必须来自 bundle。
+      #
+      # 用 cache 与 amice-probe/amice-integrate 共用同一个 key —— 三个 job
+      # 各自下载一次 848MB 是浪费；cache 命中后约 20 秒。
+      #
+      # 注意 PROTECT_OBF 的判定与 resolve-config 的解析**互相独立**：
+      # 这里只是"要不要准备 bundle"，真正的参数由 protect.sh 从 args.txt 读。
+      # 若两者不一致，protect.sh 会在找不到 bundle 时 fail-fast（不会静默）。
+      - name: 判定是否勾选了代码混淆
+        id: obf
+        env:
+          CFG: ${{ inputs.protect_config }}
+        run: |
+          set -euo pipefail
+          # 用 python 解析而不是 grep：protect_config 是 JSON，
+          # grep 'obfuscate' 会被 desc 里的中文或别的字段误命中。
+          flag=$(python3 - <<'PY'
+          import json, os
+          try:
+              d = json.loads(os.environ.get('CFG') or '{}')
+          except Exception:
+              print('false'); raise SystemExit
+          ob = d.get('obfuscate')
+          on = bool(ob.get('enabled')) if isinstance(ob, dict) else bool(ob)
+          print('true' if on else 'false')
+          PY
+          )
+          echo "enabled=$flag" >> "$GITHUB_OUTPUT"
+          echo "代码混淆: $flag"
+
+      - name: 取 Amice bundle（复用缓存）
+        if: steps.obf.outputs.enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/amice-bundle
+          key: amice-r29-v0.1.6-beta.1
+
+      - name: 下载 Amice bundle（cache 未命中时）
+        if: steps.obf.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          if [[ -f ~/amice-bundle/amice/lib/libamice.so ]]; then
+            echo "OK: cache 命中"
+            exit 0
+          fi
+          mkdir -p ~/amice-bundle && cd ~/amice-bundle
+          URL=https://github.com/fuqiuluo/amice/releases/download/v0.1.6-beta.1/amice-android-ndk-r29-linux-x86_64.tar.gz
+          curl -fL --retry 3 -o a.tar.gz "$URL"
+          curl -fsSL -o a.sha256 "$URL.sha256"
+          WANT=$(awk '{print $1}' a.sha256); GOT=$(sha256sum a.tar.gz | awk '{print $1}')
+          [[ "$WANT" == "$GOT" ]] || { echo "sha256 不符 want=$WANT got=$GOT"; exit 1; }
+          tar xzf a.tar.gz && rm -f a.tar.gz
+          SRC=$(find . -maxdepth 1 -type d -name 'amice-android-ndk-*' | head -1)
+          mv "$SRC"/* . && rmdir "$SRC"
+          echo "OK: 解压完成"
+
+      - name: 导出 Amice 环境变量供混淆使用
+        if: steps.obf.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          # 写成 $GITHUB_ENV 让后续 protect.sh 那个 step 能读到。
+          # 只导出路径；AMICE_MBA/FLATTEN 由 protect.sh 根据 args.txt 自行设置
+          # （它才是知道用户勾了哪个子项的地方）。
+          echo "AMICE_BUNDLE=$HOME/amice-bundle" >> "$GITHUB_ENV"
+          echo "已导出 AMICE_BUNDLE=$HOME/amice-bundle"
+          ls -la "$HOME/amice-bundle/amice/lib/" | head -3
 
       - name: 解析 protect_config（schema 驱动 → protect.sh 参数）
         env:

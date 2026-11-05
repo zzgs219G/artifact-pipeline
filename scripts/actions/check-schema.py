@@ -39,5 +39,8 @@ assert len(keys) == len(set(keys)), "模块 key 重复"
 #   → mark-native → stringenc → anti-diff → 回编 → packer。
 #   envcheck 在 NDK 组装阶段并入 so，与 packer 一样排在列表末位。）
 # ⚠️ 旧引擎 dcc 已于 2026-12 下线、2026-10 从 schema 移除，此处断言不得再要求它。
-assert keys == ["sigcheck", "dex2c", "stringenc", "antidiff", "envcheck", "packer"], keys
+# obfuscate（2026-11-05）：so 层混淆，编译期生效 → 紧跟 dex2c 之后
+#（两者都作用于 so 产物；它必须排在 NDK 编译之前的参数汇总里）。
+assert keys == ["sigcheck", "dex2c", "obfuscate", "stringenc", "antidiff",
+                "envcheck", "packer"], keys
 print("schema OK:", keys)
