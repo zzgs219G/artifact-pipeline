@@ -542,7 +542,7 @@ jobs:
           #   ① .text 内无重定位 —— 否则锁箱期按文件算的 CRC 与运行期
           #      按内存算的不同，正常包也解不开（test-so-lock.sh T31 同一前提）
           #   ② .text 非空且 addr==off（自绑定按文件偏移算）
-          python3 scripts/verify_text_crc_ready.py /tmp/ncbuild/jni/libnc.so
+          python3 scripts/repack/verify_text_crc_ready.py /tmp/ncbuild/jni/libnc.so
 
       - name: 断言锁箱后结构正确（静态；执行类须真机，见步骤内说明）
         run: |
