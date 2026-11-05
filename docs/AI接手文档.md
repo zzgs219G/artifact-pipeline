@@ -25,15 +25,44 @@
 
 ---
 
-## 1. 三个仓库的角色（最容易搞混）
+## 1. 周边仓库的角色（最容易搞混）
 
-| 仓库 | 改什么 | 消费关系 |
+> 全部**平级并列**在同一父目录下。依赖方向**单向**：本仓库消费三个工具上游的
+> 分发包（zip），工具上游都不认识本仓库。
+
+| 仓库 | 改什么 | 与本文档的关系 |
 |---|---|---|
-| `nox` | `so-guard/*.c`、`so-section-lock.py`、`so_section_mark.py` | 打包成 `tools/nox.zip` 给下游 |
-| `artifact-pipeline` | `protect.sh`、`sigcheck/src/*.c`、`string-enc/`、`lib-ndk.sh` | 消费 `tools/nox.zip`、`tools/dex2c.zip`、`tools/dpt-shell.zip` |
-| `Dex2C` | `dcc.py`、`dex2c/writer.py`、`dex2c/compiler.py` | 打包成 `tools/dex2c.zip` |
+| `nox` | `scripts/so-guard/*.c`、`so-section-lock.py`、`so_section_mark.py`、`nox` CLI、`test.sh` | 打包成 `tools/nox.zip` 给本仓库。**完整说明见 [`上游仓库-nox.md`](./上游仓库-nox.md)** |
+| `artifact-pipeline` | `protect.sh`、`sigcheck/src/*.c`、`string-enc/`、`lib-ndk.sh` | 本仓库。消费 `tools/nox.zip`、`tools/dex2c.zip`、`tools/dpt-shell.zip` |
+| `Dex2C` | `dcc.py`、`dex2c/writer.py`、`dex2c/compiler.py` | 打包成 `tools/dex2c.zip`（唯一转译引擎） |
+| `dpt-shell` | 加壳器（Java） | 打包成 `tools/dpt-shell.zip`（packer 模块） |
+| `d2c` | 上游 d2c | **只读参考，不要改** |
+| `EdgeRelay` | Cloudflare Worker | 触发本仓库 workflow 的网关 |
+| `jian_box` | 被加固的目标 App | keystore 在这里 |
 
 **`artifact-pipeline` 里不保存 nox 的 `.c` 源码**，只有 `tools/nox.zip`。
+同理也不保存 Dex2C / dpt-shell 的源码。
+
+### 1.1 nox 上游的四个关键事实（改 so 层前必读）
+
+1. **没有 `nc_guard_*.c` 可改** —— 去 `../nox/scripts/so-guard/` 改。
+   本仓库里连副本都没有（刻意：双源头必然漂移）。
+2. **它有自己的 CLI 和自测**，本仓库文档此前完全没提：
+   ```bash
+   cd ../nox
+   ./test.sh                                   # 18 项，零参数即可跑
+   ./nox protect mycode.c --apk app.apk -o libmy.so   # 一条命令编译+加密+strip
+   ```
+3. **改完必须换 zip 并删解压产物**：
+   ```bash
+   cd ../nox && ./test.sh                     # 18 通过 0 失败
+   export ANDROID_NDK_HOME=/path/to/ndk-r27d
+   bash scripts/make-zip-lib.sh <版本号>       # 静态库形态（生产用）
+   cp dist/nox-<版本>.zip ../artifact-pipeline/tools/nox.zip
+   rm -rf ../artifact-pipeline/tools/nox      # ← 不删会静默用旧版
+   ```
+4. **两个 tag 陷阱**：nox 最新 tag 是 **`v0.4.0`**（不是 v0.4.2，那个不存在）；
+   CI clone nox 用的是 `ref: main`，不是 tag。详见 `上游仓库-nox.md` §8。
 
 ---
 
@@ -344,18 +373,22 @@ echo "[strip] ⚠️ .comment 移除失败（objcopy 异常）——继续但不
 ## 9. 改完必做
 
 ```bash
-# nox 改了什么
-cd nox && ./test.sh          # 必须 18 通过 0 失败
+# nox 改了什么（在 nox 仓库）
+cd ../nox && ./test.sh          # 必须 18 通过 0 失败（2026-11-05 实测 18/0）
 
 # 分发包要更新（artifact-pipeline 消费的是 zip，不是你的工作区）
 export ANDROID_NDK_HOME=/data/data/com.termux/files/home/android-ndk-r29-aarch64/android-ndk-r29
-cd nox && bash scripts/make-zip-lib.sh <版本号>          # 静态库形态（生产用）
-cd nox && bash scripts/make-zip-src.sh  <版本号>          # 源码形态（仅调试）
-cp nox/dist/nox-<版本>.zip ../artifact-pipeline/tools/nox.zip
-rm -rf ../artifact-pipeline/tools/nox                    # 强制重新解压
+cd ../nox && bash scripts/make-zip-lib.sh <版本号>          # 静态库形态（生产用）
+cd ../nox && bash scripts/make-zip-src.sh  <版本号>          # 源码形态（仅调试）
+cp ../nox/dist/nox-<版本>.zip /path/to/artifact-pipeline/tools/nox.zip
+rm -rf /path/to/artifact-pipeline/tools/nox                 # 强制重新解压
+
+# 回到本仓库：先跑不依赖 NDK 的
+cd artifact-pipeline
+python3 scripts/actions/tests/test-docs-paths.py
+bash scripts/lib/tests/test-so-lock.sh                      # 52 项，需 ../nox 源码
 
 # 端到端
-cd artifact-pipeline
 RELAY_TOKEN='zzgs219' python3 scripts/trigger_build.py scripts/样本.apk --std --sign
 # → 装真机验证（记得先 uninstall + pm clear）
 ```
@@ -366,6 +399,10 @@ CI 的 `setup-toolchain` action 会校验，源码形态会直接失败：
 ❌ nox.zip 缺 arm64-v8a 静态库
 ❌ nox.zip 含 C 源码（应为静态库形态）
 ```
+
+⚠️ **不要凭 `tools/nox.zip` 里的 `VERSION` 去写 CI 的 `ref`**——
+那是包版本（形如 `2026.11.02-final`），不是 git tag。nox 仓库的 tag
+只有 `v0.1.0`…`v0.4.0`，当年凭 "v0.4.2" 猜 tag 导致 checkout 直接失败。
 
 ---
 

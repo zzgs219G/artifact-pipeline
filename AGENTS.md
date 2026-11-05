@@ -44,6 +44,9 @@ AI 不得"顺手优化"、"重构"、"重命名"、"整理格式"。它们的正
 > 本表此前列的一批本仓库内路径（原来在 `scripts/so-guard/`、`scripts/lib/`
 > 与 `scripts/sigcheck/src/` 下的 nc_guard_* 与 so-section 脚本）
 > 均已不存在。跨仓库边界见 §1.1，冻结契约随源码一起搬到 nox 的 `AGENTS.md`。
+>
+> 📖 **上游仓库 nox 的完整说明（结构 / CLI / 18 项自测 / 两种分发形态 /
+> 加密契约 / 改法与发版流程）见 `docs/上游仓库-nox.md`**。
 
 ### 1.0 本仓库内的冻结清单
 
@@ -54,7 +57,7 @@ AI 不得"顺手优化"、"重构"、"重命名"、"整理格式"。它们的正
 | `scripts/sigcheck/src/nc_link.c` | Java↔Native 判决核心 `nc_verify_t1` + 心跳记录侧 + `ncVerify`/`heartbeat` 两个 JNI 入口 | `test-javacheck.sh`(判决对拍/心跳语义)。**2026-10-19**:`nc_verify_t1` 进 `.ncx` 段,两张签名表进 `.ncxr`——**`ncVerify`/`heartbeat` 两个 JNI 入口绝不能标段**(它们是 unlock 调用方,标了即死锁);段标记必须条件化 `NC_GUARD_SECTIONED && !NCLINK_HOST_TEST`(否则宿主测试读到密文假红) |
 | `scripts/sigcheck/src/sig_guard2.c` | 签名校验**第二独立线**:独立派生(`sig_guard2.h`)/独立处置路径(`syscall(tgkill)` + watchdog),与 `sig_check.c` 零代码共享 | `scripts/sigcheck/tests/test-sig-guard2.sh`(`g2_derive()` 与 `make-sig-hash.sh` 的 python 生成侧逐字节对拍) |
 | `scripts/sigcheck/hash/extract-cert-fp.py` | 证书指纹提取(纯 stdlib 解析 APK Signing Block,v3 优先退 v2) | 无独立测试;由 `test-sig-verify.sh` + `test-so-lock.sh` 间接覆盖(**已知缺口,见本节末尾「冻结资产的能力边界」**) |
-| `scripts/inject/inject-loadlib.py` | loadLibrary 插桩(幂等、多 dex、AXMPrinter 解析二进制 Manifest) | `scripts/inject/tests/test_inject_loadlib.py`（69 断言，纯 stdlib；覆盖 SMALI_DIR_RE 多 dex/双重转义、寄存器策略、双保险互不连累、幂等、Manifest LAUNCHER 解析、CLI 参数） ✅CI。`SMALI_DIR_RE` 与 `inject-javacheck.py` / `encrypt-strings.py` 同源,改一处必须 grep 另外两处(报错七)——测试里已断言两份副本一致 |
+| `scripts/inject/inject-loadlib.py` | loadLibrary 插桩(幂等、多 dex、AXMPrinter 解析二进制 Manifest) | `scripts/inject/tests/test_inject_loadlib.py`（**73 断言**，纯 stdlib；覆盖 SMALI_DIR_RE 多 dex/双重转义、寄存器策略、双保险互不连累、幂等、Manifest LAUNCHER 解析、CLI 参数） ✅CI。`SMALI_DIR_RE` 与 `inject-javacheck.py` / `encrypt-strings.py` 同源,改一处必须 grep 另外两处(报错七)——测试里已断言两份副本一致。**2026-11-05 实测更正：此前文档写 69，实跑 73** |
 | `scripts/repack/mark-native.py` | native 壳替换 + loadLibrary 插桩 | `scripts/repack/tests/test_mark_native.py`（42 断言，纯 stdlib；覆盖 full_name 解析与 `->` 误写纠正、方法名非贪婪解析(报错十)、保留 `.end method`(报错十三)、构造器不 native 化、幂等、多 dex、exit 3 语义） ✅CI |
 | `scripts/repack/dex-capacity.py` | dex 方法数容量检测 + 注入落点选择（读 header 的 method_ids_size，不反汇编） | `scripts/repack/tests/test_dex_capacity.py`（33 断言，纯 stdlib；覆盖 header 解析边界、目录名→dex 名映射(对齐 apktool 字节码)、n+1 命名(含不连续序号)、落点决策三分支、不捡现成空 dex、扫描路径 ×1.25 保守上浮、SMALI_DIR_RE 单一真相） ✅CI。**报错五十九**：注入类曾固定写 `smali/`，大型包 classes.dex 贴顶(65519/65536)导致回编 `Unsigned short value out of range: 65536`，且报错类名随机无诊断价值 |
 | `tools/apktool.jar` | 解包/重打包工具(apktool 3.0.3,git 跟踪独立文件) | 严禁替换版本(历史: 报错四/五)。升级必须回归「解包后 manifest 头 4 字节仍是 `03 00 08 00`」 |
@@ -68,11 +71,14 @@ AI 不得"顺手优化"、"重构"、"重命名"、"整理格式"。它们的正
 ../nox/scripts/so-guard/                 ← 源码真相源（开发机常态，两仓库并列）
   nc_guard_boot.c / nc_guard_probe.c / nc_guard_key.c(+.h)
   nc_guard_paths.c(+.h) / nc_guard_layout.h / nc_guard_jni.c
-  so-section-lock.py / so_section_mark.py
+  so-section-lock.py / so_section_mark.py / gen-paths.py
 
 tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
   只有 *.h + *.py + lib/<abi>/libnox.a，【无 .c】
 ```
+
+> 📖 **上游仓库的完整说明见 `docs/上游仓库-nox.md`**（结构 / CLI / 18 项自测 /
+> 两种分发形态 / 加密契约 / 改法与发版流程）。本节只讲跨仓库边界。
 
 - **改设施 = 去 nox 仓库改**，冻结契约见该仓库的 `AGENTS.md`。本仓库对它的
   改动方式只有一种：换 `tools/nox.zip`（换版纪律见 `docs/流程文档.md` §3.13.5）。
@@ -104,8 +110,12 @@ tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
 
 **契约常数的单一真相源是 `nc_guard_layout.h`**(2026-10-30 起位于上游 nox 仓库;
 本仓库解压态在 `tools/nox/so-guard/`):
-段名(6)、slot 尺寸(96/104)、偏移(8)、magic seed(2)、XOR 碎片表(1)全在那里,
+段名(6)、slot 尺寸(96/112)、偏移(8)、magic seed(2)、XOR 碎片表(1)全在那里,
 带 `_Static_assert` 挡"偏移重叠/越界"类手误(上一轮 88→104 扩容最危险的错误模式)。
+
+> ⚠️ 2026-11-05 更正：本文原写"slot 尺寸 96/104"，是**旧值**。
+> 实测 `nc_guard_layout.h`：`NC_SLOT_SIZE=96`、`NC_STUB_SIZE=112`
+> （`[104:112)` 是 XOR_KEY 的 4×uint16 碎片区）。以源码为准。
 
 消费方(改契约前先看这张表会波及谁)：
   C:    nc_guard_boot.c / nc_guard_probe.c / nc_guard_key.c / nc_guard_paths.c
@@ -142,7 +152,7 @@ tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
 | 缺口 | 说明 |
 |---|---|
 | `extract-cert-fp.py` 无独立测试 | 只被 `test-so-lock.sh` / `test-sig-verify.sh` 间接覆盖。历史报错五十八（签名块解析差 1 字节 → 全量闪退）出在这个文件上，补独立测试是待办。（`inject-loadlib.py` / `mark-native.py` 已于 2026-11-01 补齐，见冻结表） |
-| `test-javacheck.sh` / `test-protect-packer-wiring.sh` **只在本地跑** | 需要真实 `ndk-build` / `zipalign`，CI 未接。其余套件（含 so-lock 52 项、stringenc 五套）已于 2026-11-01 接入 CI |
+| `test-javacheck.sh` / `test-protect-packer-wiring.sh` / `test-sig-verify.sh` **只在本地跑** | 前两套需真实 `ndk-build` / `zipalign`，CI 未接；`test-sig-verify.sh` 需一份已签名的真实 APK 作夹具，接进 CI 只剩 `skip + exit 0` = 假绿。其余套件（含 so-lock 52 项、stringenc 五套）已于 2026-11-01 接入 CI |
 
 ### 为什么"100% 正确"也必须冻结
 
@@ -175,21 +185,31 @@ git diff                          # 自查: 只含预期改动
 (原 `tests/run-tests.sh` 与 module-guard.yml CI 守卫已移除;改动冻结模块
 仍需自查 diff,并在 docs/变更历史.md 留痕。)
 
-> ⚠️ **CI 的测试覆盖是分层的（2026-11-01 起）**：
+> ⚠️ **CI 的测试覆盖是分层的（按 `.github/workflows/protect-modules.yml` 实际 step 核对，2026-11-05）**：
 >
 > **触发方式**：`push`/`pull_request` 到 `main` → **只跑 test job**（自动，无需手动点）；
 > 出包（protect job）仍是 `workflow_dispatch` 手动触发，且用 job 级 `if` 隔离。
 >
-> | 层 | 内容 | 触发 |
+> | 层 | 内容（与 workflow 的 step 一一对应） | 触发 |
 > |---|---|---|
-> | `test` job 第一批（<10s） | 文档路径 / schema 结构 / resolve-config 37 用例 / workflow yml / smali 参数槽 / dex 版本头 | 按改动范围过滤，与构建**并行** |
-> | `test` job 第二批（~4min） | anti-diff 冒烟 / packer 26 项 / **stringenc 五套**（含 apktool 真汇编、密钥流 468 例、联动端到端） | 仅改代码时跑 |
-> | `test` job 第三批（~5min） | **so-lock 52 项** / sig-verify / sig-guard2 / mem-readable / lsgs-strings（需 `../nox` 源码，CI 会 clone 并锁 tag `v0.4.2`） | 仅改代码时跑 |
-> | 本地手工 | `javacheck`（需 `ndk-build`）/ `packer-wiring`（需 `zipalign`） | **CI 不跑**，改动后必须本地跑 |
+> | `test` job 第一批（<10s） | 文档路径校验 / schema 结构 / resolve-config 37 用例 / workflow yml / smali 参数槽 / dex 版本头 / **inject-loadlib 73 断言** / **mark-native 42 断言** | 按改动范围过滤，与构建**并行** |
+> | `test` job 第二批（~4min） | anti-diff 冒烟 / **dex 容量 33 断言** / packer 26 项 / **stringenc 五套**（含 apktool 真汇编、密钥流 468 例、联动端到端） | 仅改代码时跑 |
+> | `test` job 第三批（~5min） | **so-lock 52 项** / sig-guard2 / mem-readable / lsgs-strings（需 `../nox` 源码；CI 用 `setup-toolchain` 的 `nox-source: true`，**ref 为 `main` 而非 tag**） | 仅改代码时跑 |
+> | 本地手工 | `javacheck`（需 `ndk-build`）/ `packer-wiring`（需 `zipalign`）/ **`sig-verify`（需真实已签名 APK 夹具）** | **CI 不跑**，改动后必须本地跑 |
 >
-> **环境与 protect job 保持一致**（同样的 NDK / dex2c / nox / pip 步骤）：
+> **两条容易搞错的**（2026-11-05 核对）：
+> - **`sig-verify` 不在 CI**。workflow 里有显式注释：该脚本没有 APK 时是
+>   "skip + exit 0"，接进来等于"0 通过 0 失败"的**假绿**，比不接更糟。
+>   本文此前把它列在第三批，是错的。
+> - **CI 不锁 nox tag**。nox 最新 tag 是 `v0.4.0`，它早于修复 `nc_guard_jni`
+>   缺失的提交（`1f1a732`），锁它等于测旧代码；且 `v0.4.2` 这个 tag
+>   **在 nox 仓库里根本不存在**（当初凭 `tools/nox/VERSION` 猜的，
+>   checkout 直接失败）。现用 `ref: main`。
+>
+> **环境与 protect job 保持一致**（同样的 NDK / dex2c / nox / pip 步骤，
+> 两边都 `uses: ./.github/actions/setup-toolchain` 一份真相）：
 > 测试因"环境少东西"而红是噪音，会让人逐渐无视红色 CI。
-> 仅剩两套需真实 NDK 编译的没接；**"CI 绿"仍不等于"全绿"**。
+> 仅剩两套需真实 NDK 编译的 + 一套需真实 APK 的没接；**"CI 绿"仍不等于"全绿"**。
 > 全套清单见 `docs/流程文档.md` §6.0。
 
 ## 4. 模块化契约(新增模块时遵守)

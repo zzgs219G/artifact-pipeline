@@ -27,3 +27,8 @@ dist/
 # 2026-11-01 前它的产物被误提交入库，导致每次跑测试都产生随机桩名的脏 diff。
 /scripts/string-enc/tests/work/
 /.nox-tmp/
+
+# resolve-config.py 的运行期输出（一行一个参数，每次运行 makedirs 重建）。
+# 它是 configs/ → protect.sh 的参数传递通道，不是配置源；改配置请改 configs/。
+# 提交它会造成每次构建都产生无意义 diff（同 /scripts/string-enc/tests/work/ 一类）。
+/schema_rules/
