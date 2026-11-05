@@ -646,6 +646,13 @@ if [[ -n "$_guard_dst" ]]; then
     # nc_guard_xor.c（2026-11-06）：XOR_KEY 重组，从 boot.c 拆出以便单独 VMP。
     # ⚠️ 漏拷的症状是链接缺 ncg_xor_key → 解锁链断 → 真机 fail-closed 杀进程。
     cp "$GUARD_SRC/nc_guard_xor.c"   "$_guard_dst/"
+    # nc_guard_crypto.c + nc_guard_internal.h（2026-11-06）：boot_key 派生，
+    # 从 boot.c 拆出以便单独 VMP。internal.h 提供 ncg_shdr_t 与跨文件声明。
+    # ⚠️ 漏拷 .c 的症状：链接缺 ncg_boot_key → boot_key 算不出 →
+    #    .ncks 解不开 → .ncxh 保持密文 → 调用即 SIGILL。
+    # ⚠️ 漏拷 .h 的症状：编译期直接报 ncg_shdr_t / ncg_boot_key 未声明（报错早）。
+    cp "$GUARD_SRC/nc_guard_crypto.c"  "$_guard_dst/"
+    cp "$GUARD_SRC/nc_guard_internal.h" "$_guard_dst/"
     GUARD_LIB_DIR=""      # 源码形态：mk 不需要额外链接 .a
     echo "[nox] 分发形态: 源码（编进 NDK 工程）"
   else
