@@ -446,10 +446,29 @@ jobs:
           FLAGS="-fPIC -fvisibility=hidden -fno-ident -Oz -ffunction-sections \
                  -fdata-sections -fstack-protector-strong -DNC_GUARD_SECTIONED \
                  -DNCG_PATH_STRICT -Wall"
-          echo "=== 编译（不带任何 AMICE_* 开关，纯验证换编译器不破结构）==="
           CC="$HOME/amice-bundle/amice/bin/aarch64-linux-android-clang"
-          "$CC" -shared $FLAGS *.c -o libnc.so -Wl,--gc-sections 2>&1 | tee /tmp/compile.log
-          ls -la libnc.so
+
+          echo "=== 变体 A：基线（不开混淆，对照组）==="
+          "$CC" -shared $FLAGS *.c -o libnc_base.so -Wl,--gc-sections \
+            2>&1 | tee /tmp/compile_base.log
+
+          echo "=== 变体 B：开 MBA 混淆 ==="
+          # NC_AMICE_ANNOTATE 让 nc_guard_boot.c 的 NC_OBF 展开成
+          # __attribute__((noinline, annotate("+mba")))，标注 ncg_xor_key
+          # 与 ncg_boot_key（读懂它们就能复现整条解密链）。
+          # 只开 MBA 不开 flatten：flatten 重排控制流，constructor(50)
+          # 关键路径上风险高；MBA 是算术等价替换，风险低一个量级。
+          "$CC" -shared $FLAGS -DNC_AMICE_ANNOTATE *.c -o libnc_obf.so \
+            -Wl,--gc-sections 2>&1 | tee /tmp/compile_obf.log
+
+          echo "=== 混淆是否真的生效 ==="
+          if cmp -s libnc_base.so libnc_obf.so; then
+            echo "FAIL: 两个变体逐字节相同，混淆没生效"
+            exit 1
+          fi
+          b=$(stat -c%s libnc_base.so); o=$(stat -c%s libnc_obf.so)
+          echo "OK: 产物不同。基线 ${b} 字节 -> 混淆 ${o} 字节"
+          cp libnc_obf.so libnc.so
 
       - name: 断言 .ncx/.ncxh/.nck/.ncks 四段仍在
         run: |
@@ -508,6 +527,22 @@ jobs:
 
           echo "=== 锁箱后段表 ==="
           readelf -S "$SO" | grep -E "\.nc"
+
+      - name: 断言 CRC 自绑定在混淆后仍自洽（关键项）
+        run: |
+          set -euo pipefail
+          # 这是 Amice 接入里最容易翻车的一条，单独断言。
+          #
+          # 机制：lock_head() 把 .text 的 sh_addr/sh_size 写进 .ncks 的
+          #   code_addr/code_len（so-section-lock.py:1195）；运行期
+          #   ncg_stub_recover 对这段算 CRC32 并异或进 k_stub。
+          #   代码改一位 → CRC 变 → k_stub 变 → .ncxh 解出乱码 → SIGILL。
+          #
+          # 混淆会大幅改变 .text 内容与尺寸，所以必须确认：
+          #   ① .text 内无重定位 —— 否则锁箱期按文件算的 CRC 与运行期
+          #      按内存算的不同，正常包也解不开（test-so-lock.sh T31 同一前提）
+          #   ② .text 非空且 addr==off（自绑定按文件偏移算）
+          python3 scripts/verify_text_crc_ready.py /tmp/ncbuild/jni/libnc.so
 
       - name: 断言锁箱后结构正确（静态；执行类须真机，见步骤内说明）
         run: |
