@@ -278,6 +278,115 @@ def target_dir_name(idx):
     return SMALI_BASE if idx == 0 else '%s%d' % (SMALI_PREFIX, idx + 1)
 
 
+# ── 局部拆分（2026-11-06 用户方案，优于全量重排）───────────────────
+def split_oversized(root, apk_path='', cap_ids=None):
+    """只拆【装不下】的那几个 dex，其余一律不动。
+
+    为什么局部拆分优于全量重排（2026-11-06）：
+      · 全量重排要搬 8 万个文件（38 秒），且打乱所有 dex 的类分布 ——
+        而原包的 dex 划分是 R8/d8 按"引用关系聚类"做的，去重率高。
+        全量重排后引用去重率下降，method_ids 反而涨（实测爆到 73648）。
+      · 局部拆分只动超标的那一个，原包其余 dex 的聚类完全保留。
+
+    做法（用户提出，比预判可靠）：
+      插桩完成后实测每个目录的 .method 数 → 超过容量的那个才拆。
+      拆出来的部分用【未占用的编号】（N+1、N+2…），不重排其他目录。
+
+    ⚠️ 容量按"定义数 × 校准比值"估算，比值从原包大 dex 实测
+       （method/type/field 三池取最紧，见 calibrate()）。
+       没有原包可校准时用 DEFAULT_RATIO 兜底。
+    """
+    if cap_ids is None:
+        cap_ids = MAX_METHOD_IDS - SAFETY_MARGIN
+
+    ratios = calibrate(apk_path, root) if apk_path else None
+    if ratios is None:
+        ratios = (DEFAULT_RATIO, DEFAULT_RATIO, DEFAULT_RATIO)
+        log('⚠ 无法从原包校准，用兜底比值 %.2f×' % DEFAULT_RATIO)
+
+    m_r, t_r, f_r = ratios
+    cap_defs = int(min(cap_ids / m_r, cap_ids / t_r, cap_ids / f_r))
+
+    # 找出所有需要拆的目录
+    todo = []
+    for suffix, d in list_smali_dirs(root):
+        classes = []
+        for dirpath, _dn, fns in os.walk(d):
+            for fn in fns:
+                if fn.endswith('.smali'):
+                    full = os.path.join(dirpath, fn)
+                    classes.append((os.path.relpath(full, d),
+                                    count_methods_in_file(full), d))
+        total = sum(c[1] for c in classes)
+        if total > cap_defs:
+            todo.append((suffix, d, classes, total))
+
+    if not todo:
+        log('✅ 所有 dex 都在容量内（上限 %d 个定义），无需拆分' % cap_defs)
+        return 0
+
+    # 已占用的目录编号（拆出来的新目录要从最大编号往后排）
+    used = set()
+    for suffix, _d in list_smali_dirs(root):
+        used.add(int(suffix) if suffix else 1)
+
+    def next_free():
+        n = max(used) + 1
+        while n in used:
+            n += 1
+        used.add(n)
+        return n
+
+    log('── 需拆分 %d 个 dex（单 dex 上限 %d 个定义）──' % (len(todo), cap_defs))
+    for suffix, _d, _cs, total in todo:
+        dexname = 'classes.dex' if not suffix else 'classes%s.dex' % suffix
+        log('  %-14s %6d 定义 → 拆' % (dexname, total))
+
+    # 逐个拆：保留原目录名装第一部分，其余的放新编号
+    for suffix, d, classes, total in todo:
+        # 顺序填装，第一桶留在原目录
+        parts = []
+        cur, cur_defs = [], 0
+        for rel, cnt, src in classes:
+            if cnt > cap_defs:
+                log('  ⚠ %s 单类 %d 定义超上限 %d，无法拆类（dalvik 限制）'
+                    % (rel, cnt, cap_defs))
+                if cur:
+                    parts.append(cur); cur, cur_defs = [], 0
+                parts.append([(rel, cnt, src)])
+                continue
+            if cur_defs + cnt > cap_defs:
+                parts.append(cur); cur, cur_defs = [], 0
+            cur.append((rel, cnt, src))
+            cur_defs += cnt
+        if cur:
+            parts.append(cur)
+
+        if len(parts) == 1:
+            log('  %s 拆后仍 1 份（可能全是超大类），跳过' % os.path.basename(d))
+            continue
+
+        # 第一部分留在原目录（不动），其余搬到新目录
+        moved = 0
+        for i, part in enumerate(parts[1:], start=1):
+            if suffix:
+                new_name = '%s%d' % (SMALI_PREFIX, next_free())
+            else:
+                new_name = '%s%d' % (SMALI_PREFIX, next_free())
+            dst_root = os.path.join(root, new_name)
+            for rel, _cnt, src in part:
+                dst = os.path.join(dst_root, rel)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                os.replace(os.path.join(src, rel), dst)
+                moved += 1
+            log('  %s → %s/（%d 个类）'
+                % (os.path.basename(d), new_name, len(part)))
+        log('  ✓ %s 拆成 %d 份，搬出 %d 个类'
+            % (os.path.basename(d), len(parts), moved))
+
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description='重排 smali 目录，让每个 dex 的 method_ids 留足余量')
@@ -290,6 +399,8 @@ def main(argv=None):
     ap.add_argument('--threshold', type=int, default=DEFAULT_THRESHOLD,
                     help='dex 的 method_ids 超过它才重排（默认 %d）' % DEFAULT_THRESHOLD)
     ap.add_argument('--dry-run', action='store_true', help='只打印计划，不动文件')
+    ap.add_argument('--split', action='store_true',
+                    help='插桩后局部拆分模式：只拆装不下的 dex，其余不动')
     args = ap.parse_args(argv)
 
     # ── --check：纯读 header ──
@@ -302,6 +413,9 @@ def main(argv=None):
     if not args.decompiled:
         log('✗ 需要反编译目录（或改用 --check --apk <apk>）')
         return 1
+    # --split：插桩后局部拆分（推荐用法，见 split_oversized 的 docstring）
+    if args.split:
+        return split_oversized(os.path.abspath(args.decompiled), args.apk)
     root = os.path.abspath(args.decompiled)
     if not os.path.isdir(root):
         log('✗ 目录不存在: %s' % root)
@@ -400,3 +514,242 @@ def main(argv=None):
 
 if __name__ == '__main__':
     sys.exit(main())
+
+# ── 局部拆分（2026-11-06 用户方案，优于全量重排）───────────────────
+def split_oversized(root, apk_path='', cap_ids=None):
+    """只拆【装不下】的那几个 dex，其余一律不动。
+
+    为什么局部拆分优于全量重排（2026-11-06）：
+      · 全量重排要搬 8 万个文件（38 秒），且打乱所有 dex 的类分布 ——
+        而原包的 dex 划分是 R8/d8 按"引用关系聚类"做的，去重率高。
+        全量重排后引用去重率下降，method_ids 反而涨（实测爆到 73648）。
+      · 局部拆分只动超标的那一个，原包其余 dex 的聚类完全保留。
+
+    做法（用户提出，比预判可靠）：
+      插桩完成后实测每个目录的 .method 数 → 超过容量的那个才拆。
+      拆出来的部分用【未占用的编号】（N+1、N+2…），不重排其他目录。
+
+    ⚠️ 容量按"定义数 × 校准比值"估算，比值从原包大 dex 实测
+       （method/type/field 三池取最紧，见 calibrate()）。
+       没有原包可校准时用 DEFAULT_RATIO 兜底。
+    """
+    if cap_ids is None:
+        cap_ids = MAX_METHOD_IDS - SAFETY_MARGIN
+
+    ratios = calibrate(apk_path, root) if apk_path else None
+    if ratios is None:
+        ratios = (DEFAULT_RATIO, DEFAULT_RATIO, DEFAULT_RATIO)
+        log('⚠ 无法从原包校准，用兜底比值 %.2f×' % DEFAULT_RATIO)
+
+    m_r, t_r, f_r = ratios
+    cap_defs = int(min(cap_ids / m_r, cap_ids / t_r, cap_ids / f_r))
+
+    # 找出所有需要拆的目录
+    todo = []
+    for suffix, d in list_smali_dirs(root):
+        classes = []
+        for dirpath, _dn, fns in os.walk(d):
+            for fn in fns:
+                if fn.endswith('.smali'):
+                    full = os.path.join(dirpath, fn)
+                    classes.append((os.path.relpath(full, d),
+                                    count_methods_in_file(full), d))
+        total = sum(c[1] for c in classes)
+        if total > cap_defs:
+            todo.append((suffix, d, classes, total))
+
+    if not todo:
+        log('✅ 所有 dex 都在容量内（上限 %d 个定义），无需拆分' % cap_defs)
+        return 0
+
+    # 已占用的目录编号（拆出来的新目录要从最大编号往后排）
+    used = set()
+    for suffix, _d in list_smali_dirs(root):
+        used.add(int(suffix) if suffix else 1)
+
+    def next_free():
+        n = max(used) + 1
+        while n in used:
+            n += 1
+        used.add(n)
+        return n
+
+    log('── 需拆分 %d 个 dex（单 dex 上限 %d 个定义）──' % (len(todo), cap_defs))
+    for suffix, _d, _cs, total in todo:
+        dexname = 'classes.dex' if not suffix else 'classes%s.dex' % suffix
+        log('  %-14s %6d 定义 → 拆' % (dexname, total))
+
+    # 逐个拆：保留原目录名装第一部分，其余的放新编号
+    for suffix, d, classes, total in todo:
+        # 顺序填装，第一桶留在原目录
+        parts = []
+        cur, cur_defs = [], 0
+        for rel, cnt, src in classes:
+            if cnt > cap_defs:
+                log('  ⚠ %s 单类 %d 定义超上限 %d，无法拆类（dalvik 限制）'
+                    % (rel, cnt, cap_defs))
+                if cur:
+                    parts.append(cur); cur, cur_defs = [], 0
+                parts.append([(rel, cnt, src)])
+                continue
+            if cur_defs + cnt > cap_defs:
+                parts.append(cur); cur, cur_defs = [], 0
+            cur.append((rel, cnt, src))
+            cur_defs += cnt
+        if cur:
+            parts.append(cur)
+
+        if len(parts) == 1:
+            log('  %s 拆后仍 1 份（可能全是超大类），跳过' % os.path.basename(d))
+            continue
+
+        # 第一部分留在原目录（不动），其余搬到新目录
+        moved = 0
+        for i, part in enumerate(parts[1:], start=1):
+            if suffix:
+                new_name = '%s%d' % (SMALI_PREFIX, next_free())
+            else:
+                new_name = '%s%d' % (SMALI_PREFIX, next_free())
+            dst_root = os.path.join(root, new_name)
+            for rel, _cnt, src in part:
+                dst = os.path.join(dst_root, rel)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                os.replace(os.path.join(src, rel), dst)
+                moved += 1
+            log('  %s → %s/（%d 个类）'
+                % (os.path.basename(d), new_name, len(part)))
+        log('  ✓ %s 拆成 %d 份，搬出 %d 个类'
+            % (os.path.basename(d), len(parts), moved))
+
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        description='重排 smali 目录，让每个 dex 的 method_ids 留足余量')
+    ap.add_argument('decompiled', nargs='?', default='',
+                    help='apktool 反编译输出目录（--check 模式可省）')
+    ap.add_argument('--apk', default='',
+                    help='原始 APK：用于读真实 method_ids + 校准换算比值')
+    ap.add_argument('--check', action='store_true',
+                    help='只判断要不要重排（读 APK header，秒出）')
+    ap.add_argument('--threshold', type=int, default=DEFAULT_THRESHOLD,
+                    help='dex 的 method_ids 超过它才重排（默认 %d）' % DEFAULT_THRESHOLD)
+    ap.add_argument('--dry-run', action='store_true', help='只打印计划，不动文件')
+    ap.add_argument('--split', action='store_true',
+                    help='插桩后局部拆分模式：只拆装不下的 dex，其余不动')
+    args = ap.parse_args(argv)
+
+    # ── --check：纯读 header ──
+    if args.check:
+        if not args.apk:
+            log('✗ --check 需要 --apk')
+            return 1
+        return 0 if check_only(args.apk, args.threshold) in (0, 2) else 1
+
+    if not args.decompiled:
+        log('✗ 需要反编译目录（或改用 --check --apk <apk>）')
+        return 1
+    # --split：插桩后局部拆分（推荐用法，见 split_oversized 的 docstring）
+    if args.split:
+        return split_oversized(os.path.abspath(args.decompiled), args.apk)
+    root = os.path.abspath(args.decompiled)
+    if not os.path.isdir(root):
+        log('✗ 目录不存在: %s' % root)
+        return 1
+    dirs = list_smali_dirs(root)
+    if not dirs:
+        log('✗ 找不到 smali 目录（apktool 反编译输出的根目录？）')
+        return 1
+
+    # ── 判断是否需要重排：优先读 APK header（毫秒级）──
+    need = False
+    if args.apk and os.path.isfile(args.apk):
+        rc = check_only(args.apk, args.threshold)
+        if rc != 2:
+            log('\n✅ 无需重排')
+            return 0
+        need = True
+    else:
+        # 没有 APK：只能数 .method 定义，按兜底比值反推
+        log('── 未提供 --apk，按 .method 定义数估算（未校准）──')
+        for suffix, d in dirs:
+            n = 0
+            for dirpath, _dn, fns in os.walk(d):
+                for fn in fns:
+                    if fn.endswith('.smali'):
+                        n += count_methods_in_file(os.path.join(dirpath, fn))
+            est = int(n * DEFAULT_RATIO)
+            if est > args.threshold:
+                need = True
+                log('  %-18s %6d 定义 → 估 %6d method_ids ← 超阈值'
+                    % (os.path.basename(d), n, est))
+    if not need:
+        return 0
+
+    # ── 校准比值 ──
+    ratios = calibrate(args.apk, root) if args.apk else None
+    if ratios is None:
+        ratios = (DEFAULT_RATIO, DEFAULT_RATIO, DEFAULT_RATIO)
+        log('⚠ 无法从原包校准，用兜底比值 %.2f×（未校准，结果偏保守）'
+            % DEFAULT_RATIO)
+
+    cap_ids = MAX_METHOD_IDS - SAFETY_MARGIN
+    classes = collect_classes(root)
+    buckets, loads, cap_defs = plan(classes, cap_ids, ratios)
+
+    log('')
+    log('── 重排计划 ──')
+    log('  类总数 %d，.method 定义合计 %d'
+        % (len(classes), sum(c[1] for c in classes)))
+    log('  单 dex 容量 %d 个 method_ids（硬限 %d − 余量 %d）→ 约 %d 个定义'
+        % (cap_ids, MAX_METHOD_IDS, SAFETY_MARGIN, cap_defs))
+    log('  方案 %d 个 dex：' % len(buckets))
+    for i, (b, load) in enumerate(zip(buckets, loads)):
+        log('    %-18s %6d 定义 → 估 method %6d / type %6d / field %6d（%d 个类）'
+            % (target_dir_name(i) + '/', load,
+               int(load * ratios[0]), int(load * ratios[1]),
+               int(load * ratios[2]), len(b)))
+
+    if args.dry_run:
+        log('\n（dry-run：未改动任何文件）')
+        return 0
+
+    # ── 执行 ──
+    log('\n── 执行重排 ──')
+    tmp_root = os.path.join(root, '__rebalance_tmp')
+    if os.path.isdir(tmp_root):
+        shutil.rmtree(tmp_root)
+    os.makedirs(tmp_root)
+    for i, bucket in enumerate(buckets):
+        dst_root = os.path.join(tmp_root, target_dir_name(i))
+        for rel, _cnt, src in bucket:
+            dst_path = os.path.join(dst_root, rel)
+            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+            try:
+                shutil.move(os.path.join(src, rel), dst_path)
+            except OSError as e:
+                log('  ✗ 搬动失败 %s: %s' % (rel, e))
+                log('  旧目录未删，可安全重跑')
+                return 1
+    for _suffix, d in dirs:
+        shutil.rmtree(d, ignore_errors=True)
+    for i in range(len(buckets)):
+        name = target_dir_name(i)
+        os.rename(os.path.join(tmp_root, name), os.path.join(root, name))
+    os.rmdir(tmp_root)
+
+    log('\n✅ 重排完成：%d 个 dex' % len(buckets))
+    after = collect_classes(root)
+    if len(after) != len(classes):
+        log('✗ 终检失败：重排前 %d 个类，重排后 %d 个 —— 有类丢失！'
+            % (len(classes), len(after)))
+        return 1
+    log('   终检通过：%d 个类一个不少' % len(after))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+
+# ── 插桩后检查（2026-11-06 新增，替代"预先判断要不要重排"）──────────

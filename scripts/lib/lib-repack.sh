@@ -38,27 +38,13 @@ repack_unpack() {
   local out="$1" apk="$2"
   java -jar "$APKTOOL_JAR" d -r -f --no-debug-info -o "$out" "$apk"
 
-  # ── dex 方法表重排（2026-11-06）──────────────────────────────────
-  # 为什么：大型 App 经 R8/d8 后多个 dex 贴顶。实测囧次元 1.0.14：
-  #   classes.dex 余量 17、classes3 余量 111、classes4 余量 73、
-  #   classes6 余量 117；且 classes7 的 field_ids 也贴顶（65357/65536）。
-  # 而我们的加固会往 smali 里写东西（sigcheck 注入约 25 个方法、
-  # stringenc 每条 const-string 换成 3 行），在余量 73 的 dex 上做这些，
-  # 回编必炸 `Unsigned short value out of range`（method/field/type 三个
-  # 池子独立，上限都是 65536，实测三次分别爆 method 和 field）。
-  #
-  # ⚠️ 顺序：必须在【save 之前】+【任何 smali 改动之前】。
-  #   · 在 save 之前：patch-dex-version 的 restore 按 dex 文件名匹配，
-  #     重排后编号变了，先 save 会记下一份对不上号的表（虽然 restore
-  #     有 floor 兜底不会出错，但记录就失真了）。
-  #   · 在任何模块之前：重排会搬动所有类文件，若此前已注入桩或加密
-  #     字符串，重排后出现跨 dex 引用 → 运行期 NoClassDefFoundError。
-  #
-  # 耗时实测（8 万个类）：0.24s 判断（读 dex header）+ 38s 重排。
-  # 余量充足的包只花 0.24s —— 脚本内部先 --check，不需要就 exit。
-  # 失败不阻断：让 apktool 的报错暴露，不在这里吞掉。
-  python3 "$ROOT/scripts/repack/dex-rebalance.py" "$out" --apk "$apk" \
-    || log_warn "[dex-rebalance] 重排失败，继续（若回编报 out of range 请查此项）"
+  # ⚠️ dex 拆分【不在】这里做 —— 改为回编前局部拆分（protect.sh 的
+  # repack_build 之前调 dex-rebalance.py --split）。
+  # 原因（2026-11-06 实测）：解包时还不知道各模块会插多少东西，
+  # 此时重排等于全量搬 8 万个文件（38 秒）且打乱原包 R8 的类聚类
+  # （实测重排后 method_ids 反而从 65463 涨到 73648，回编更炸）。
+  # 正确做法是等所有模块写完、回编之前，实测哪些 dex 装不下，
+  # 只拆那几个。
 
   # 报错十八: 回编会把各 dex 版本全部降成 035(原始信息丢失),解包后先记录
   python3 "$ROOT/scripts/repack/patch-dex-version.py" save "$apk" "$out"

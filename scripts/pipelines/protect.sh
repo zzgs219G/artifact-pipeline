@@ -1128,6 +1128,24 @@ fi
 # stringenc 的产物同样是 release 包，没有理由保留 debug 标记。
 repack_force_debuggable_off "$WORK/decompiled"
 
+# ── dex 局部拆分（2026-11-06）──────────────────────────────────────
+# 所有模块都写完 smali 了，回编之前实测一遍：哪个 dex 装不下就只拆哪个。
+#
+# 为什么放在这里而不是解包后（2026-11-06 实测教出来的）：
+#   · 解包时不知道各模块会插多少 —— 实测囧次元勾 stringenc 全量后
+#     classes4 从 53398 涨到 53502（+104），因为每个含
+#     `static final String` 的类都被加了 1 个 <clinit> 来给字段赋值
+#     （编译期内联常量改成运行期解密）。这种增长事前估不出来。
+#   · 全量重排会打乱原包 R8 的类聚类（按引用关系分的），重排后
+#     method_ids 反而涨（实测 65463 → 73648），越排越炸。
+#   · 局部拆分只动装不下的那个，其余 dex 的聚类完全保留。
+#
+# 耗时：没有超标的 dex 时约 3~5 秒（数一遍 .method + 读 header）。
+# 失败不阻断：让 apktool 的报错暴露，不在这里吞掉。
+python3 "$ROOT/scripts/repack/dex-rebalance.py" "$WORK/decompiled" \
+  --apk "$IN_APK" --split \
+  || log_warn "[dex-split] 拆分失败，继续（若回编报 out of range 请查此项）"
+
 repack_build "$WORK/decompiled" "$WORK/unsigned.apk"
 
 # ── 输出 ────────────────────────────────────────────────────────────

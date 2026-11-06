@@ -229,6 +229,61 @@ def main():
         else:
             bad('不该重排却动了: rc=%d' % rc)
 
+
+    # ── 9. --split 局部拆分（推荐用法）──
+    print('\n── 9. --split 局部拆分（只拆超标的）──')
+    with tempfile.TemporaryDirectory() as td:
+        # 三个 dex：两个装着不同数量的类
+        make_smali(td, 'smali', [('a%d.smali' % i, 8000) for i in range(10)])   # 80000
+        # ⚠️ classes2 要"能被拆开但不该被拆"—— 即容量够但类数 >1。
+        #    踩过：原来只有 10 个 100 定义的类，即使"全拆"也只出 1 份，
+        #    断言恒真，反向验证抓不到退化。
+        make_smali(td, 'smali_classes2', [('b%d.smali' % i, 3000) for i in range(10)])  # 30000 < 48133 容量，但 10 个类
+        apk = os.path.join(td, 't.apk')
+        # classes.dex 贴顶、classes2 宽裕
+        make_apk(apk, [('classes.dex', 96000, 20000, 40000),
+                       ('classes2.dex', 36000, 6000, 9000)])   # 30000×1.2
+        before_dirs = sorted(d for d in os.listdir(td) if d.startswith('smali'))
+        rc = M.main([td, '--apk', apk, '--split'])
+        after_dirs = sorted(d for d in os.listdir(td) if d.startswith('smali'))
+        if rc == 0:
+            ok('--split 执行成功')
+        else:
+            bad('--split 失败 rc=%d' % rc)
+        # 关键：只有超标的那个目录被拆，宽裕的类留在原地。
+        #
+        # ⚠️ 本断言的边界（如实记录，别以为它能防所有退化）：
+        #    它只能验证"类文件没被搬到别处"。而"只拆超标的"这个判据
+        #    本身【做不出反向验证】—— split_oversized 对容量内的目录
+        #    即使进了处理分支，也会因 `len(parts)==1` 而 skip、不搬任何文件。
+        #    即"全拆"和"只拆超标的"在这条路径上行为完全一致。
+        #    实测两次尝试注入退化（把 `if total > cap_defs` 改成
+        #    `if True`）都仍是全绿 —— 不是测试写错，是路径上无可观测差异。
+        #
+        #    能真正抓住"退化成全量重排"的是另一条路：
+        #    看 smali 目录总数是否只增长了超标 dex 需要的份数（见第 7 项）。
+        b2 = [f for f in os.listdir(os.path.join(td, 'smali_classes2'))
+              if f.endswith('.smali')] if os.path.isdir(
+                  os.path.join(td, 'smali_classes2')) else []
+        b2_sub = 0
+        if b2:
+            for dirpath, _dn, fns in os.walk(os.path.join(td, 'smali_classes2')):
+                b2_sub += sum(1 for f in fns if f.endswith('.smali'))
+        if b2_sub == 10:
+            ok('宽裕的 smali_classes2 的 10 个类全在原地（局部拆分生效）')
+        else:
+            bad('smali_classes2 的类被搬走了（%d/10）—— 退化成全量重排' % b2_sub)
+        # 类一个不少
+        n = 0
+        for dirpath, _dn, fns in os.walk(td):
+            for fn in fns:
+                if fn.endswith('.smali'):
+                    n += 1
+        if n == 20:
+            ok('拆分后 20 个类一个不少')
+        else:
+            bad('类丢失: %d / 20' % n)
+
     print('\n=== 结果: %d 通过, %d 失败 ===' % (PASS, FAIL))
     return 0 if FAIL == 0 else 1
 
