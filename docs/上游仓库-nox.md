@@ -38,7 +38,7 @@
 ```
 nox/
 ├── nox                        ★ CLI：protect / build / test 三个子命令
-├── test.sh                    ★ 自测：18 项断言，零参数即可跑（用包内 fixture）
+├── test.sh                    ★ 自测：V1–V10，零参数即可跑（用包内 fixture；判据 0 失败）
 ├── AGENTS.md                  ★ 上游的硬约束（冻结契约、加密纪律、发版纪律）
 ├── README.md                    一句话介绍
 ├── VERSION                      当前 2026.11.02-final
@@ -109,7 +109,7 @@ nox/
 
 ---
 
-## 3. 上游自测：`test.sh` 18 项
+## 3. 上游自测：`test.sh` V1–V10（判据 0 失败，别写死总数）
 
 ```bash
 cd ../nox && ./test.sh                    # 用 fixtures/sample.apk
@@ -268,7 +268,7 @@ workflow）。**设施的 `.c`/`.py` 与本仓库无关。**
 ### 7.2 真要改设施 → 去 nox 仓库改，然后换 zip
 
 ```bash
-# ① 改 + 自测（18 项必须全绿）
+# ① 改 + 自测（判据 0 失败）
 cd ../nox
 ./test.sh
 
@@ -330,7 +330,7 @@ bash scripts/lib/tests/test-so-lock.sh       # 需 ../nox 源码形态
 | §1.1 / §3.2 / §5.1 | 「`./test.sh` 全绿（**14 项**）」 | §4「必须 **18** 通过 0 失败（2026-11-02 起；此前是 14 项）」 |
 | §3.1 | 「分发形态是**源码**，没有预编译产物」 | §5.1「`make-zip-lib.sh` … **当前发版默认**」 |
 
-**以 `./test.sh` 实跑结果为准：18 项**；以 `tools/nox.zip` 实跑结果为准：
+**以 `./test.sh` 实跑结果为准（项数随环境变：`.ncxr` 缺失/`.a` 形态都会 skip）**；以 `tools/nox.zip` 实跑结果为准：
 当前生产包是**静态库形态**（`ar t` 能列出 5 个 `.o`，包内无 `.c`）。
 
 ---
@@ -338,5 +338,5 @@ bash scripts/lib/tests/test-so-lock.sh       # 需 ../nox 源码形态
 ## 9. 一句话交接
 
 > **改 so 层的东西 = 去 `../nox` 改，本仓库里没有 `nc_guard_*.c`。**
-> 改完跑 `../nox/test.sh`（18 项）→ 打 `make-zip-lib.sh` → 换
+> 改完跑 `../nox/test.sh`（判据 0 失败）→ 打 `make-zip-lib.sh` → 换
 > `tools/nox.zip` + **删 `tools/nox/`** → 回来跑 `test-so-lock.sh`（52 项）。

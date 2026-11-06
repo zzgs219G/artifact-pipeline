@@ -50,7 +50,7 @@
 2. **它有自己的 CLI 和自测**，本仓库文档此前完全没提：
    ```bash
    cd ../nox
-   ./test.sh                                   # 18 项，零参数即可跑
+   ./test.sh                                   # V1–V10，零参数即可跑（判据 0 失败）
    ./nox protect mycode.c --apk app.apk -o libmy.so   # 一条命令编译+加密+strip
    ```
 3. **改完必须换 zip 并删解压产物**：
