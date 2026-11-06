@@ -226,22 +226,58 @@ def build_config(args) -> str:
 
 
 def describe_plan(cfg_json: str) -> str:
-    """把 config JSON 翻成人类可读的模块列表，便于触发前确认。"""
+    """把 config JSON 翻成人类可读的模块列表（触发前确认用）。
+
+    ⚠️ 2026-11-06 改成"全量列出 + 明确标注开关"的表格格式。
+    原因：原来只输出一行「A + B + C」，看不出【哪些没开】——
+    用 --all 时用户以为全开了，实际 obfuscate 根本不在这个 config 里
+    （它是另一条链路），而日志里不写、界面上不显示，只能翻构建日志才知道。
+    这正是用户反馈的「可视化缺失」：正常人不会为了看勾了什么去读 6KB 日志。
+
+    现在：已开的打 ✅、未开的打 ⬜，最后一行给数量小结。
+    """
     c = json.loads(cfg_json)
-    mods = []
-    if c.get("sigcheck"):
-        mods.append("签名校验")
-    if c.get("dex2c", {}).get("enabled"):
-        mods.append("Dex2C")
-    if c.get("stringenc", {}).get("enabled"):
-        mods.append("字符串加密")
-    if c.get("antidiff"):
-        mods.append("防对比")
-    if c.get("envcheck"):
-        mods.append("环境检测")
-    if c.get("packer", {}).get("enabled"):
-        mods.append("加壳")
-    return " + ".join(mods) if mods else "（无）"
+
+    # (显示名, 是否启用, 补充说明)
+    # 顺序刻意与 APP 端面板一致，便于两边对照
+    rows = [
+        ("签名校验", bool(c.get("sigcheck")), ""),
+        ("Dex2C",
+         bool(c.get("dex2c", {}).get("enabled")),
+         ("规则: %s" % (c["dex2c"].get("rules_file") or "自动抽主类"))
+         if c.get("dex2c", {}).get("enabled") else ""),
+        ("字符串加密",
+         bool(c.get("stringenc", {}).get("enabled")),
+         ("规则: %s%s" % (c["stringenc"].get("rules_file", ""),
+                          "，解密桩抽进 so" if c["stringenc"].get("dex2c_stub") else ""))
+         if c.get("stringenc", {}).get("enabled") else ""),
+        ("防对比混淆", bool(c.get("antidiff")), ""),
+        ("环境检测", bool(c.get("envcheck")), ""),
+        ("基础加壳",
+         bool(c.get("packer", {}).get("enabled")),
+         ("体积优化%s" % ("，排除模拟器架构" if c["packer"].get("exclude_x86") else ""))
+         if c.get("packer", {}).get("enabled") else ""),
+        # ⚠️ obfuscate 不在 protect_config 的 schema 里（它是独立 input），
+        #    这里显式列出来并说明"本脚本无法设置"，避免用户以为 --all 包含了它。
+        ("代码混淆(Amice)",
+         bool(c.get("obfuscate", {}).get("enabled")),
+         "本脚本不控制；VMP 已烧进 libnox.a，与此项无关"
+         if not c.get("obfuscate", {}).get("enabled") else ""),
+    ]
+
+    out = []
+    on = 0
+    for name, enabled, note in rows:
+        mark = "✅" if enabled else "⬜"
+        if enabled:
+            on += 1
+        line = "  %s %-16s" % (mark, name)
+        if note:
+            line += "  (%s)" % note
+        out.append(line.rstrip())
+    out.append("")
+    out.append("  → 共 %d/%d 项启用" % (on, len(rows)))
+    return "\n".join(out)
 
 
 def _report_signature(path: str, requested: bool) -> None:
@@ -316,6 +352,99 @@ def _clean_app_name(raw: str) -> str:
         base = base[: m.start()]
 
     return base.strip() or "app"
+
+
+def _check_source_apk(apk_path: str) -> None:
+    """上传前检查源 APK 是否【已经加固过】，已加固则拒绝。
+
+    ⚠️ 为什么必须查（2026-11-06 实际踩坑）：
+    拿一个已经加固过的产物再加固一遍，构建照样成功、日志全绿、
+    产物照样下载得到 —— 只是装到手机上卡在启动页。二次加固不会报错，
+    因为两遍加密各自都是"成功"的，只有运行期解一次才发现还是密文。
+
+    两个判据（任一命中即拒绝）：
+      ① lib/<abi>/libnc.so 里有 .ncx / .ncxh 段 —— 说明 be 加固过
+      ② 有 assets/xixin/libxixin.so —— 说明被加过壳
+    """
+    import zipfile
+    try:
+        z = zipfile.ZipFile(apk_path)
+    except (zipfile.BadZipFile, OSError) as e:
+        die(f"读不了 APK: {apk_path}（{e}）")
+
+    names = z.namelist()
+    reasons = []
+
+    # ② 加壳痕迹（最快，先查）
+    packed = [n for n in names if "xixin" in n.lower() and n.endswith(".so")]
+    if packed:
+        reasons.append("含加壳产物: %s" % ", ".join(packed[:2]))
+
+    # ① 加固段：解出 libnc.so 读段表
+    ncs = [n for n in names if n.endswith("/libnc.so")]
+    if not ncs:
+        # 没有 libnc.so 也可能正常（首次加固、包里本就没这个 so），
+        # 但如果有壳就已经拒绝在前面了，这里只提示不阻断。
+        if not reasons:
+            print("   ℹ 源包无 libnc.so（首次加固属正常）")
+    else:
+        import struct
+        for n in ncs[:2]:                      # 只看前两个 abi，够判断
+            try:
+                data = z.read(n)
+            except (KeyError, OSError):
+                continue
+            if len(data) < 64 or data[:4] != b"\x7fELF":
+                continue
+            try:
+                is64 = data[4] == 2
+                if is64:
+                    sh_off = struct.unpack_from("<Q", data, 0x28)[0]
+                    sh_es = struct.unpack_from("<H", data, 0x3A)[0]
+                    sh_num = struct.unpack_from("<H", data, 0x3C)[0]
+                    sh_str = struct.unpack_from("<H", data, 0x3E)[0]
+                    str_off_pos, size_pos = 0x18, 0x20
+                else:
+                    sh_off = struct.unpack_from("<I", data, 0x20)[0]
+                    sh_es = struct.unpack_from("<H", data, 0x2E)[0]
+                    sh_num = struct.unpack_from("<H", data, 0x30)[0]
+                    sh_str = struct.unpack_from("<H", data, 0x32)[0]
+                    str_off_pos, size_pos = 0x10, 0x14
+                o = sh_off + sh_str * sh_es
+                strtab = (struct.unpack_from("<Q", data, o + str_off_pos)[0] if is64
+                          else struct.unpack_from("<I", data, o + str_off_pos)[0])
+                segs = []
+                for i in range(sh_num):
+                    oo = sh_off + i * sh_es
+                    name_off = struct.unpack_from("<I", data, oo)[0]
+                    end = data.find(b"\0", strtab + name_off)
+                    if end < 0:
+                        continue
+                    nm = data[strtab + name_off:end].decode("utf-8", "replace")
+                    if nm in (".ncx", ".ncxh", ".nck", ".ncks"):
+                        segs.append(nm)
+                if segs:
+                    reasons.append("%s 已含加固段 %s" % (n, ",".join(sorted(set(segs)))))
+                    break
+            except (struct.error, IndexError):
+                continue
+
+    if reasons:
+        print("")
+        print("✗ 源 APK 看起来【已经加固过】，拒绝二次加固：")
+        for r in reasons:
+            print("    · %s" % r)
+        print("")
+        print("  二次加固不会报错，但产物会卡在启动页 —— 因为第一次加密的")
+        print("  业务代码被当明文又加密了一遍，运行期解一次仍是密文。")
+        print("")
+        print("  请改用【原始未加固】的 APK。判据（二选一命中即已加固）：")
+        print("    unzip -l app.apk | grep -c 'assets/xixin'      # 有壳")
+        print("    unzip -p app.apk lib/arm64-v8a/libnc.so > x.so && \\")
+        print("      readelf -S x.so | grep -c '\\.ncx'            # 有加固段")
+        print("")
+        print("  确实要强行二次加固（不推荐，仅供测试）：加 --allow-reprotect")
+        sys.exit(1)
 
 
 def artifact_filename(source_apk: str) -> str:
@@ -430,12 +559,111 @@ def upload_apk(base: str, token: str, apk_path: str, key: str, dry: bool) -> str
     return public_url
 
 
+def _echo_remote_modules(base: str, token: str, job_id: str) -> None:
+    """触发后从服务端取回该任务【实际生效】的模块清单并打印。
+
+    为什么需要（用户反馈"可视化缺失"）：
+    本地 describe_plan 是从参数推的，服务端可能拒掉/改写某些项。
+    以前要确认"到底勾了什么"，只能去翻 /api/log 的 6KB 构建日志 ——
+    那不该是人做的事。EdgeRelay 的 /api/jobs 本来就有 modules 字段，
+    直接读出来打印即可。
+
+    失败不阻断（fatal=False 语义）：任务已经触发了，取不到清单只是
+    少一行信息，不该让整个流程算失败。
+    """
+    status, resp = http("GET", f"{base}/api/jobs?limit=20", token, fatal=False)
+    if status != 200 or resp is None:
+        print("   （取云端模块清单失败，不影响构建）")
+        return
+    jobs = resp if isinstance(resp, list) else (resp.get("jobs") or resp.get("items") or [])
+    job = next((j for j in jobs if j.get("job_id") == job_id), None)
+    if not job:
+        return
+    mods = job.get("modules")
+    if mods is None:
+        return
+    print("")
+    print("── 服务端已受理的模块（权威）──")
+    if not mods:
+        print("  （无）")
+    else:
+        for m in mods:
+            print("  ✅ %s" % m)
+    print("")
+
+
+def _report_nox_version() -> None:
+    """打印本次构建会用到的 nox 版本，以及它是否真的带 VMP。
+
+    为什么需要这个（2026-11-06 踩过）：两个仓库的版本号【没有任何自动
+    校验】，nox 发了新版而本仓库 tools/nox.zip 没跟上时，构建照样成功、
+    产物照样能用，只是里头是旧版加固 —— 而输出里一个字都不会提。
+    实测就发生过：nox 已发 v0.9.7（VMP 升档到函数级），本仓库还停在
+    v0.9.7 之前的版本，跑完构建才发现。
+
+    判据不是版本号字符串（那个可以忘了改），而是【产物结构】：
+    静态库形态下 nc_guard_crypto.o 的 VM 子段数直接反映 VMP 档位
+    （module 共享 ~113，函数级隔离 ~152；0 = 完全没 VMP）。
+    所以这里读版本号 + 尽力验一次结构，两者都打印。
+
+    不阻断流程：验不出来只警告。挡路成本高于收益 —— 用户要的是出包。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ver_file = os.path.join(root, "tools", "nox", "VERSION")
+    zip_file = os.path.join(root, "tools", "nox.zip")
+
+    ver = "?"
+    try:
+        with open(ver_file, encoding="utf-8") as f:
+            ver = f.read().strip() or "?"
+    except OSError:
+        if os.path.isfile(zip_file):
+            ver = "?（tools/nox/ 未解压，构建时按 nox.zip 现解）"
+        else:
+            print("   ⚠ 找不到 tools/nox.zip 与 tools/nox/ —— 构建可能缺加固设施")
+            return
+
+    print(f"nox 设施: {ver}")
+
+    # 尽力验 VMP 档位：只在 .a 已就位时做（源码形态/未解压则跳过）
+    lib = os.path.join(root, "tools", "nox", "so-guard", "lib",
+                       "arm64-v8a", "libnox.a")
+    if not os.path.isfile(lib):
+        return
+    ar = shutil.which("llvm-ar") or shutil.which("ar")
+    readelf = shutil.which("llvm-readelf") or shutil.which("readelf")
+    if not (ar and readelf):
+        return
+    try:
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            subprocess.run([ar, "x", lib], cwd=td, check=True,
+                           capture_output=True)
+            obj = os.path.join(td, "nc_guard_crypto.o")
+            if not os.path.isfile(obj):
+                return
+            out = subprocess.run([readelf, "-SW", obj],
+                                 capture_output=True, text=True).stdout
+            subs = out.count("L.L__")
+    except (OSError, subprocess.SubprocessError):
+        return
+
+    if subs == 0:
+        print("   ⚠ nc_guard_crypto.o 无 VM 子段 —— 该 nox 未启用 VMP")
+    else:
+        # 113 ≈ module 共享一套；152 ≈ 函数级各一套（2026-11-06 实测）
+        tier = "函数级隔离" if subs >= 140 else "module 共享"
+        print(f"   VMP: {subs} 个 VM 子段（{tier}档）")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="命令行触发 EdgeRelay 构建",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
-    ap.add_argument("apk", help="本地 APK 路径")
+    ap.add_argument("apk", nargs="?", default="",
+                    help="本地 APK 路径。留空 = 用脚本同目录的 样本.apk"
+                         "（最常用的默认值，省得每次打全路径）")
     ap.add_argument("--base", default=os.environ.get("RELAY_BASE", DEFAULT_BASE),
                     help=f"EdgeRelay 地址（默认 {DEFAULT_BASE}）")
     ap.add_argument("--token", default=os.environ.get("RELAY_TOKEN"),
@@ -475,6 +703,9 @@ def main() -> int:
                    help="从文件读 Dex2C 规则（与 --dex2c-rules 二选一）")
 
     ap.add_argument("--dry-run", action="store_true", help="只打印，不真发请求")
+    ap.add_argument("--allow-reprotect", action="store_true",
+                    help="允许对【已加固】的 APK 二次加固（不推荐：产物会卡启动页，"
+                         "仅供复现问题）")
     ap.add_argument("--no-wait", action="store_true", help="触发后立即返回，不等结果")
     ap.add_argument("--timeout", type=int, default=1800, help="等待上限（秒）")
     ap.add_argument("--download-dir", default=DEFAULT_DOWNLOAD_DIR,
@@ -492,8 +723,33 @@ def main() -> int:
                          "（见 docs/AI接手文档.md）")
     args = ap.parse_args()
 
+    # ── 默认样本 APK（2026-11-06）────────────────────────────────────
+    # 最常用的场景是"改完 nox 打一版验证"，源包固定为仓库内的样本。
+    # 每次手打全路径既烦又容易指错（实测踩过：把一次加固产物当源包，
+    # 二次加固后卡启动页，排查半天才发现是输入错了）。
+    if not args.apk:
+        here = os.path.dirname(os.path.abspath(__file__))
+        for cand in (os.path.join(here, "样本.apk"),
+                     os.path.join(here, "sample.apk")):
+            if os.path.isfile(cand):
+                args.apk = cand
+                break
+        if not args.apk:
+            die("未指定 APK，且脚本同目录下找不到 样本.apk\n"
+                "  用法: %s [APK路径] [选项]\n"
+                "  或把待测 APK 放到: %s/样本.apk" % (sys.argv[0], here))
+        print(f"APK: {args.apk}（默认样本，可用位置参数覆盖）")
+
     if not os.path.isfile(args.apk):
         die(f"APK 不存在: {args.apk}")
+
+    # ── 源包体检：拒绝二次加固 ───────────────────────────────────────
+    # 二次加固不报错、不告警，只在手机上卡启动页 —— 属于本仓库
+    # AGENTS.md 反复强调的"静默失效"，必须在入口挡住。
+    if not args.allow_reprotect:
+        _check_source_apk(args.apk)
+    else:
+        print("   ⚠ --allow-reprotect：跳过源包加固检测（产物可能卡启动页）")
 
     token = args.token
     if not token and not args.dry_run:
@@ -511,9 +767,19 @@ def main() -> int:
     key = f"apks/{digest}-{safe_name}"
 
     config = build_config(args)
+    _report_nox_version()
+
+    # ── 模块清单：触发【前】就让人看清勾了什么 ──────────────────────
+    # 用户反馈的"可视化缺失"：原来只打一行「A + B + C」，看不出哪些没开，
+    # 也看不出 obfuscate 根本不在这个 config 里。要确认得去翻 6KB 构建
+    # 日志 —— 这不该是人做的事。
+    print("")
+    print("── 本次勾选的模块 ──")
+    print(describe_plan(config))
+    print("")
+
     print("=== 1. 上传 APK 到 R2 ===")
     public_url = upload_apk(args.base, token, args.apk, key, args.dry_run)
-
     print()
     print("=== 2. 触发构建 ===")
     payload = {
@@ -529,7 +795,6 @@ def main() -> int:
     if want_sign:
         payload["sign"] = True
     print(f"  workflow: {args.workflow}")
-    print(f"  模块:     {describe_plan(config)}")
     if args.dry_run:
         print(f"  config:   {config}")
         print(f"  payload:  {json.dumps(payload, ensure_ascii=False)}")
@@ -543,6 +808,11 @@ def main() -> int:
 
     job_id = resp["job_id"]
     print(f"  ✅ 已触发，job_id = {job_id}")
+
+    # ── 云端回显：确认【服务端实际收到】的模块 ──────────────────────
+    # 本地打印的是"我以为勾了什么"，这里打印"服务端记下了什么"。
+    # 两者不一致 = 参数被拒/被改写，早发现比等构建完再说好。
+    _echo_remote_modules(args.base, token, job_id)
 
     if args.no_wait:
         print()
