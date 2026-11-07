@@ -197,6 +197,8 @@ static inline long env_raw_syscall(long n, long a0, long a1, long a2,
 /*LSGS:PATH_STATUS|/proc/self/status*/
 /*LSGS:PATH_TASK|/proc/self/task*/
 /*LSGS:PATH_TASK_COMM|/proc/self/task/%s/comm*/
+/*LSGS:PATH_TASK_STATUS|/proc/self/task/%s/status*/
+/*LSGS:PATH_STAT|/proc/self/stat*/
 /*LSGS:PATH_NET_UNIX|/proc/net/unix*/
 /*LSGS:PATH_LIBC|libc.so*/
 
@@ -754,6 +756,121 @@ static int tracer_probe(void) {
  * 误报兜底:以下每一项探测,任何 I/O/解析异常一律视为"未检出"(宁漏勿误伤)。
  * ═══════════════════════════════════════════════════════════════════════ */
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * 2026-11-08 追加:补 sentry / XopProtector / NativeShield 对比后发现的 2 个缺口
+ *   h. 全线程 TracerPid:现有 tracer_probe 只读 /proc/self/status(主线程),
+ *      Frida 挂在独立线程上时 task/<tid>/status 才有 TracerPid
+ *   i. /proc/self/stat 的 state 字段:t/T = traced/stopped,比 TracerPid 难伪造
+ *      (XopProtector risk.cpp:345 同款手段)
+ * 纪律:只追加,不改上方任何已有逻辑行(AGENTS.md §2.4)。
+ * 误报兜底:任何 I/O/解析异常一律视为"未检出"(宁漏勿误伤)。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* h. 全线程 TracerPid。
+ *
+ * 为什么需要:主线程没被 attach 不代表进程没被 attach。Frida 的 gum 线程、
+ *   debugger 的 worker 线程各自有独立的 TracerPid 视角(内核按 task 记录)。
+ *   现有 tracer_probe 只读 /proc/self/status,等于只看主线程。
+ *
+ * 为什么不全信:遍历 task 目录 + 逐线程 open/read 是重操作(线程多时几十次
+ *   系统调用)。所以:
+ *     · 只在 watchdog 里跑(每 5s),不进构造期一次性检测
+ *     · 任一线程读失败 → continue(不判),绝不当成"检测到"
+ *     · 主线程已被 tracer_probe 覆盖,这里跳过它避免重复开销
+ *
+ * ⚠️ 与 tracer_probe 的关系:互补不替代。tracer_probe 走 safe_lines(行解析),
+ *    这里走 safe_read_alloc(整块读),两条不同的 I/O 路径 —— 与 D3/D4
+ *    「Native syscall + Java exec 双通道」同一思路:一条被 hook 另一条还在。
+ */
+/* .ncx(2026-11-08):本探针进加密段,IDA 读到密文。 */
+__attribute__((section(NC_SEC_CODE), retain))
+static int tracer_all_threads_probe(void) {
+    char tp[16];
+    char fmt[40];
+    const char *key = lsg_s(LSGS_TRACERPID, tp, sizeof(tp));
+    const char *pat = lsg_s(LSGS_PATH_TASK_STATUS, fmt, sizeof(fmt));
+    char _pb[24];
+    const char *_p = lsg_s(LSGS_PATH_TASK, _pb, sizeof(_pb));
+    DIR *d;
+    struct dirent *de;
+    int hit = 0;
+
+    if (!key || !pat || !_p) return 0;
+    d = opendir(_p);
+    if (!d) return 0;
+
+    while ((de = readdir(d)) != NULL) {
+        char p[160];
+        char *buf = NULL;
+        char *ln;
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+        /* 主线程已由 tracer_probe 覆盖,跳过省一次 I/O */
+        if (strcmp(de->d_name, "1") == 0) continue;
+        snprintf(p, sizeof(p), pat, de->d_name);
+        /* 走 syscall 直调读(防 fopen hook 伪造 status) */
+        if (safe_read_alloc(p, &buf) < 0 || buf == NULL) continue;
+        /* 逐行找 TracerPid: —— 不假设它在第几行 */
+        ln = buf;
+        while (ln && *ln) {
+            char *nl = strchr(ln, '\n');
+            if (nl) *nl = '\0';
+            if (strncmp(ln, key, 10) == 0) {
+                int pid = atoi(ln + 10);
+                /* 排除自身与父进程:PTRACE_TRACEME 之后 tracer 常是 parent,
+                 * 那是我们自己造的,不是外部调试器(与 tracer_probe 同口径) */
+                if (pid != 0 && pid != getpid() && pid != getppid()) hit = 1;
+                break;
+            }
+            ln = nl ? nl + 1 : NULL;
+        }
+        free(buf);
+        if (hit) break;
+    }
+    closedir(d);
+    return hit;
+}
+
+/* i. /proc/self/stat 的 state 字段。
+ *
+ * 格式:pid (comm) state ppid ... —— state 是【第 3 个字段】,单个字符:
+ *   R 运行 / S 睡眠 / D 不可中断 / Z 僵尸 / T 停止 / t 被跟踪停止
+ *   T 与 t 都表示"进程被 stopped",只有 ptrace/调试器会让它出现。
+ *
+ * 为什么比 TracerPid 难伪造:
+ *   TracerPid 是一个可被 hook 的文本字段(hook open/read 返回假内容即可);
+ *   state 由内核在调度时写入,且【comm 里可能有空格和括号】——解析必须
+ *   从最后一个 ')' 往后找,不能简单按空格切分(这是常见实现错误)。
+ *
+ * ⚠️ 解析纪律:comm 字段格式是 "(name)",name 里可以有空格甚至 ')',
+ *    所以必须 rfind(')') 而不是 find。按空格切分会把带空格的进程名判错。
+ */
+/* .ncx(2026-11-08):本探针进加密段,IDA 读到密文。 */
+__attribute__((section(NC_SEC_CODE), retain))
+static int stat_state_probe(void) {
+    char _pb[24];
+    const char *_p = lsg_s(LSGS_PATH_STAT, _pb, sizeof(_pb));
+    char *buf = NULL;
+    const char *rp;
+    char state;
+
+    if (!_p) return 0;
+    if (safe_read_alloc(_p, &buf) < 0 || buf == NULL) return 0;
+
+    /* 从最后一个 ')' 往后取:stat 的第 3 字段紧跟在 ") " 之后 */
+    rp = strrchr(buf, ')');
+    if (rp == NULL) { free(buf); return 0; }
+    rp++;                       /* 跳过 ')' */
+    while (*rp == ' ') rp++;    /* 跳过空格 */
+    state = *rp;
+    free(buf);
+
+    /* T = stopped by job control or debugger; t = tracing stop.
+     * 两种都是"被调试器停住",正常进程不会出现。 */
+    return (state == 'T' || state == 't') ? 1 : 0;
+}
+
+
+
 /* d1. CRC32(标准多项式 0xEDB88320,与 zlib/CRC-32 一致) */
 static uint32_t env_crc32_table[256];
 static int env_crc32_ready = 0;
@@ -1289,6 +1406,11 @@ static void *env_watchdog(void *arg) {
         if (!hit && xposed_maps_probe())     hit = 1;
         if (!hit && xposed_file_probe())     hit = 1;
         if (!hit && tracer_probe())          hit = 1;
+        /* 2026-11-08 追加:全线程 TracerPid + stat state。两项都放在
+         * tracer_probe 之后 —— 它们是同一目标(/proc 里的调试痕迹)的
+         * 不同通道,主通道没命中才走补充通道,省 I/O。 */
+        if (!hit && tracer_all_threads_probe()) hit = 1;
+        if (!hit && stat_state_probe())         hit = 1;
         /* CRC 全量比对降频(2026-10):Inline hook 是"装完长期驻留"型攻击,
          * 100s 检出延迟对效果无损,换来 80% 轮次的毫秒级开销归零 */
         if (!hit && (round % 5 == 0) && libc_text_crc_probe()) hit = 1;
@@ -1369,6 +1491,17 @@ static void env_check_run(void) {
     r = tracer_probe();
     /*LSG:ENV_TRACER|【数据】调试器 TracerPid 探测结果*/
     envlog_c(0, LSG_ENV_TRACER, r ? "hit" : "clean");
+    if (!hit && r) hit = 1;
+
+    /* ── 2026-11-08 追加探测(只追加,不改上方逻辑) ── */
+    r = tracer_all_threads_probe();
+    /*LSG:ENV_TRACER_ALL|【数据】全线程 TracerPid 探测结果*/
+    envlog_c(0, LSG_ENV_TRACER_ALL, r ? "hit" : "clean");
+    if (!hit && r) hit = 1;
+
+    r = stat_state_probe();
+    /*LSG:ENV_STAT_STATE|【数据】/proc/self/stat 的 state 字段探测结果*/
+    envlog_c(0, LSG_ENV_STAT_STATE, r ? "hit" : "clean");
     if (!hit && r) hit = 1;
 
     /* ── 2026-12 追加探测(只追加,不改上方逻辑) ── */
