@@ -30,11 +30,11 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..', '..'))
-SRC = os.path.join(ROOT, 'scripts', 'sigcheck', 'src')
+SRC = os.path.join(ROOT, 'scripts', 'guard', 'src')
 JNI_C = os.path.join(SRC, 'nc_link_jni.c')
 LINK_C = os.path.join(SRC, 'nc_link.c')
 JNI_H = os.path.join(SRC, 'nc_link_jni.h')
-JAVA = os.path.join(ROOT, 'scripts', 'sigcheck', 'javalink', 'stub-src',
+JAVA = os.path.join(ROOT, 'scripts', 'guard', 'javalink', 'stub-src',
                     'NcLink.java')
 
 PASS = 0

@@ -234,7 +234,7 @@ def main():
     truth = m.group(1) if m else None
 
     consumers = {
-        'inject-javacheck.py': os.path.join(ROOT, 'scripts', 'sigcheck', 'javalink',
+        'inject-javacheck.py': os.path.join(ROOT, 'scripts', 'guard', 'javalink',
                                             'inject-javacheck.py'),
         'encrypt-strings.py': os.path.join(ROOT, 'scripts', 'string-enc',
                                            'encrypt-strings.py'),
