@@ -152,7 +152,8 @@ cp "$GUARD_SRC"/nc_guard_boot.c "$GUARD_SRC"/nc_guard_probe.c \
 #    "'nc_guard_internal.h' file not found"（ncg_boot_key / ncguard_stub_recover
 #    迁到 crypto.c 后新增的跨 TU 声明头）。这正是 AGENTS.md §1.1 记的
 #    "拆分/新增 .c 文件必须同步四处清单" 的老坑 —— 第五处是本文件。
-cp "$SRC"/nc_link.c "$SRC"/env_check.c "$SRC"/sig_check.c "$WORK/"
+cp "$SRC"/nc_link.c "$SRC"/env_check.c "$SRC"/env_probes.c \
+   "$SRC"/env_internal.h "$SRC"/sig_check.c "$WORK/"
 
 # sig_hash.h 是构建期生成的（含两张签名表），必须先生成再编译
 bash "$ROOT/scripts/guard/hash/make-sig-hash.sh" "$APK" "$WORK/sig_hash.h" \
@@ -180,10 +181,10 @@ CFLAGS="-fPIC -shared -fvisibility=hidden -fno-ident -Oz \
 LDFLAGS="-Wl,--gc-sections -Wl,--build-id=none -Wl,--version-script=hide.map"
 # sig_log_data.h 依赖 sig_check.c + env_check.c 的 LSG 标记，必须先跑生成器
 python3 "$ROOT/scripts/guard/log/make-sig-log.py" \
-     sig_check.c env_check.c sig_log_data.h >siglog.log 2>&1 || true
+     sig_check.c env_check.c env_probes.c sig_log_data.h >siglog.log 2>&1 || true
 if clang $CFLAGS -I. nc_guard_boot.c nc_guard_probe.c nc_guard_jni.c \
         nc_guard_key.c nc_guard_paths.c nc_guard_xor.c nc_guard_crypto.c \
-        nc_link.c env_check.c sig_check.c \
+        nc_link.c env_check.c env_probes.c sig_check.c \
         $LDFLAGS -o libnc.so 2>build.log; then
     ok "T1 编译通过（$(stat -c%s libnc.so) B）"
 else
@@ -544,8 +545,8 @@ if [ -f env_check.c ]; then
     miss=""
     for sym in SYM_MPROTECT SYM_MMAP SYM_DLOPEN SYM_PVMREAD; do
         # 标记（/*LSGS:xxx|...*/）与引用（lsg_s(LSGS_xxx, ...)）都要在
-        grep -q "LSGS:$sym|" env_check.c || miss="$miss 标记:$sym"
-        grep -q "LSGS_$sym," env_check.c || miss="$miss 引用:$sym"
+        grep -q "LSGS:$sym|" env_probes.c || miss="$miss 标记:$sym"
+        grep -q "LSGS_$sym," env_probes.c || miss="$miss 引用:$sym"
     done
     if [ -z "$miss" ]; then
         ok "T19 hook 探针覆盖 mprotect/mmap/dlopen/pvm_readv（解密链关键点）"
@@ -837,7 +838,7 @@ _GUARD = os.path.dirname(os.path.abspath(lockpy))
 _SIGCHK = sys.argv[4] if len(sys.argv) > 4 else os.path.normpath(
     os.path.join(_GUARD, '..', 'sigcheck', 'src'))
 _SEARCH = [_GUARD, _SIGCHK]
-CONSUMERS = ['nc_guard_boot.c', 'nc_link.c', 'env_check.c', 'sig_check.c',
+CONSUMERS = ['nc_guard_boot.c', 'nc_link.c', 'env_check.c', 'env_probes.c', 'sig_check.c',
              'nc_guard_probe.c']
 for fn in CONSUMERS:
     fp = None
@@ -951,7 +952,7 @@ if [ -f libnc.so ] && [ -n "${APK:-}" ] && [ -f "$APK" ]; then
     CF="-fPIC -shared -fvisibility=hidden -fno-ident -Oz \
         -ffunction-sections -fdata-sections -DNC_GUARD_SECTIONED"
     if clang $CF -I. nc_guard_boot.c nc_guard_probe.c nc_guard_jni.c \
-            nc_guard_key.c nc_link.c env_check.c sig_check.c \
+            nc_guard_key.c nc_link.c env_check.c env_probes.c sig_check.c \
             -Wl,--gc-sections -Wl,--build-id=none -Wl,--strip-all \
             -o libnc_stripped.so 2>strip.log; then
         # ① strip 后 .symtab/.strtab 应归零

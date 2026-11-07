@@ -438,9 +438,14 @@ mkdir -p "$WORK/project"
 #    生成器输入仍只扫 sig_check/env_check（boot.c 复用它们的标记，
 #    不另立——见 boot.c 头部注释）。
 if [[ $WANT_SIGCHECK -eq 1 || $WANT_ENVCHECK -eq 1 || $WANT_TRANSPILE -eq 1 ]]; then
+  # ⚠️ 2026-11-08：探针拆到 env_probes.c 后，LSGS 标记分散在两个文件里
+  #    （路径/线程名等标记在 env_check.c，特征串在 env_probes.c）。
+  #    生成器必须两个都扫 —— 漏扫会让 sig_log_data.h 缺枚举
+  #    → 编译期 "undeclared identifier"（fail-fast，比运行期静默好）。
   python3 "$ROOT/scripts/guard/log/make-sig-log.py" \
     "$ROOT/scripts/guard/src/sig_check.c" \
     "$ROOT/scripts/guard/src/env_check.c" \
+    "$ROOT/scripts/guard/src/env_probes.c" \
     "$ROOT/scripts/guard/src/sig_guard2.c" \
     "$WORK/sig_log_data.h"
 fi
@@ -574,13 +579,23 @@ PYEOF
 fi
 if [[ $WANT_ENVCHECK -eq 1 ]]; then
   # 环境检测(Frida/Xposed/调试器):与 sigcheck 同型并入同一 libnc.so(constructor 天然共存)
+  #
+  # ⚠️ 2026-11-08：探针拆到 env_probes.c（env_check.c 从 1600+ 行降到 754 行）。
+  #    两个 .c + 一个共享头必须一起拷 —— 缺任一个都编不过：
+  #      env_check.c    基础设施（日志/syscall/IO/kill/watchdog/调度）
+  #      env_probes.c   13 个探针（依赖 env_internal.h 的声明）
+  #      env_internal.h 两侧的共享声明
   if [[ $WANT_TRANSPILE -eq 1 ]]; then
     mkdir -p "$WORK/project/jni/nc"
-    cp "$ROOT/scripts/guard/src/env_check.c" "$WORK/project/jni/nc/"
+    cp "$ROOT/scripts/guard/src/env_check.c" \
+       "$ROOT/scripts/guard/src/env_probes.c" \
+       "$ROOT/scripts/guard/src/env_internal.h" "$WORK/project/jni/nc/"
   cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/nc/"
   else
     mkdir -p "$WORK/project/jni"
-    cp "$ROOT/scripts/guard/src/env_check.c" "$WORK/project/jni/"
+    cp "$ROOT/scripts/guard/src/env_check.c" \
+       "$ROOT/scripts/guard/src/env_probes.c" \
+       "$ROOT/scripts/guard/src/env_internal.h" "$WORK/project/jni/"
   cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/"
   fi
   # envcheck 未勾 sigcheck 时也要有文案表(仅勾 envcheck 的组合)

@@ -20,6 +20,7 @@ GUARD_SRC="$(ensure_nox_src)"   # 回归测试必须源码形态（要解析/编
 GEN="$ROOT/scripts/guard/log/make-sig-log.py"
 SRC_SIG="$ROOT/scripts/guard/src/sig_check.c"
 SRC_ENV="$ROOT/scripts/guard/src/env_check.c"
+SRC_ENVP="$ROOT/scripts/guard/src/env_probes.c"   # 2026-11-08 探针拆分
 
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
@@ -33,7 +34,7 @@ echo "LSGS 检测特征串密文化 端到端验证(宿主端)"
 echo "══════════════════════════════════════════════════"
 
 # ── ① 生成 sig_log_data.h(与流水线同一命令) ──
-python3 "$GEN" "$SRC_SIG" "$SRC_ENV" "$T/sig_log_data.h" >/dev/null
+python3 "$GEN" "$SRC_SIG" "$SRC_ENV" "$SRC_ENVP" "$T/sig_log_data.h" >/dev/null
 ok "sig_log_data.h 生成(make-sig-log.py,含 LSGS 标记)"
 
 # ── ② ③ 防常量折叠三要素在位 ──
@@ -49,6 +50,8 @@ else
 fi
 
 cp "$SRC_ENV" "$T/env_check.c"
+cp "$SRC_ENVP" "$T/env_probes.c"
+cp "$ROOT/scripts/guard/src/env_internal.h" "$T/"
 cp "$SRC_SIG" "$T/sig_check.c"
 # 2026-10-20：两者都 include nc_guard_layout.h（so 加密契约唯一真相源），
 # 必须一并拷到 -I 搜索路径，否则编译期 "file not found"。
@@ -111,7 +114,7 @@ fi
 SO_CC=(${NDK_CC:-$HOST_CC})
 [[ -n "${NDK_CC:-}" ]] && SO_CC+=(--target=aarch64-linux-android21)
 if "${SO_CC[@]}" -shared -fPIC -O2 -DSIGCHECK_HOST_TEST -DNCLINK_HOST_TEST -I"$T" \
-      "$T/sig_check.c" "$T/env_check.c" -o "$T/libtest.so" -llog -fvisibility=hidden \
+      "$T/sig_check.c" "$T/env_check.c" "$T/env_probes.c" -o "$T/libtest.so" -llog -fvisibility=hidden \
       -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all \
       2>"$T/c.log"; then
     ok "sig_check+env_check 全家桶严格模式编译通过(-O2 --gc-sections --strip-all，与生产同款)"
@@ -208,8 +211,8 @@ echo "── 字符串加密强度（本轮升级）──"
 
 # ① key 必须每构建随机（不是固定常量）
 # 判据：连续两次生成的 LSG_KEY 必须不同。
-python3 "$GEN" "$SRC_SIG" "$SRC_ENV" "$T/k1.h" >/dev/null 2>&1
-python3 "$GEN" "$SRC_SIG" "$SRC_ENV" "$T/k2.h" >/dev/null 2>&1
+python3 "$GEN" "$SRC_SIG" "$SRC_ENV" "$SRC_ENVP" "$T/k1.h" >/dev/null 2>&1
+python3 "$GEN" "$SRC_SIG" "$SRC_ENV" "$SRC_ENVP" "$T/k2.h" >/dev/null 2>&1
 K1=$(grep -o 'LSG_KEY\[LSG_KEY_LEN\] = {[^}]*}' "$T/k1.h" | md5sum | cut -d' ' -f1)
 K2=$(grep -o 'LSG_KEY\[LSG_KEY_LEN\] = {[^}]*}' "$T/k2.h" | md5sum | cut -d' ' -f1)
 if [ "$K1" != "$K2" ]; then
