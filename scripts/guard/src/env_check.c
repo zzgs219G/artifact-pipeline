@@ -1425,8 +1425,11 @@ static void *env_watchdog(void *arg) {
          * ⚠️ weak 落空(NULL)时跳过,不误判 —— 组合自洽(同心跳的规则)。 */
         if (!hit && (round % 5 == 0) && ncguard_code_check && !ncguard_code_check()) hit = 1;
         /* 心跳超时(Java 层被删/被绕过)——独立于上面的环境探针,
-         * 不占 hit 位:env_fail 路径相同,但语义上分两条日志便于排障 */
-        if (!hit && nc_heartbeat_expired())  hit = 2;
+         * 不占 hit 位:env_fail 路径相同,但语义上分两条日志便于排障
+         * ⚠️ 2026-11-08: 加 NULL 检查。weak 符号缺失时直接调用会跳 0 崩溃
+         *    （真机 SIGSEGV 实证见 env_check_entry 里 nc_heartbeat_arm_constructor
+         *    的同类修复）。envcheck 单勾时 nc_link 不在工程，本符号必缺失。 */
+        if (!hit && nc_heartbeat_expired && nc_heartbeat_expired())  hit = 2;
         if (hit == 1) {
             /*LSG:ENV_WATCHDOG_HIT|【失败】常驻复查线程检出危险环境*/
             envlog_c(1, LSG_ENV_WATCHDOG_HIT, NULL);
@@ -1547,8 +1550,24 @@ __attribute__((constructor)) static void env_check_entry(void) {
     ncguard_unlock();
     anti_debug_preempt();   /* 2026-10 追加:先抢占(声明不许被调试),再跑探针 */
     /* 心跳武装(2026-10-16 修复):so 加载即倒计时——N 秒内 Java 必须开始喂。
-     * nc_link 仅在勾 sigcheck 时入工程,envcheck 单勾时符号缺失 → weak 落空跳过。 */
-    nc_heartbeat_arm_constructor();
+     * nc_link 仅在勾 sigcheck 时入工程,envcheck 单勾时符号缺失 → weak 落空跳过。
+     *
+     * ⚠️⚠️ 2026-11-08 修真机 SIGSEGV：原代码直接调用，没有 NULL 检查。
+     *    `__attribute__((weak))` 只保证【编译期】不报未定义，不保证【运行期】安全：
+     *    符号真的缺失时，链接器生成的 PLT 桩指向地址 0，
+     *    `bl <nc_heartbeat_arm_constructor@plt>` 一执行就跳 0 → SIGSEGV。
+     *
+     *    真机实证（只勾 --envcheck 的包，Redmi 2602BRT18C / Android 17）：
+     *        backtrace:
+     *          #00 pc 0000000000000000  <unknown>
+     *          #01 pc 000000000002d484  libnc.so
+     *        反汇编该地址：bl 0x57a90 <nc_heartbeat_arm_constructor@plt>
+     *    nm 显示 `w nc_heartbeat_arm_constructor`（弱未定义）。
+     *
+     *    这与 weak 的标准用法有出入：weak 未定义时【取地址】得 NULL、
+     *    【直接调用】并非安全空操作（不同链接器/架构行为不一致，
+     *    实测 bionic + lld 下就是跳 0）。所以调用 weak 符号必须显式判空。 */
+    if (nc_heartbeat_arm_constructor) nc_heartbeat_arm_constructor();
     env_check_run();
     env_watchdog_start();   /* 2026-12 追加:常驻复查线程(不影响上面的"加载即检") */
 }
