@@ -59,7 +59,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/tso.XXXXXX" 2>/dev/null \
 # （上游 nox 仓库是唯一真相源）。require/source 公共库以复用 ensure_nox。
 source "$ROOT/scripts/lib/common.sh"
 GUARD_SRC="$(ensure_nox_src)"   # 回归测试必须源码形态（要解析/编译 .c）
-SRC="$ROOT/scripts/sigcheck/src"
+SRC="$ROOT/scripts/guard/src"
 LOCK="$GUARD_SRC/so-section-lock.py"
 # 需要一个【已签名】APK（锁箱要提证书）。默认取仓库内样本，可用 TEST_APK 覆盖。
 # 为什么必须已签名：本轮 P1-a 起 k_so 由证书派生，未签名包会在锁箱阶段
@@ -136,7 +136,7 @@ fi
 # 会被跳过 —— 一项关键断言被静默跳过比失败更糟。
 # 顺带覆盖 sigcheck+envcheck 的真实组合，而不是只测 sigcheck-only。
 #
-# ⚠️ 2026-10-30 设施独立后：设施（so-guard/）与模块（sigcheck/src/）是两个
+# ⚠️ 2026-10-30 设施独立后：设施（so-guard/）与模块（guard/src/）是两个
 #   目录，但生产链是【扁平拷贝】到 NDK 工程的 jni/ 下（protect.sh 的 cp 清单）。
 #   故这里也拷到同一层 $WORK/，复现生产布局 —— 否则 #include "nc_guard_layout.h"
 #   在子目录布局下解析不到。这个"两个源目录 → 一个扁平目标"的形态本身就是
@@ -144,11 +144,18 @@ fi
 cp "$GUARD_SRC"/nc_guard_boot.c "$GUARD_SRC"/nc_guard_probe.c \
    "$GUARD_SRC"/nc_guard_jni.c "$GUARD_SRC"/nc_guard_key.c \
    "$GUARD_SRC"/nc_guard_key.h "$GUARD_SRC"/nc_guard_layout.h \
-   "$GUARD_SRC"/nc_guard_paths.c "$GUARD_SRC"/nc_guard_paths.h "$WORK/"
+   "$GUARD_SRC"/nc_guard_paths.c "$GUARD_SRC"/nc_guard_paths.h \
+   "$GUARD_SRC"/nc_guard_internal.h \
+   "$GUARD_SRC"/nc_guard_xor.c "$GUARD_SRC"/nc_guard_crypto.c "$WORK/"
+# ⚠️ 2026-11-08：补 nc_guard_internal.h + nc_guard_xor.c + nc_guard_crypto.c。
+#    nox 在 2026-11-06 拆文件时本清单没同步，导致 T1 编译报
+#    "'nc_guard_internal.h' file not found"（ncg_boot_key / ncguard_stub_recover
+#    迁到 crypto.c 后新增的跨 TU 声明头）。这正是 AGENTS.md §1.1 记的
+#    "拆分/新增 .c 文件必须同步四处清单" 的老坑 —— 第五处是本文件。
 cp "$SRC"/nc_link.c "$SRC"/env_check.c "$SRC"/sig_check.c "$WORK/"
 
 # sig_hash.h 是构建期生成的（含两张签名表），必须先生成再编译
-bash "$ROOT/scripts/sigcheck/hash/make-sig-hash.sh" "$APK" "$WORK/sig_hash.h" \
+bash "$ROOT/scripts/guard/hash/make-sig-hash.sh" "$APK" "$WORK/sig_hash.h" \
      >"$WORK/sighash.log" 2>&1 \
     || { echo "  ⚠️ sig_hash.h 生成失败（详见 $WORK/sighash.log）"; }
 cd "$WORK" || { echo "cd 失败"; exit 2; }
@@ -172,10 +179,11 @@ CFLAGS="-fPIC -shared -fvisibility=hidden -fno-ident -Oz \
   echo "    Java_com_nc_*;"; echo "  local:"; echo "    *;"; echo "};"; } > hide.map
 LDFLAGS="-Wl,--gc-sections -Wl,--build-id=none -Wl,--version-script=hide.map"
 # sig_log_data.h 依赖 sig_check.c + env_check.c 的 LSG 标记，必须先跑生成器
-python3 "$ROOT/scripts/sigcheck/log/make-sig-log.py" \
+python3 "$ROOT/scripts/guard/log/make-sig-log.py" \
      sig_check.c env_check.c sig_log_data.h >siglog.log 2>&1 || true
 if clang $CFLAGS -I. nc_guard_boot.c nc_guard_probe.c nc_guard_jni.c \
-        nc_guard_key.c nc_guard_paths.c nc_link.c env_check.c sig_check.c \
+        nc_guard_key.c nc_guard_paths.c nc_guard_xor.c nc_guard_crypto.c \
+        nc_link.c env_check.c sig_check.c \
         $LDFLAGS -o libnc.so 2>build.log; then
     ok "T1 编译通过（$(stat -c%s libnc.so) B）"
 else
@@ -726,7 +734,13 @@ LOCK_PY="$LOCK"
 # ⚠️ 2026-10-31：此前 T20 只传 2 个参数，`boot` 恒为空字符串 → C 侧
 #    "是否用 NC_SEED_*_INIT 初始化" 那三条断言被【静默跳过】。
 #    这是"关键断言被静默跳过比失败更糟"的又一例，一并补上。
-BOOT_C_T20="$GUARD_SRC/nc_guard_boot.c"
+# ⚠️ 2026-11-08：nox 2026-11-06 拆文件后，NCG_XOR_FRAG 的初始化从
+#    nc_guard_boot.c 搬到了 nc_guard_xor.c。故这里把两个文件【拼接】后
+#    再交给检查脚本 —— 否则 "未用 NC_XOR_FRAG_INIT 初始化" 必红。
+#    拼接是安全的：检查只做正则匹配，不编译，两份源码拼起来不会互相干扰。
+BOOT_C_T20="$WORK/t20_boot_plus_xor.c"
+cat "$GUARD_SRC/nc_guard_boot.c" "$GUARD_SRC/nc_guard_xor.c" > "$BOOT_C_T20" 2>/dev/null \
+    || BOOT_C_T20="$GUARD_SRC/nc_guard_boot.c"
 
 # ── T20 C↔Python 契约常数跨语言对拍 ──────────────────────────────
 # 做法：让 so-section-lock.py 自己从 layout.h 抽取（它的 _load_layout_contract），
@@ -814,11 +828,11 @@ if boot:
 # （历史存档 nc_guard_unlock.c 已于 2026-10-20 移入 archive/，不在此扫描范围。）
 import os
 # ── 2026-10-30 设施独立：消费者分散在两个目录 ────────────────────────
-# 设施自身（so-guard/）与签名校验模块（sigcheck/src/）都含消费者文件。
+# 设施自身（so-guard/）与签名校验模块（guard/src/）都含消费者文件。
 # ⚠️ 2026-10-31 消费方化：设施改由 tools/nox.zip 解压（tools/nox/so-guard），
-#    与 scripts/sigcheck/src 不再互为兄弟目录 —— 不能用 _GUARD/../sigcheck/src
-#    推导（会推成 tools/nox/sigcheck/src，文件不存在 → 5 个消费者全部"缺失"）。
-#    改由测试脚本通过 argv[4] 传入 sigcheck/src 的绝对路径。
+#    与 scripts/guard/src 不再互为兄弟目录 —— 不能用 _GUARD/../guard/src
+#    推导（会推成 tools/nox/guard/src，文件不存在 → 5 个消费者全部"缺失"）。
+#    改由测试脚本通过 argv[4] 传入 guard/src 的绝对路径。
 _GUARD = os.path.dirname(os.path.abspath(lockpy))
 _SIGCHK = sys.argv[4] if len(sys.argv) > 4 else os.path.normpath(
     os.path.join(_GUARD, '..', 'sigcheck', 'src'))
@@ -874,13 +888,13 @@ if [ -f "$LAYOUT_H" ]; then
             fi
         done < <(grep -rhoE '"\.(nc[a-z]*|nck[a-z]*)"' \
                     "$GUARD_SRC" "$SRC" "$ROOT/scripts/lib" \
-                    "$ROOT/scripts/pipelines" "$ROOT/scripts/sigcheck/hash" \
+                    "$ROOT/scripts/pipelines" "$ROOT/scripts/guard/hash" \
                     2>/dev/null | tr -d '"' | sort -u)
         # 2026-10-20：nc_guard_unlock.c（历史存档，刻意保留旧段名）已从
-        # src/ 移到 scripts/sigcheck/archive/，不再参与 NDK 工程。
+        # src/ 移到 scripts/guard/archive/，不再参与 NDK 工程。
         # 故此处【不再需要豁免】—— archive/ 本就不该被 T21 扫。
         # 若哪天它又回到 src/，下面这行会立刻红，提醒"历史存档不该躺在真相源旁"。
-        if [ -f "$ROOT/scripts/sigcheck/src/nc_guard_unlock.c" ]; then
+        if [ -f "$ROOT/scripts/guard/src/nc_guard_unlock.c" ]; then
             bad "T21 历史存档 nc_guard_unlock.c 又回到了 src/ —— 它不参与 NDK 工程，应留在 archive/"
         fi
         [ $bad_found -eq 0 ] && ok "T21 段名字面量全部已登记（$(echo $registered | wc -w) 个）"
@@ -992,7 +1006,7 @@ fi
 if printf '%s\n' "$_LIBNDK_CODE" | grep -q -- '--undefined-version'; then
     ok "T24 带 --undefined-version（无 JNI_OnLoad 的组合不会链接失败）"
 else
-    bad "T24 缺 --undefined-version —— 纯 sigcheck/envcheck 组合会报 'symbol JNI_OnLoad not defined'"
+    bad "T24 缺 --undefined-version —— 纯 guard/envcheck 组合会报 'symbol JNI_OnLoad not defined'"
 fi
 
 # ── T25 密钥不硬编码（2026-10-22，修「解密器全部明文 / 密钥表可读」）──
@@ -1063,11 +1077,17 @@ if grep -qE 'memset\((key|k_mac|k_cert|xk|k), 0' "$BOOT_C" 2>/dev/null; then
 else
     ok "T27 密钥清零已改用 ncg_wipe（volatile 写，不可优化）"
 fi
-if grep -q 'static void ncg_wipe(void \*p, size_t n)' "$BOOT_C" 2>/dev/null; then
+if grep -qE '^void ncg_wipe\(void \*p, size_t n\)' "$BOOT_C" 2>/dev/null; then
     ok "T27 ncg_wipe 已定义（零依赖、零 PLT，不用 explicit_bzero/memset_s）"
 else
     bad "T27 ncg_wipe 缺失"
 fi
+# ⚠️ 2026-11-08：断言从 'static void' 改为 'void'。
+#    nox 在 2026-11-06 把 ncg_boot_key / ncguard_stub_recover 拆到
+#    nc_guard_crypto.c 后，ncg_wipe 变成跨 TU 调用（crypto.c 也要用它），
+#    故去掉了 static。函数本身仍在 .text，零依赖零 PLT 的性质未变。
+#    这条断言此前只在 boot.c 里 grep 'static void'，拆文件后必红 —— 属
+#    "测试跟着实现漂移" 的老坑（同 T32 的 ncg_ctr_xor）。
 # 反汇编验证（用已编好的 libnc.so；T1 编译产物）
 if [ -f libnc.so ] && nm libnc.so 2>/dev/null | grep -q ncg_wipe; then
     nw=$(objdump -d libnc.so 2>/dev/null \
@@ -1130,6 +1150,10 @@ echo "── T32 SHA-256-CTR（取代 16 字节周期 XOR）──"
 
 # 32c 先做（纯源码检查，不依赖编译产物）
 BOOT_C32="$GUARD_SRC/nc_guard_boot.c"
+# ⚠️ 2026-11-08：ncg_ctr_xor 与 NC_CTR_DOM_* 都在 nc_guard_crypto.c
+#    （nox 拆文件后）。boot.c 里仍留一份 DOM 定义供 ncg_head_unlock 使用，
+#    但函数体只在 crypto.c —— 抽取源必须是 crypto.c，否则 awk 抓不到。
+CRYPTO_C32="$GUARD_SRC/nc_guard_crypto.c"
 # 只查代码行，注释里会引用旧写法说明改造原因（T24 自造假阳性的教训）
 BOOT_CODE32=$(grep -v '^[[:space:]]*\*' "$BOOT_C32" | grep -v '^[[:space:]]*/\*' | grep -v '^[[:space:]]*//')
 # ⚠️ 只能查【异或型】周期密钥流（`x ^= k[i & 15]` / `^ k[i % 16]`），
@@ -1174,7 +1198,10 @@ if command -v clang >/dev/null 2>&1; then
         echo '#define NC_CTR_DOM_HEADRO  0x02'
         echo 'static void ncg_wipe(void *p, size_t n){volatile unsigned char *v=(volatile unsigned char*)p;while(n--)*v++=0;}'
         # 抽取生产函数体（从函数签名行到配对的第一个行首 '}'）
-        awk '/^static void ncg_ctr_xor\(/{f=1} f{print} f&&/^}$/{exit}' "$BOOT_C32"
+        # ⚠️ 2026-11-08：ncg_ctr_xor 已从 nc_guard_boot.c 迁到 nc_guard_crypto.c
+        #    （nox 2026-11-06 拆文件，为让该函数进 VMP 覆盖）。抽取源跟着改。
+        #    签名也带 __attribute__((noinline)) 前置行，awk 从函数名行起抽即可。
+        awk '/^void ncg_ctr_xor\(/{f=1} f{print} f&&/^}$/{exit}' "$CRYPTO_C32"
         cat <<'PYC32MAIN'
 int main(void) {
     uint8_t k[16];

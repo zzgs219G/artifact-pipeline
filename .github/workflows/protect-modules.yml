@@ -162,7 +162,7 @@ jobs:
 
       - name: NcLink 动态注册（23 断言，含 XOR 表与 Java 一致性）
         if: steps.scope.outputs.code == 'true'
-        run: python3 scripts/sigcheck/javalink/tests/test_nclink_dynreg.py
+        run: python3 scripts/guard/javalink/tests/test_nclink_dynreg.py
 
       - name: protect.sh 变量定义/使用顺序（set -u 防崩，bash -n 查不出）
         if: steps.scope.outputs.code == 'true'
@@ -209,15 +209,15 @@ jobs:
 
       - name: sig_guard2 派生对拍
         if: steps.scope.outputs.code == 'true'
-        run: bash scripts/sigcheck/tests/test-sig-guard2.sh
+        run: bash scripts/guard/tests/test-sig-guard2.sh
 
       - name: env_mem_readable 跨映射判定
         if: steps.scope.outputs.code == 'true'
-        run: bash scripts/sigcheck/tests/test-mem-readable.sh
+        run: bash scripts/guard/tests/test-mem-readable.sh
 
       - name: LSGS 特征串密文化（12 断言）
         if: steps.scope.outputs.code == 'true'
-        run: bash scripts/sigcheck/tests/test-lsgs-strings.sh
+        run: bash scripts/guard/tests/test-lsgs-strings.sh
 
       # ⚠️ test-sig-verify.sh 未接入：它需要一份【已签名的真实 APK】作为夹具，
       # 而 CI 干净树里没有。该脚本在没有 APK 时是 `skip + exit 0`——

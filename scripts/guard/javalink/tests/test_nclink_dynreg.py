@@ -21,7 +21,7 @@
   只测源码级不变量与表的一致性。不测真机 FindClass/RegisterNatives
   （那要 JVM + 真实 so，见 test-javacheck.sh 的 ndk-build 部分）。
 
-用法: python3 scripts/sigcheck/javalink/tests/test_nclink_dynreg.py
+用法: python3 scripts/guard/javalink/tests/test_nclink_dynreg.py
 """
 import importlib.util
 import os

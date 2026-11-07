@@ -81,7 +81,7 @@ void nc_heartbeat_arm_constructor(void);
 
 /* ── Java 心跳状态(记录侧) ───────────────────────────────────────
  * nc_link.c 是心跳记录的正确归属:它是 Java↔Native 的桥接层,
- * 且在 sigcheck/envcheck 两种勾选组合下都会参与编译(protect.sh:354/363
+ * 且在 guard/envcheck 两种勾选组合下都会参与编译(protect.sh:354/363
  * 把它随 sigcheck 拷入;envcheck 单勾时 nc_link 不在工程里,此时没有
  * Java 壳喂心跳,watchdog 侧 armed==0 自然跳过检查,组合自洽)。
  * volatile + noinline 防 -O2 常量折叠(同 LSGS 的实测教训)。

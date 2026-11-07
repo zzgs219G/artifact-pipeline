@@ -50,7 +50,7 @@
 
   A 跳转标签重命名:方法内 :label_name 全部换成确定性随机名(:nc3f9 风格)。
     baksmali 生成的标签名局部唯一,换成等价随机名后 diff 必变,语义零变。
-    跳过 <init>/<clinit>(执行顺序敏感,sigcheck/dcc 依赖)。
+    跳过 <init>/<clinit>(执行顺序敏感,guard/dcc 依赖)。
   B 类内块重排:一个类的多个 .method/.field 块按确定性随机序重排。
     跳过 <init>/<clinit>(必须紧跟 .class 声明,不能挪)与含 .annotation 的块。
     smali 允许方法任意顺序,DEX 无序;重排只改文本,引用全部按描述符解析。
@@ -74,7 +74,7 @@
     多分支引用同一标签也不受影响。语义零变(验证器可见的执行路径不变)。
     跳过:含 try-catch 的方法(保守,不碰边界)、fall-through 恰为跳转
     目标的分支(反折绕路无意义,还可能让 diff 工具一眼看穿模式)。
-    跳过 <init>/<clinit>(执行顺序敏感,sigcheck/dcc 依赖)。
+    跳过 <init>/<clinit>(执行顺序敏感,guard/dcc 依赖)。
   F 恒等算术重编码(零损耗):shl-int/lit8 vA, vB, k → mul-int/lit8
     vA, vB, 2^k 的确定性单向改写。两者同为 22b 格式
     (4 字节,等长零膨胀),32 位补码语义下 vB << k ≡ vB × 2^k(含负数与

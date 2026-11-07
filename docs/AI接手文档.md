@@ -33,7 +33,7 @@
 | 仓库 | 改什么 | 与本文档的关系 |
 |---|---|---|
 | `nox` | `scripts/so-guard/*.c`、`so-section-lock.py`、`so_section_mark.py`、`nox` CLI、`test.sh` | 打包成 `tools/nox.zip` 给本仓库。**完整说明见 [`上游仓库-nox.md`](./上游仓库-nox.md)** |
-| `artifact-pipeline` | `protect.sh`、`sigcheck/src/*.c`、`string-enc/`、`lib-ndk.sh` | 本仓库。消费 `tools/nox.zip`、`tools/dex2c.zip`、`tools/dpt-shell.zip` |
+| `artifact-pipeline` | `protect.sh`、`guard/src/*.c`、`string-enc/`、`lib-ndk.sh` | 本仓库。消费 `tools/nox.zip`、`tools/dex2c.zip`、`tools/dpt-shell.zip` |
 | `Dex2C` | `dcc.py`、`dex2c/writer.py`、`dex2c/compiler.py` | 打包成 `tools/dex2c.zip`（唯一转译引擎） |
 | `dpt-shell` | 加壳器（Java） | 打包成 `tools/dpt-shell.zip`（packer 模块） |
 | `d2c` | 上游 d2c | **只读参考，不要改** |
@@ -337,7 +337,7 @@ classloader 未建立），而不是 `JNI_OnLoad` 里调（ART 主动回调，�
 `artifact-pipeline/AGENTS.md` 有清单。改之前必须在当次对话里**用户明确点名**，
 并跑完全部回归 + 在 `变更历史.md` 留痕。
 
-具体包括：`sigcheck/src/*.c`（`sig_check.c` / `env_check.c` / `nc_link.c` /
+具体包括：`guard/src/*.c`（`sig_check.c` / `env_check.c` / `nc_link.c` /
 `sig_guard2.c`）、`nox/so-guard/nc_guard_layout.h`。
 
 ### 8.3 改 `.c` 必须双 ABI 验证

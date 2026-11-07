@@ -230,7 +230,7 @@ log "勾选 $TOTAL 个模块，按固定顺序执行: sigcheck → dex2c → str
 # 攻击者 patch 第一线的 delayed_kill 后,第二线照常判定。
 if [[ $WANT_SIGCHECK -eq 1 ]]; then
   log_step 1 6 "提取证书指纹"
-  "$ROOT/scripts/sigcheck/hash/make-sig-hash.sh" "$IN_APK" \
+  "$ROOT/scripts/guard/hash/make-sig-hash.sh" "$IN_APK" \
       "$WORK/sig_hash.h" "$WORK/sig_guard2.h"
 fi
 
@@ -438,10 +438,10 @@ mkdir -p "$WORK/project"
 #    生成器输入仍只扫 sig_check/env_check（boot.c 复用它们的标记，
 #    不另立——见 boot.c 头部注释）。
 if [[ $WANT_SIGCHECK -eq 1 || $WANT_ENVCHECK -eq 1 || $WANT_TRANSPILE -eq 1 ]]; then
-  python3 "$ROOT/scripts/sigcheck/log/make-sig-log.py" \
-    "$ROOT/scripts/sigcheck/src/sig_check.c" \
-    "$ROOT/scripts/sigcheck/src/env_check.c" \
-    "$ROOT/scripts/sigcheck/src/sig_guard2.c" \
+  python3 "$ROOT/scripts/guard/log/make-sig-log.py" \
+    "$ROOT/scripts/guard/src/sig_check.c" \
+    "$ROOT/scripts/guard/src/env_check.c" \
+    "$ROOT/scripts/guard/src/sig_guard2.c" \
     "$WORK/sig_log_data.h"
 fi
 
@@ -460,11 +460,11 @@ if [[ $WANT_SIGCHECK -eq 1 ]]; then
     mkdir -p "$WORK/project/jni"
     SIG_DST="$WORK/project/jni"
   fi
-  cp "$ROOT/scripts/sigcheck/src/sig_check.c"    "$SIG_DST/"
-  cp "$ROOT/scripts/sigcheck/src/nc_link.c"      "$SIG_DST/"
-  cp "$ROOT/scripts/sigcheck/src/nc_link_jni.c"  "$SIG_DST/"
-  cp "$ROOT/scripts/sigcheck/src/nc_link_jni.h"  "$SIG_DST/"
-  cp "$ROOT/scripts/sigcheck/src/sig_guard2.c"   "$SIG_DST/"
+  cp "$ROOT/scripts/guard/src/sig_check.c"    "$SIG_DST/"
+  cp "$ROOT/scripts/guard/src/nc_link.c"      "$SIG_DST/"
+  cp "$ROOT/scripts/guard/src/nc_link_jni.c"  "$SIG_DST/"
+  cp "$ROOT/scripts/guard/src/nc_link_jni.h"  "$SIG_DST/"
+  cp "$ROOT/scripts/guard/src/sig_guard2.c"   "$SIG_DST/"
   cp "$GUARD_SRC/nc_guard_layout.h"              "$SIG_DST/"
   cp "$WORK/sig_hash.h"                          "$SIG_DST/"
   cp "$WORK/sig_guard2.h"                        "$SIG_DST/"
@@ -576,11 +576,11 @@ if [[ $WANT_ENVCHECK -eq 1 ]]; then
   # 环境检测(Frida/Xposed/调试器):与 sigcheck 同型并入同一 libnc.so(constructor 天然共存)
   if [[ $WANT_TRANSPILE -eq 1 ]]; then
     mkdir -p "$WORK/project/jni/nc"
-    cp "$ROOT/scripts/sigcheck/src/env_check.c" "$WORK/project/jni/nc/"
+    cp "$ROOT/scripts/guard/src/env_check.c" "$WORK/project/jni/nc/"
   cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/nc/"
   else
     mkdir -p "$WORK/project/jni"
-    cp "$ROOT/scripts/sigcheck/src/env_check.c" "$WORK/project/jni/"
+    cp "$ROOT/scripts/guard/src/env_check.c" "$WORK/project/jni/"
   cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/"
   fi
   # envcheck 未勾 sigcheck 时也要有文案表(仅勾 envcheck 的组合)
@@ -610,8 +610,8 @@ fi
 #    "file not found" —— 比漏同步常量安全得多，那种要等到运行期 SIGILL。
 # ⚠️⚠️ 2026-10-21 修真实缺口：锁箱设施的拷贝条件从"jni/nc 目录存在"扩为
 #    "jni/nc 存在 或 有转译产物"。
-#    原条件只由 sigcheck/envcheck 分支建立 jni/nc → 组合
-#    【--dex2c --stringenc --dex2c-stub 且不勾 sigcheck/envcheck】时：
+#    原条件只由 guard/envcheck 分支建立 jni/nc → 组合
+#    【--dex2c --stringenc --dex2c-stub 且不勾 guard/envcheck】时：
 #      标记器（WANT_TRANSPILE 分支）照样把桩的 4 个 JNI 标进 .ncx，
 #      但 boot.c 没拷 → 无人解锁 → 桩永为密文 → Java 首次解字符串即
 #      踩密文 SIGILL → 包必闪退（且 sig_hash.h 也没人生成，锁箱器
@@ -733,7 +733,7 @@ ndk_write_mk "$WORK/project/jni" nc "$GUARD_LIB_DIR" "$_OBF_SPEC"   # mk 模板�
 # 让 dex2c 转译产物吃上 .ncx 加密：用规则把 JNI 函数打进加密段。
 # 位置必须在 ndk_build 【之前】——标记器改的是源码，编译后才跑就晚了。
 #
-# 为什么要单独一层：sigcheck/envcheck 的探针是手写 __attribute__ 的
+# 为什么要单独一层：guard/envcheck 的探针是手写 __attribute__ 的
 # （env_check.c 冻结，只追加）；dex2c 产物由引擎生成，不该为它改冻结的
 # 引擎。有了标记器，加一个消费者 = 加一条规则，谁也不写自己的防御。
 # 详见 docs/流程文档.md §3.12 的三层设施说明。
@@ -1031,7 +1031,7 @@ if [[ $WANT_SIGCHECK -eq 1 ]]; then
   #   但给了才能精确判断 classes.dex 是否贴顶——真实大型包经 R8 编译后
   #   classes.dex 常是 65519/65536（余量 17），固定写 smali/ 必炸
   #   "Unsigned short value out of range: 65536"。
-  if ! python3 "$ROOT/scripts/sigcheck/javalink/inject-javacheck.py" \
+  if ! python3 "$ROOT/scripts/guard/javalink/inject-javacheck.py" \
       "$WORK/decompiled" --so-name nc --apk "$STEP5_APK"; then
     if [[ $WANT_TRANSPILE -eq 1 ]]; then
       log_warn "javacheck 无可用调用点 —— dex2c 组合下 onCreate 已是 native 壳（报错三十九防线跳过），放行；app 侧 <clinit> loadLibrary 兜底仍在"
@@ -1105,7 +1105,7 @@ fi
 # 若 anti-diff 先做、stringenc 后做,stringenc 的改动会让 anti-diff 的"已处理"
 # 标记附近继续出现新差异,削弱防对比效果;最后做 anti-diff,全量 smali 一次性
 # 盖上标签重命名/块重排/入口垃圾指令噪声,diff 视角即"整包重编译"。
-# anti-diff 自带跳过:native 方法(dcc 壳)、<init>/<clinit>(sigcheck/dcc 依赖)。
+# anti-diff 自带跳过:native 方法(dcc 壳)、<init>/<clinit>(guard/dcc 依赖)。
 if [[ $WANT_ANTIDIFF -eq 1 ]]; then
   # 变换 F（shl⇄mul 恒等重编码）已并入模块本体固定开启——原 antidiff.reencode
   # 子复选框（--anti-diff-f）已从 schema 下线（v1.2 回退），此处无条件传 --enable-f

@@ -3,7 +3,7 @@
  * 中文流程日志文案的 XOR 密文 + 消息 ID。明文只存在于源码的 LSG 标记注释
  * 中(形如 斜杠星LSG:NAME|文案星斜杠,此注释本身不能出现星斜杠字面量)
  * 注释中(可读性);so 内只有密文(strings 不泄语义)。运行时解码写入日志文件。
- * 重新生成: python3 scripts/sigcheck/log/make-sig-log.py <sig_check.c> <env_check.c> <out.h> */
+ * 重新生成: python3 scripts/guard/log/make-sig-log.py <sig_check.c> <env_check.c> <out.h> */
 
 #ifndef SIG_LOG_DATA_H
 #define SIG_LOG_DATA_H

@@ -12,7 +12,7 @@
 #
 # 本测试用真实布局复现该场景，钉死修复后的行为。
 #
-# 用法：bash scripts/sigcheck/tests/test-mem-readable.sh
+# 用法：bash scripts/guard/tests/test-mem-readable.sh
 set -uo pipefail
 
 PASS=0; FAIL=0

@@ -22,7 +22,7 @@
  *         （RC4 / HMAC / 密钥槽 / mprotect / clear_cache）
  *   第2层 so_section_mark.py = 通用标记器（规则=函数头正则，零模块逻辑）
  *   第3层 消费者，各自零侵入：
- *         - sigcheck/envcheck 探针（env_check.c 手动 __attribute__）
+ *         - guard/envcheck 探针（env_check.c 手动 __attribute__）
  *         - ncguard_probe()（本目录，样例）
  *         - dex2c 转译产物（经标记器，规则匹配 JNI 函数头）
  *         - 未来新模块：加一条规则即可，不需要改本文件
@@ -274,7 +274,7 @@ int ncguard_unlock(void) {
  * 为什么需要（这是一个"接入即必炸"的坑，不是假设）：
  *   unlock 此前只有两个触发点 ——
  *     ① Java 侧 NcLink.selftest()   ← inject-javacheck.py 只在 --sigcheck 时跑
- *     ② env_check_entry() constructor ← env_check.c 只在 --sigcheck/--envcheck 时入工程
+ *     ② env_check_entry() constructor ← env_check.c 只在 --guard/--envcheck 时入工程
  *   而 protect.sh 的 nc_guard 拷贝是【无条件】的（只要有 so 需求就拷）。
  *   于是【只勾 dex2c】时：标记器把转译函数锁进 .ncguard，却没有任何人调
  *   ncguard_unlock() → 段永为密文 → 调第一个转译方法即执行密文 → SIGILL。

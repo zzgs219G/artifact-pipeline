@@ -8,7 +8,7 @@
 #   ③ 防常量折叠回归:密文表 volatile + lsg_decode noinline 在生成的头里在位
 #      (缺失 = 上一版实测的"前 8 字节明文 SIMD 泄漏"bug 复活)
 #
-# 用法: bash scripts/sigcheck/tests/test-lsgs-strings.sh
+# 用法: bash scripts/guard/tests/test-lsgs-strings.sh
 # 依赖: clang(或 gcc)、python3;sig_log_data.h 由本脚本临时生成(不进 git)
 set -euo pipefail
 
@@ -17,9 +17,9 @@ ROOT="$(cd "$HERE/../../.." && pwd)"
 # so 加密设施源码在 tools/nox.zip（上游 nox 仓库），本仓库不再保存副本。
 source "$ROOT/scripts/lib/common.sh"
 GUARD_SRC="$(ensure_nox_src)"   # 回归测试必须源码形态（要解析/编译 .c）
-GEN="$ROOT/scripts/sigcheck/log/make-sig-log.py"
-SRC_SIG="$ROOT/scripts/sigcheck/src/sig_check.c"
-SRC_ENV="$ROOT/scripts/sigcheck/src/env_check.c"
+GEN="$ROOT/scripts/guard/log/make-sig-log.py"
+SRC_SIG="$ROOT/scripts/guard/src/sig_check.c"
+SRC_ENV="$ROOT/scripts/guard/src/env_check.c"
 
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
@@ -226,7 +226,7 @@ else
 fi
 
 # ③ 旧的固定 key 字面量不得再出现（防止代码/注释里残留 5ac3119ef037b26d）
-if grep -rq "0x5A, 0xC3, 0x11, 0x9E" "$ROOT/scripts/sigcheck/log/make-sig-log.py" 2>/dev/null; then
+if grep -rq "0x5A, 0xC3, 0x11, 0x9E" "$ROOT/scripts/guard/log/make-sig-log.py" 2>/dev/null; then
     bad "③ 生成器里仍有旧的固定 key 字面量（5ac3119ef037b26d）"
 else
     ok "③ 旧固定 key 字面量已消失（不再硬编码 5ac3119ef037b26d）"

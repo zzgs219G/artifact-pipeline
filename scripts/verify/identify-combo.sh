@@ -77,7 +77,7 @@ if [[ "$IS_PACKER" -eq 0 ]]; then
     echo "→ **未加壳，也无模块产物**"
     echo "  可能是原始 APK，或 protect.sh 未成功执行（看 build.log）。"
   elif [[ "$STRDEC" -eq 1 ]]; then
-    echo "→ **全模块但不勾 packer**（sigcheck/dex2c/stringenc/envcheck，无壳）"
+    echo "→ **全模块但不勾 packer**（guard/dex2c/stringenc/envcheck，无壳）"
     echo "  ⚠️ 这不是壳包：无 .bitcode / 配置 / 载荷抽取，业务 dex 未抽取。"
     echo "  预期：没有 [kl] 日志（壳 so 不存在）；桩仍在业务 dex 里。"
     echo "  测试重点：桩能否正常解字符串（纯 Java，不依赖 so）。"

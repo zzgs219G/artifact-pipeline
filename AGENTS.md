@@ -42,7 +42,7 @@ AI 不得"顺手优化"、"重构"、"重命名"、"整理格式"。它们的正
 > ⚠️ **2026-11 更正**：so 段加密设施的 C 源码已整体迁到上游仓库
 > `zzgs219G/nox`（2026-10-30 独立化），本仓库**不再保存副本**。
 > 本表此前列的一批本仓库内路径（原来在 `scripts/so-guard/`、`scripts/lib/`
-> 与 `scripts/sigcheck/src/` 下的 nc_guard_* 与 so-section 脚本）
+> 与 `scripts/guard/src/` 下的 nc_guard_* 与 so-section 脚本）
 > 均已不存在。跨仓库边界见 §1.1，冻结契约随源码一起搬到 nox 的 `AGENTS.md`。
 >
 > 📖 **上游仓库 nox 的完整说明（结构 / CLI / 18 项自测 / 两种分发形态 /
@@ -52,16 +52,16 @@ AI 不得"顺手优化"、"重构"、"重命名"、"整理格式"。它们的正
 
 | 冻结模块 | 职责 | 钉死的回归测试 |
 |---|---|---|
-| `scripts/sigcheck/src/sig_check.c` | 签名校验 native 实现(maps 定位截断、Signing Block 解析、SHA-256) | `scripts/sigcheck/tests/test-sig-verify.sh`(完整校验链路,真实 APK) + `scripts/sigcheck/javalink/tests/test-javacheck.sh`(9 阶段/11 断言,host 编译+对拍) + `scripts/sigcheck/tests/test-lsgs-strings.sh`(密文零泄漏) |
-| `scripts/sigcheck/src/env_check.c` | 环境检测(10 探针/反调试抢占/so 自校验/心跳检查端) | `test-lsgs-strings.sh`(特征串密文化) + `test-mem-readable.sh`(跨映射判定) + `test-javacheck.sh`(心跳语义)。**2026-10-19**:`env_delayed_kill` 进加密段(段名已中性化,见 §1.2);`safe_syscall` 改内联 `svc`(arm64 `x8`/armv7 `r7`)、新增 `env_raw_die`——**`syscall()` 本身也是 PLT 表项**,验收必查 `nm -D -u \| grep -wE "abort\|syscall\|_exit\|raise"` 为空。**kill 函数标段、调用方(`env_fail`)不标段**(后者是 unlock 使用者,标了即死锁) |
-| `scripts/sigcheck/src/nc_link.c` | Java↔Native 判决核心 `nc_verify_t1` + 心跳记录侧 + `ncVerify`/`heartbeat` 两个 JNI 入口 | `test-javacheck.sh`(判决对拍/心跳语义)。**2026-10-19**:`nc_verify_t1` 进 `.ncx` 段,两张签名表进 `.ncxr`——**`ncVerify`/`heartbeat` 两个 JNI 入口绝不能标段**(它们是 unlock 调用方,标了即死锁);段标记必须条件化 `NC_GUARD_SECTIONED && !NCLINK_HOST_TEST`(否则宿主测试读到密文假红) |
-| `scripts/sigcheck/src/sig_guard2.c` | 签名校验**第二独立线**:独立派生(`sig_guard2.h`)/独立处置路径(`syscall(tgkill)` + watchdog),与 `sig_check.c` 零代码共享 | `scripts/sigcheck/tests/test-sig-guard2.sh`(`g2_derive()` 与 `make-sig-hash.sh` 的 python 生成侧逐字节对拍) |
-| `scripts/sigcheck/hash/extract-cert-fp.py` | 证书指纹提取(纯 stdlib 解析 APK Signing Block,v3 优先退 v2) | 无独立测试;由 `test-sig-verify.sh` + `test-so-lock.sh` 间接覆盖(**已知缺口,见本节末尾「冻结资产的能力边界」**) |
+| `scripts/guard/src/sig_check.c` | 签名校验 native 实现(maps 定位截断、Signing Block 解析、SHA-256) | `scripts/guard/tests/test-sig-verify.sh`(完整校验链路,真实 APK) + `scripts/guard/javalink/tests/test-javacheck.sh`(9 阶段/11 断言,host 编译+对拍) + `scripts/guard/tests/test-lsgs-strings.sh`(密文零泄漏) |
+| `scripts/guard/src/env_check.c` | 环境检测(10 探针/反调试抢占/so 自校验/心跳检查端) | `test-lsgs-strings.sh`(特征串密文化) + `test-mem-readable.sh`(跨映射判定) + `test-javacheck.sh`(心跳语义)。**2026-10-19**:`env_delayed_kill` 进加密段(段名已中性化,见 §1.2);`safe_syscall` 改内联 `svc`(arm64 `x8`/armv7 `r7`)、新增 `env_raw_die`——**`syscall()` 本身也是 PLT 表项**,验收必查 `nm -D -u \| grep -wE "abort\|syscall\|_exit\|raise"` 为空。**kill 函数标段、调用方(`env_fail`)不标段**(后者是 unlock 使用者,标了即死锁) |
+| `scripts/guard/src/nc_link.c` | Java↔Native 判决核心 `nc_verify_t1` + 心跳记录侧 + `ncVerify`/`heartbeat` 两个 JNI 入口 | `test-javacheck.sh`(判决对拍/心跳语义)。**2026-10-19**:`nc_verify_t1` 进 `.ncx` 段,两张签名表进 `.ncxr`——**`ncVerify`/`heartbeat` 两个 JNI 入口绝不能标段**(它们是 unlock 调用方,标了即死锁);段标记必须条件化 `NC_GUARD_SECTIONED && !NCLINK_HOST_TEST`(否则宿主测试读到密文假红) |
+| `scripts/guard/src/sig_guard2.c` | 签名校验**第二独立线**:独立派生(`sig_guard2.h`)/独立处置路径(`syscall(tgkill)` + watchdog),与 `sig_check.c` 零代码共享 | `scripts/guard/tests/test-sig-guard2.sh`(`g2_derive()` 与 `make-sig-hash.sh` 的 python 生成侧逐字节对拍) |
+| `scripts/guard/hash/extract-cert-fp.py` | 证书指纹提取(纯 stdlib 解析 APK Signing Block,v3 优先退 v2) | 无独立测试;由 `test-sig-verify.sh` + `test-so-lock.sh` 间接覆盖(**已知缺口,见本节末尾「冻结资产的能力边界」**) |
 | `scripts/inject/inject-loadlib.py` | loadLibrary 插桩(幂等、多 dex、AXMPrinter 解析二进制 Manifest) | `scripts/inject/tests/test_inject_loadlib.py`（**73 断言**，纯 stdlib；覆盖 SMALI_DIR_RE 多 dex/双重转义、寄存器策略、双保险互不连累、幂等、Manifest LAUNCHER 解析、CLI 参数） ✅CI。`SMALI_DIR_RE` 与 `inject-javacheck.py` / `encrypt-strings.py` 同源,改一处必须 grep 另外两处(报错七)——测试里已断言两份副本一致。**2026-11-05 实测更正：此前文档写 69，实跑 73** |
 | `scripts/repack/mark-native.py` | native 壳替换 + loadLibrary 插桩 | `scripts/repack/tests/test_mark_native.py`（42 断言，纯 stdlib；覆盖 full_name 解析与 `->` 误写纠正、方法名非贪婪解析(报错十)、保留 `.end method`(报错十三)、构造器不 native 化、幂等、多 dex、exit 3 语义） ✅CI |
 | `scripts/repack/dex-capacity.py` | dex 方法数容量检测 + 注入落点选择（读 header 的 method_ids_size，不反汇编） | `scripts/repack/tests/test_dex_capacity.py`（33 断言，纯 stdlib；覆盖 header 解析边界、目录名→dex 名映射(对齐 apktool 字节码)、n+1 命名(含不连续序号)、落点决策三分支、不捡现成空 dex、扫描路径 ×1.25 保守上浮、SMALI_DIR_RE 单一真相） ✅CI。**报错五十九**：注入类曾固定写 `smali/`，大型包 classes.dex 贴顶(65519/65536)导致回编 `Unsigned short value out of range: 65536`，且报错类名随机无诊断价值 |
 | `tools/apktool.jar` | 解包/重打包工具(apktool 3.0.3,git 跟踪独立文件) | 严禁替换版本(历史: 报错四/五)。升级必须回归「解包后 manifest 头 4 字节仍是 `03 00 08 00`」 |
-| `scripts/sigcheck/archive/nc_guard_unlock.c` | `.ncx` 段运行期自解密的**旧实现**(历史存档) | **不进 NDK 工程、不参与任何构建**。契约逐条过期(slot 80 字节/旧 XOR_KEY/`slot^XOR_KEY` 取钥),刻意保留旧段名——读到 `.ncguard` 说明那是旧版,不要照着改。现行实现见 §1.1 |
+| `scripts/guard/archive/nc_guard_unlock.c` | `.ncx` 段运行期自解密的**旧实现**(历史存档) | **不进 NDK 工程、不参与任何构建**。契约逐条过期(slot 80 字节/旧 XOR_KEY/`slot^XOR_KEY` 取钥),刻意保留旧段名——读到 `.ncguard` 说明那是旧版,不要照着改。现行实现见 §1.1 |
 
 ### 1.1 so 段加密设施的上游边界(2026-10-30 独立化后)
 
@@ -104,7 +104,7 @@ tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
 改名的理由:旧名自解释(`ncguard`/`nckey` 一眼看出机制),`readelf -S`
 即可列举出全部加固结构。现行名无语义,仅缩短。
 
-⚠️ 例外:`scripts/sigcheck/archive/nc_guard_unlock.c` 是历史存档(2026-10-20
+⚠️ 例外:`scripts/guard/archive/nc_guard_unlock.c` 是历史存档(2026-10-20
 已移出 src/),**刻意保留旧段名**——读到 `.ncguard` 说明那是旧版实现,不要照着改。
 现行实现在上游 nox 仓库的 `nc_guard_boot.c`(用 `.ncxh`/`.ncxhr`),见 §1.1。
 
@@ -140,7 +140,7 @@ tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
 
 - 上述两个 C 文件里的**所有功能语义字符串**(中文文案/检测特征串/外围串)
   一律走 `/*LSG:NAME|...*/` 或 `/*LSGS:NAME|...*/` 标记 → 构建期
-  `scripts/sigcheck/log/make-sig-log.py` 扫描加密 → so 里只有密文。
+  `scripts/guard/log/make-sig-log.py` 扫描加密 → so 里只有密文。
 - **新增/修改标记必须重新生成** `sig_log_data.h`(protect.sh 自动做);
   直接写明文字符串 = 改坏了(strings 零泄漏断言会红)。
 - 注释里**禁止书写 LSGS 标记的字面形态**(嵌套注释提前终结,编译炸,

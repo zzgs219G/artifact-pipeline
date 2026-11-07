@@ -158,7 +158,7 @@ EOF
   #
   # ── 必须带 --undefined-version ─────────────────────────────────
   #   version script 声明了 JNI_OnLoad，但并非每个组合都定义它
-  #   （纯 sigcheck/envcheck 组合没有 dex2c 的 Dex2C.cpp；测试工程也没有）。
+  #   （纯 guard/envcheck 组合没有 dex2c 的 Dex2C.cpp；测试工程也没有）。
   #   lld 对这种「声明了却不存在」的符号是【硬错误】而不是忽略：
   #       ld.lld: error: version script assignment of 'global' to symbol
   #               'JNI_OnLoad' failed: symbol not defined

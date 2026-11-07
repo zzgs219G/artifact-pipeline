@@ -262,7 +262,7 @@ Sh : make-sig-hash.sh（本仓库；sed 抽 NC_SEC_CONST，抽不到即 exit 1�
 
 ### 7.1 只改本仓库 → 不用碰 nox
 
-绝大多数改动属于这类（`protect.sh`、`string-enc/`、`sigcheck/src/*.c`、
+绝大多数改动属于这类（`protect.sh`、`string-enc/`、`guard/src/*.c`、
 workflow）。**设施的 `.c`/`.py` 与本仓库无关。**
 
 ### 7.2 真要改设施 → 去 nox 仓库改，然后换 zip

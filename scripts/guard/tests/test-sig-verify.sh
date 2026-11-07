@@ -45,12 +45,12 @@ echo "  APK: $TEST_APK"
 
 command -v clang >/dev/null || { skip "无 clang"; exit 0; }
 
-SRC="$ROOT/scripts/sigcheck/src"
+SRC="$ROOT/scripts/guard/src"
 cp "$SRC/sig_check.c" "$SRC/env_check.c" "$GUARD_SRC/nc_guard_layout.h" "$WORK/"
 # sig_hash.h 由生成器产出（两张表含真值），本测试同时充当"生成器→C 侧"对拍
-bash "$ROOT/scripts/sigcheck/hash/make-sig-hash.sh" "$TEST_APK" "$WORK/sig_hash.h" \
+bash "$ROOT/scripts/guard/hash/make-sig-hash.sh" "$TEST_APK" "$WORK/sig_hash.h" \
     >"$WORK/sighash.log" 2>&1 || { bad "sig_hash.h 生成失败"; tail -3 "$WORK/sighash.log" >&2; exit 1; }
-python3 "$ROOT/scripts/sigcheck/log/make-sig-log.py" \
+python3 "$ROOT/scripts/guard/log/make-sig-log.py" \
     "$SRC/sig_check.c" "$SRC/env_check.c" "$WORK/sig_log_data.h" >/dev/null 2>&1 \
     || { bad "sig_log_data.h 生成失败"; exit 1; }
 

@@ -11,12 +11,12 @@
 #   ② 全零槽位 = 调试模式(不误伤)
 #   ③ 错误指纹必然 mismatch
 #
-# 用法: bash scripts/sigcheck/tests/test-sig-guard2.sh
+# 用法: bash scripts/guard/tests/test-sig-guard2.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
-SRC="$ROOT/scripts/sigcheck/src/sig_guard2.c"
+SRC="$ROOT/scripts/guard/src/sig_guard2.c"
 
 # sig_guard2.c 在 2026-10-30 独立化后 include 了 nc_guard_layout.h（so 加密契约
 # 唯一真相源，位于上游 nox 仓库）。宿主编译必须能找到它，否则本测试恒红。

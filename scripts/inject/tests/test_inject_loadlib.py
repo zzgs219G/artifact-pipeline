@@ -86,7 +86,7 @@ if m:
 print("①b SMALI_DIR_RE 三处副本一致性（报错七教训）")
 copies = {
     "inject-loadlib.py": os.path.join(ROOT, "scripts/inject/inject-loadlib.py"),
-    "inject-javacheck.py": os.path.join(ROOT, "scripts/sigcheck/javalink/inject-javacheck.py"),
+    "inject-javacheck.py": os.path.join(ROOT, "scripts/guard/javalink/inject-javacheck.py"),
 }
 for name, path in copies.items():
     if not os.path.isfile(path):
