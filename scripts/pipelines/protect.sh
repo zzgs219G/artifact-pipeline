@@ -989,12 +989,27 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   # （dcc 原版只在自带重打包路径里做壳替换且不插 loadLibrary，纯成品 APK 后处理必须自动补齐）
   python3 "$ROOT/scripts/repack/mark-native.py" \
     "$WORK/project/jni/nc/compiled_methods.txt" "$WORK/decompiled"
-elif [[ $WANT_SIGCHECK -eq 1 ]]; then
-  # 单独签名校验：loadLibrary("nc") 双保险插桩:<clinit> + onCreate 各一份
-  # —— 没有 dex2c 的 native 壳保护,攻击者删掉 <clinit> 即可绕过校验;
-  #    onCreate 里再插一份,要删两处才失效（联合方案不插：onCreate 已抽进 so,
-  #    删 <clinit> 的 loadLibrary 会让 native 壳直接自爆）。幂等:按方法体分别检查。
+elif [[ $WANT_SIGCHECK -eq 1 || $WANT_ENVCHECK -eq 1 ]]; then
+  # 只有 so、没有 dex2c 转译时，必须显式插 loadLibrary("nc") —— 否则
+  # so 编出来了但没有任何 Java 代码去 dlopen 它，等于装了个摆设。
+  #
+  # 双保险插桩:<clinit> + onCreate 各一份。onCreate 里再插一份,
+  # 要删两处才失效（联合方案不插：onCreate 已抽进 so,
+  # 删 <clinit> 的 loadLibrary 会让 native 壳直接自爆）。幂等:按方法体分别检查。
   # manifest 是二进制 AXML → inject-loadlib 内部走 androguard AXMLPrinter 解析
+  #
+  # ⚠️⚠️ 2026-11-08 修真实缺口（实测发现）：原条件只有 `WANT_SIGCHECK -eq 1`，
+  #    于是【只勾 --envcheck】时两个分支都不进 ——
+  #      · so 编出来了（libnc.so 365KB 在包里，系统 logcat 也能看到
+  #        nativeLibs1/1:: [..., libnc.so]）
+  #      · 但没有任何 Java 代码调 System.loadLibrary("nc")
+  #      · → constructor(50) 从不执行 → 13 个探针一行没跑
+  #      · → 且完全静默：无崩溃、无日志、包看起来"正常"
+  #    真机实测：装包后 logcat 过滤 " nc  *:" 为空，`pm path` 的 dex 里
+  #    grep loadLibrary 命中的是 xCrash 自带的那条，不是我们插的。
+  #    这是「功能整体失效但构建全绿」——AGENTS.md §3.3 那类最危险的失败。
+  #    修法：条件加 `|| $WANT_ENVCHECK -eq 1`。两模块同勾时只跑一次
+  #    （脚本本身幂等，但没必要执行两遍）。
   python3 "$ROOT/scripts/inject/inject-loadlib.py" "$WORK/decompiled" \
     --launcher --entrypoints --so-name nc
 fi

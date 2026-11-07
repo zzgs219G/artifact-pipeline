@@ -1530,7 +1530,7 @@ static void env_check_run(void) {
         envlog_c(1, LSG_ENV_FAIL, NULL);
         env_fail();
     } else {
-        /*LSG:ENV_CLEAN|【通过】六项探测全部干净,环境检测通过*/
+        /*LSG:ENV_CLEAN|【通过】全部探测干净,环境检测通过*/
         envlog_c(0, LSG_ENV_CLEAN, NULL);
     }
 }
