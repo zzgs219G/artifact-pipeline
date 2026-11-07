@@ -80,7 +80,7 @@ repack_build() {
 
 # repack_force_debuggable_off <解包目录> — 强制 debuggable=false
 #
-# 为什么必须做（见 docs/so层防御/外部实测报告结论汇总.md §三 3.2）：
+# 为什么必须做（见 docs/so层防御/历史结论索引.md §3.1）：
 #   实测测试 APK 的 Manifest 写着 debuggable=true。带这个标记的 release 包：
 #     · `run-as <pkg>` 可进应用私有目录，读写文件、dump 内存
 #     · 调试器可直接 attach —— 我们那套 ptrace(TRACEME) / PR_SET_DUMPABLE
