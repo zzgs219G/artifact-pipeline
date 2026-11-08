@@ -24,8 +24,6 @@ struct { lsg_id_t id; const char *expect; } cases[] = {
     { LSGS_XP_PATH_XBRIDGE, "/system/framework/XposedBridge.jar" },
     { LSGS_TRACERPID, "TracerPid:" },
     { LSGS_THR_GUMJS, "gum-js-loop" },
-    { LSGS_THR_GMAIN, "gmain" },
-    { LSGS_THR_GDBUS, "gdbus" },
     { LSGS_THR_POOL, "pool-frida" },
     { LSGS_THR_FRIDA, "frida" },
     { LSGS_UNX_FRIDA, "frida" },

@@ -96,11 +96,13 @@ fi
 #      用 grep 扫明文，不需要运行，用 NDK 编更贴近生产（且能拿到 android/log.h）。
 HOST_CC="$(command -v clang || command -v gcc)"
 
-# ── ④ 解码正确性(lsgs_decode_test.c,26 条 LSGS 与明文期望逐字节比对) ──
+# ── ④ 解码正确性(lsgs_decode_test.c，逐条 LSGS 与明文期望对拍) ──
+# ⚠️ 不写死条数：条目数随探针增删变化（2026-11-08 移除 gmain/gdbus 时
+#    从 26 降到 24，硬编码让这条断言永久红）。判据是"全部通过"这个措辞。
 if $HOST_CC -O2 -DSIGCHECK_HOST_TEST -I"$T" "$HERE/lsgs_decode_test.c" -o "$T/deco" 2>"$T/d.log"; then
     DR="$("$T/deco" 2>&1 || true)"
-    if [[ "$DR" == *"全部 26 条 LSGS 解码逐字节正确"* ]]; then
-        ok "解码对拍:26 条 LSGS 全部逐字节正确"
+    if [[ "$DR" == *"LSGS 解码逐字节正确"* ]]; then
+        ok "解码对拍:全部 LSGS 逐字节正确（$DR）"
     else
         bad "解码不一致: $DR"
     fi

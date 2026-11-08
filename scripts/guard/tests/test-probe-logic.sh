@@ -427,22 +427,25 @@ int main(void) {
         const char *t3[] = { "1234", "1235" };
         fake_clear(); fake_dir_clear();
         fake_dir_set("/proc/self/task", t3, 2);
-        /* 特征表是 strcmp 精确比对（不是子串），表里 5 个词：
-         * gum-js-loop / gmain / gdbus / pool-frida / frida
-         * 所以用 pool-frida + frida 两个【表内】词验证"≥2 即判"。 */
+        /* 特征表是 strcmp 精确比对（不是子串）。2026-11-08 后表里 3 个词：
+         * gum-js-loop / pool-frida / frida
+         * 用 pool-frida + frida 两个表内词验证"≥2 即判"。 */
         fake_set("/proc/self/task/1234/comm", "pool-frida\n");
         fake_set("/proc/self/task/1235/comm", "frida\n");
         expect("thread: 2 个表内特征线程 → 应命中", frida_thread_probe(), 1);
 
-        /* gmain / gdbus 是 GLib 标准线程名 —— 正常库会同时起这两个。
-         * 当前实现把它们也算特征 → hits=2 → 命中（误报风险）。
-         * 此断言【记录现状】，若将来移除这两个词，应改成 want=0。 */
+        /* gmain / gdbus 是 GLib 标准线程名 —— 任何用 GLib 的合法库在
+         * 干净设备上都会同时起这两个。2026-11-08 已从特征表移除。
+         * 本断言钉死"不再误报"：若将来有人把这两个词加回去，这行会转红。
+         * 参考：sentry DETECTION_SPEC.md:88、XopProtector risk.cpp:520
+         * 都明确移除过这两个词，理由一致。 */
         const char *t4[] = { "1234", "1235" };
         fake_clear(); fake_dir_clear();
         fake_dir_set("/proc/self/task", t4, 2);
         fake_set("/proc/self/task/1234/comm", "gmain\n");
         fake_set("/proc/self/task/1235/comm", "gdbus\n");
-        expect("thread: gmain+gdbus（GLib 标准名）→ 当前实现判命中", frida_thread_probe(), 1);
+        expect("thread: gmain+gdbus（GLib 标准名）→ 应 clean（已移除，防误报）",
+               frida_thread_probe(), 0);
 
         const char *t5[] = { "1234", "1235" };
         fake_clear(); fake_dir_clear();

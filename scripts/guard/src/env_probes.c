@@ -251,8 +251,6 @@ int xposed_file_probe(void) {
 /* ────────────────── c/e/f. 调试器与 Frida 特征标记 ────────────────── */
 /*LSGS:TRACERPID|TracerPid:*/
 /*LSGS:THR_GUMJS|gum-js-loop*/
-/*LSGS:THR_GMAIN|gmain*/
-/*LSGS:THR_GDBUS|gdbus*/
 /*LSGS:THR_POOL|pool-frida*/
 /*LSGS:THR_FRIDA|frida*/
 /*LSGS:UNX_FRIDA|frida*/
@@ -925,8 +923,8 @@ int self_text_crc_probe(void) {
  * retain 同探针文件——防 lib-ndk.sh 的 --gc-sections 回收。 */
 __attribute__((section(NC_SEC_CODE), retain))
 int frida_thread_probe(void) {
-    char n1[16], n2[8], n3[8], n4[16], n5[8];
-    const char *names[5];
+    char n1[16], n2[16], n3[8];
+    const char *names[3];
     size_t i;
     char _pb[24];
     const char *_p = lsg_s(LSGS_PATH_TASK, _pb, sizeof(_pb));
@@ -934,12 +932,10 @@ int frida_thread_probe(void) {
     struct dirent *de;
     int hits = 0, gum = 0;
     names[0] = lsg_s(LSGS_THR_GUMJS,  n1, sizeof(n1));   /* gum-js-loop */
-    names[1] = lsg_s(LSGS_THR_GMAIN,  n2, sizeof(n2));
-    names[2] = lsg_s(LSGS_THR_GDBUS,  n3, sizeof(n3));
-    names[3] = lsg_s(LSGS_THR_POOL,   n4, sizeof(n4));   /* pool-frida */
-    names[4] = lsg_s(LSGS_THR_FRIDA,  n5, sizeof(n5));
+    names[1] = lsg_s(LSGS_THR_POOL,   n2, sizeof(n2));   /* pool-frida */
+    names[2] = lsg_s(LSGS_THR_FRIDA,  n3, sizeof(n3));   /* frida */
     /* 任一解码失败 → 检测不完整,按"未检出"处理(宁漏勿误伤) */
-    if (!names[0] || !names[1] || !names[2] || !names[3] || !names[4]) { if (d) closedir(d); return 0; }
+    if (!names[0] || !names[1] || !names[2]) { if (d) closedir(d); return 0; }
     if (!d) return 0;
     while ((de = readdir(d)) != NULL) {
         char p[160];
@@ -954,7 +950,7 @@ int frida_thread_probe(void) {
         free(fb);
         L = strcspn(nm, "\n");
         nm[L] = '\0';
-        for (i = 0; i < 5; i++) {
+        for (i = 0; i < 3; i++) {
             if (strcmp(nm, names[i]) == 0) {
                 hits++;
                 if (i == 0) gum = 1;   /* 第 0 位恒为 gum-js-loop(见上方解码顺序) */
@@ -963,7 +959,21 @@ int frida_thread_probe(void) {
         }
     }
     closedir(d);
-    /* gum-js-loop 为 Frida 最特征线程名,单命中即判;其余要求 ≥2 个,压低误报 */
+    /* gum-js-loop 为 Frida 最特征线程名,单命中即判;
+     * 其余(pool-frida / frida)要求 ≥2 个,压低误报。
+     *
+     * ⚠️ 2026-11-08 移除 gmain / gdbus（原 names[1] / names[2]）：
+     *    这两个是 GLib 标准线程名，任何用 GLib 的合法库在干净设备上
+     *    都会同时起这两个 → hits=2 → 判定命中 → 杀正常用户。
+     *    两份独立参考实现的结论一致：
+     *      · sentry DETECTION_SPEC.md:88「历史版本曾包含 gmain/gdbus/...
+     *        但这些是 GLib 标准线程名，正常使用 GLib 的合法库会触发
+     *        误报——已在本版本移除」
+     *      · XopProtector risk.cpp:520「Do NOT match generic GLib names
+     *        (gmain/gdbus) — common on MIUI/OEM processes and cause false
+     *        positives. Keep Frida-specific markers only.」
+     *    移除后仍保留 3 个 Frida 专属词，其中 gum-js-loop 单命中即判，
+     *    检出能力不受影响（Frida 注入必然起 gum-js-loop）。 */
     return (gum || hits >= 2) ? 1 : 0;
 }
 
