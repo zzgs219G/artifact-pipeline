@@ -1147,6 +1147,11 @@ if [[ $WANT_SIGCHECK -eq 1 || $WANT_TRANSPILE -eq 1 || $WANT_ENVCHECK -eq 1 ]]; 
   # 强制解压 so 加载（本方案唯一允许的 Manifest 修改）——只在有 so 的组合执行;
   # 纯 dex 组合(仅 stringenc)没有 libnc.so,manifest 无需改写(报错二十三)
   repack_force_extractnativelibs "$WORK/decompiled"
+  # 2026-11-08：清掉 apktool.yml 里继承来的 `doNotCompress: - so`。
+  # 上面刚强制了 extractNativeLibs=true（安装时必解压），故 APK 内应当压缩 so。
+  # 不清理的话，输入 APK 的 so 若是 STORED，我们新加的 libnc.so 也会被
+  # STORED —— 实测白多占约 1MB（双 ABI）。
+  repack_force_compress_so "$WORK/decompiled"
 fi
 
 # ── 强制 debuggable=false（所有组合都做，2026-10-22）────────────────

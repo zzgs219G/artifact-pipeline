@@ -69,6 +69,76 @@ repack_force_extractnativelibs() {
   python3 "$ROOT/scripts/repack/patch-extractnativelibs.py" "$decompiled/AndroidManifest.xml"
 }
 
+# repack_force_compress_so <解包目录> — 从 apktool.yml 的 doNotCompress 里删掉 "so"
+#
+# ── 为什么必须做（2026-11-08）─────────────────────────────────────
+#   apktool 解包时会把【输入 APK 的实际情况】记进 apktool.yml：
+#   若输入的 so 是 STORED（不压缩），就写一条 `- so`；回编时按这条
+#   把所有 .so 一律 STORED —— 包括我们新加的 libnc.so。
+#
+#   实测（demo_1.0.apk）：输入 so 10096 → 10096 STORED
+#     → apktool.yml 出现 `doNotCompress: [..., so, ...]`
+#     → 回编后 libnc.so 608936 → 608936 STORED（APK 白胖 1MB/双 ABI）
+#
+# ── 为什么删掉是 100% 安全的 ────────────────────────────────────
+#   压缩 so 与"能否加载"的唯一冲突点是：
+#     extractNativeLibs=false 时，系统直接把 APK 内的 lib 目录 mmap 成
+#     可执行映射，此时 so 必须 STORED 且 4KB 页对齐。若压缩 → 装不上。
+#
+#   而本流水线【无条件强制 extractNativeLibs=true】
+#   （见 repack_force_extractnativelibs，protect.sh 里与安装 so 同一步执行），
+#   true 的语义就是"安装时把 so 解压到 /data/app/<pkg>/lib/"。
+#   既然安装时必然解压，APK 内就应当压缩 —— 否则白白多占下载体积。
+#
+#   两个事实叠加 = 删掉 `- so` 只有收益，没有风险。
+#
+# ⚠️ 只删 "so" 这一条。`dex` / `arsc` 不动：
+#     dex 在 extractNativeLibs 无关的路径上，ART 对未压缩 dex 有自己的
+#     加载假设（部分 ROM 要求 classes.dex 可 mmap），不动为上。
+#
+# ⚠️ 幂等：yml 里没有 `- so` 时原样返回（输入本来就是压缩 so 的包）。
+repack_force_compress_so() {
+  local decompiled="$1"
+  local yml="$decompiled/apktool.yml"
+  [[ -f "$yml" ]] || return 0
+  python3 - "$yml" <<'PY'
+import sys, re, io
+
+path = sys.argv[1]
+with io.open(path, 'r', encoding='utf-8') as f:
+    lines = f.read().split('\n')
+
+out = []
+in_section = False
+removed = 0
+for ln in lines:
+    if re.match(r'^doNotCompress\s*:', ln):
+        in_section = True
+        out.append(ln)
+        continue
+    if in_section:
+        # 列表项形如 "- so"；遇到非列表行则离开该段
+        m = re.match(r'^\s*-\s*(.+?)\s*$', ln)
+        if m is None:
+            in_section = False
+            out.append(ln)
+            continue
+        if m.group(1) == 'so':
+            removed += 1
+            continue          # 丢掉这一行
+        out.append(ln)
+        continue
+    out.append(ln)
+
+if removed:
+    with io.open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(out))
+    print('  [repack] doNotCompress: 已移除 "so"（%d 处）→ so 将被压缩' % removed)
+else:
+    print('  [repack] doNotCompress: 无 "so" 条目，保持不变')
+PY
+}
+
 # repack_build <解包目录> <输出未对齐.apk>
 repack_build() {
   local decompiled="$1" out="$2"
