@@ -69,40 +69,48 @@ repack_force_extractnativelibs() {
   python3 "$ROOT/scripts/repack/patch-extractnativelibs.py" "$decompiled/AndroidManifest.xml"
 }
 
-# repack_force_compress_so <解包目录> — 从 apktool.yml 的 doNotCompress 里删掉 "so"
+# repack_force_compress_payload <解包目录> — 从 apktool.yml 的 doNotCompress 删掉 so / dex
 #
 # ── 为什么必须做（2026-11-08）─────────────────────────────────────
 #   apktool 解包时会把【输入 APK 的实际情况】记进 apktool.yml：
-#   若输入的 so 是 STORED（不压缩），就写一条 `- so`；回编时按这条
-#   把所有 .so 一律 STORED —— 包括我们新加的 libnc.so。
+#   若输入的 so/dex 是 STORED（不压缩），就写 `- so` / `- dex`；
+#   回编时按这两条把所有 .so/.dex 一律 STORED —— 包括我们新加的 libnc.so。
 #
-#   实测（demo_1.0.apk）：输入 so 10096 → 10096 STORED
-#     → apktool.yml 出现 `doNotCompress: [..., so, ...]`
-#     → 回编后 libnc.so 608936 → 608936 STORED（APK 白胖 1MB/双 ABI）
+#   实测两个真实输入，差异只来自这条规则：
+#     简盒.apk（正式包）  doNotCompress 无 so/dex → 回编产物 dex+so 全压缩
+#     demo_1.0.apk（测试包）doNotCompress 有 so/dex → 回编产物全 STORED
+#   demo 那条路实测白占：libnc.so 608936 → 608936（双 ABI 约 1.2 MB），
+#   classes.dex 1423839 → 1423839（约 700 KB）。
 #
-# ── 为什么删掉是 100% 安全的 ────────────────────────────────────
-#   压缩 so 与"能否加载"的唯一冲突点是：
-#     extractNativeLibs=false 时，系统直接把 APK 内的 lib 目录 mmap 成
-#     可执行映射，此时 so 必须 STORED 且 4KB 页对齐。若压缩 → 装不上。
-#
+# ── 为什么压缩 so 安全 ──────────────────────────────────────────
+#   压缩 so 与"能否加载"的唯一冲突点：
+#     extractNativeLibs=false 时，系统直接把 APK 内 lib 目录 mmap，
+#     此时 so 必须 STORED + 4KB 页对齐；压缩则装不上。
 #   而本流水线【无条件强制 extractNativeLibs=true】
-#   （见 repack_force_extractnativelibs，protect.sh 里与安装 so 同一步执行），
-#   true 的语义就是"安装时把 so 解压到 /data/app/<pkg>/lib/"。
-#   既然安装时必然解压，APK 内就应当压缩 —— 否则白白多占下载体积。
+#   （repack_force_extractnativelibs，与 repack_install_so 同一步执行），
+#   true = 安装时解压到 /data/app/<pkg>/lib/。既然必解压，APK 内就该压缩。
 #
-#   两个事实叠加 = 删掉 `- so` 只有收益，没有风险。
+# ── 为什么压缩 dex 也安全 ───────────────────────────────────────
+#   AOT（dex2oat）发生在【安装时、解压之后】，产物落在
+#   /data/app/<pkg>/oat/<abi>/*.odex|*.vdex，与 APK 内 dex 是否压缩无关。
+#   压缩只影响"读 APK 时是否要先解压"这一层，不影响 AOT 质量或结果。
+#   生态佐证：正式发布的 APK（简盒.apk）本身就是 dex+so 全压缩，
+#   市面上绝大多数 APK 也是如此 —— 这是常态，不是特例。
 #
-# ⚠️ 只删 "so" 这一条。`dex` / `arsc` 不动：
-#     dex 在 extractNativeLibs 无关的路径上，ART 对未压缩 dex 有自己的
-#     加载假设（部分 ROM 要求 classes.dex 可 mmap），不动为上。
+# ⚠️ `arsc` / `png` / `webp` / `assets/*.prof` 一律不动：
+#     resources.arsc 的不压缩是 AAPT 的硬约束（资源偏移需页对齐）；
+#     png/webp 本身已压缩，再压无用且可能影响资源加载。
 #
-# ⚠️ 幂等：yml 里没有 `- so` 时原样返回（输入本来就是压缩 so 的包）。
-repack_force_compress_so() {
+# ⚠️ 幂等：yml 里没有 so/dex 条目时原样返回（输入本来就是压缩的包）。
+repack_force_compress_payload() {
   local decompiled="$1"
   local yml="$decompiled/apktool.yml"
   [[ -f "$yml" ]] || return 0
   python3 - "$yml" <<'PY'
 import sys, re, io
+
+# 要强制压缩的条目。语义见函数头注释。
+TARGETS = ('so', 'dex')
 
 path = sys.argv[1]
 with io.open(path, 'r', encoding='utf-8') as f:
@@ -110,21 +118,22 @@ with io.open(path, 'r', encoding='utf-8') as f:
 
 out = []
 in_section = False
-removed = 0
+removed = {}
 for ln in lines:
     if re.match(r'^doNotCompress\s*:', ln):
         in_section = True
         out.append(ln)
         continue
     if in_section:
-        # 列表项形如 "- so"；遇到非列表行则离开该段
+        # 列表项形如 "- so" / "- dex"；遇到非列表行则离开该段
         m = re.match(r'^\s*-\s*(.+?)\s*$', ln)
         if m is None:
             in_section = False
             out.append(ln)
             continue
-        if m.group(1) == 'so':
-            removed += 1
+        name = m.group(1)
+        if name in TARGETS:
+            removed[name] = removed.get(name, 0) + 1
             continue          # 丢掉这一行
         out.append(ln)
         continue
@@ -133,9 +142,10 @@ for ln in lines:
 if removed:
     with io.open(path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(out))
-    print('  [repack] doNotCompress: 已移除 "so"（%d 处）→ so 将被压缩' % removed)
+    detail = ', '.join('%s x%d' % (k, v) for k, v in sorted(removed.items()))
+    print('  [repack] doNotCompress: 已移除 %s → 这些条目将被压缩' % detail)
 else:
-    print('  [repack] doNotCompress: 无 "so" 条目，保持不变')
+    print('  [repack] doNotCompress: 无 so/dex 条目，保持不变（输入本来就是压缩的）')
 PY
 }
 
