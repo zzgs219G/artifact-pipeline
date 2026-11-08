@@ -26,7 +26,7 @@
 #    本文件用桩函数替换 I/O 层，被测代码就是 env_probes.c 原文。
 #
 # ── 覆盖范围 ────────────────────────────────────────────────────────
-#   已覆盖（14 个探针里的 7 个）：
+#   已覆盖（14 个探针里的 8 个）：
 #     frida_maps_probe         safe_read_alloc / safe_lines_*
 #     frida_unix_probe         safe_read_alloc / safe_lines_*
 #     frida_thread_probe       opendir / readdir（目录桩）
@@ -274,6 +274,7 @@ int tracer_all_threads_probe(void);
 int stat_state_probe(void);
 int frida_thread_probe(void);
 int xposed_file_probe(void);
+int tracer_all_threads_probe(void);
 void fake_set(const char *path, const char *content);
 void fake_clear(void);
 void fake_dir_set(const char *path, const char *const *names, int n);
@@ -473,6 +474,51 @@ int main(void) {
 
     fake_exist_clear();
     expect("xposed: 一个路径都不存在 → 应 clean", xposed_file_probe(), 0);
+
+    /* tracer_all_threads_probe: walks /proc/self/task/<tid>/status
+     * Logic: any non-main thread with TracerPid != 0 and != self/ppid -> hit.
+     * tid=1 (main thread) is skipped - covered by tracer_probe. */
+    {
+        /* case 1: non-main thread traced */
+        const char *a[] = { "1", "1234" };
+        fake_clear(); fake_dir_clear();
+        fake_dir_set("/proc/self/task", a, 2);
+        fake_set("/proc/self/task/1/status", "TracerPid:\t0\n");
+        fake_set("/proc/self/task/1234/status", "TracerPid:\t9999\n");
+        expect("all-thread: 非主线程 TracerPid=9999 → 应命中",
+               tracer_all_threads_probe(), 1);
+
+        /* case 2: all zero -> clean */
+        const char *b[] = { "1", "1234" };
+        fake_clear(); fake_dir_clear();
+        fake_dir_set("/proc/self/task", b, 2);
+        fake_set("/proc/self/task/1/status", "TracerPid:\t0\n");
+        fake_set("/proc/self/task/1234/status", "TracerPid:\t0\n");
+        expect("all-thread: 全部 TracerPid=0 → 应 clean",
+               tracer_all_threads_probe(), 0);
+
+        /* case 3: main thread traced but tid=1 skipped -> clean */
+        const char *c[] = { "1" };
+        fake_clear(); fake_dir_clear();
+        fake_dir_set("/proc/self/task", c, 1);
+        fake_set("/proc/self/task/1/status", "TracerPid:\t9999\n");
+        expect("all-thread: 主线程 tid=1 被跳过 → 应 clean（由 tracer_probe 覆盖）",
+               tracer_all_threads_probe(), 0);
+
+        /* case 4: cannot open dir */
+        fake_clear(); fake_dir_clear();
+        expect("all-thread: 打不开目录 → 应 clean",
+               tracer_all_threads_probe(), 0);
+
+        /* case 5: one thread status unreadable -> skip, no false positive */
+        const char *e[] = { "1234", "5678" };
+        fake_clear(); fake_dir_clear();
+        fake_dir_set("/proc/self/task", e, 2);
+        /* only 5678 provided, 1234 missing */
+        fake_set("/proc/self/task/5678/status", "TracerPid:\t0\n");
+        expect("all-thread: 部分线程读不到 → 应 clean（不误判）",
+               tracer_all_threads_probe(), 0);
+    }
 
     printf("\n==============================================================\n");
     printf("结果: %d 通过, %d 失败\n", pass, fail);
