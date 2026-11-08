@@ -808,12 +808,39 @@ jobs:
       # 还是"未签名，无法安装"。
       # apksigner / zipalign 在 Android SDK build-tools 里，ubuntu runner 默认
       # 不装。用 setup-android 装一份并写进 PATH。
-      # ⚠️ 只在 sign=true 时跑，不给默认路径增加下载开销。
-      - name: 安装 Android build-tools（签名工具）
-        if: inputs.sign
+      #
+      # ⚠️⚠️ 2026-11-08 由 `if: inputs.sign` 改为【无条件安装】。
+      #    真事故（CI run 42435473015）：只勾 --packer 不勾 sign 时，
+      #    build-tools 没装 → 没有 zipalign →
+      #      protect.sh 的 finish_apk 跳过对齐（只 warn）→
+      #      dpt 拿到未对齐包 → dpt 内部 zipalign 失败 →
+      #      创建 0 字节 *_unsign.apk 但 java 返回 0 →
+      #      上传 0 字节包，CI 仍 SUCCESS。
+      #    zipalign 不只签名要，【加壳也要】—— dpt 的输入必须是已对齐的包。
+      #    故无条件安装（体积约 50MB，setup-android 有缓存）。
+      - name: 安装 Android build-tools（签名 + 加壳都需要 zipalign）
         uses: android-actions/setup-android@v3
         with:
           packages: 'build-tools;34.0.0'
+
+      - name: 把 build-tools 加进 PATH（zipalign / apksigner）
+        run: |
+          set -o pipefail
+          # setup-android 把工具装在 $ANDROID_HOME/build-tools/<ver>/ 下，
+          # 但默认不在 PATH 里。后续步骤（protect.sh 的 finish_apk、
+          # 加壳、签名）都要直接 `command -v zipalign` 能找到。
+          BT=""
+          for cand in "$ANDROID_HOME"/build-tools/*/; do
+            if [[ -x "${cand}zipalign" ]]; then BT="$cand"; break; fi
+          done
+          if [[ -z "$BT" ]]; then
+            echo "❌ build-tools 里找不到 zipalign —— 加壳与签名都会失效" | tee -a build.log
+            ls "$ANDROID_HOME"/build-tools/ 2>/dev/null | tee -a build.log || true
+            exit 1
+          fi
+          echo "$BT" >> "$GITHUB_PATH"
+          echo "build-tools: $BT" | tee -a build.log
+          "$BT/zipalign" 2>&1 | head -1 | tee -a build.log || true
 
       - name: 签名产物（可选）
         if: inputs.sign
@@ -885,6 +912,26 @@ jobs:
         id: upload-r2
         run: |
           set -o pipefail
+          # ⚠️⚠️ 2026-11-08 真事故：CI run 42435473015 把 0 字节 APK 传上了 R2，
+          #    页面上显示"构建成功"。三重防线同时失效（dpt 不非零退出 /
+          #    require_file 不查大小 / CI 无产物断言）。
+          #    这里是最后一道：上传前必须验产物，否则前面的修复都可能被绕过。
+          #    AGENTS.md 3.3 推论：不能只靠退出码，必须在产物上断言。
+          if [[ ! -f protected_unsigned.apk ]]; then
+            echo "❌ 产物不存在: protected_unsigned.apk" | tee -a build.log
+            exit 1
+          fi
+          _sz=$(stat -c%s protected_unsigned.apk 2>/dev/null || echo 0)
+          if [[ "${_sz:-0}" -lt 102400 ]]; then
+            echo "❌ 产物过小（${_sz:-0} 字节 < 100 KB）—— 加壳或回编失败但流水线未报错" | tee -a build.log
+            echo "   排查方向：dpt 日志有无 Zipalign failed / 回编是否产出空包" | tee -a build.log
+            exit 1
+          fi
+          if ! unzip -l protected_unsigned.apk >/dev/null 2>&1; then
+            echo "❌ 产物不是合法 zip/APK（${_sz} 字节）" | tee -a build.log
+            exit 1
+          fi
+          echo "✅ 产物校验通过: ${_sz} 字节，zip 结构完好" | tee -a build.log
           if [[ -z "$R2_ENDPOINT" || -z "$R2_BUCKET" ]]; then
             echo "❌ R2_ENDPOINT/R2_BUCKET 为空，检查仓库 Secrets" | tee -a build.log
             exit 1

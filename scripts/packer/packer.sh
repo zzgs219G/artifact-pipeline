@@ -217,20 +217,61 @@ if [[ -n "$dpt_extra_from_env" ]]; then
 fi
 
 # dpt.jar 需在 executable/ 下运行才能找到 shell-files/ 与 build-key
+#
+# ⚠️⚠️ 2026-11-08 真事故（CI run 42435473015）：
+#    dpt 日志打出 "Zipalign failed!"，但仍然写出一个 0 字节的
+#    *_unsign.apk，且 java 进程返回 0 —— 三重都没拦住：
+#      ① dpt 自己只打印错误、不非零退出
+#      ② 旧版 require_file 只查 [-f] 存在、不查大小
+#      ③ CI 没有产物侧断言
+#    结果：0 字节包上传 R2，用户在页面上看到"构建成功"。
+#    故此处显式检查退出码 + 产物大小（require_file 已加非空检查）。
+_DPT_RC=0
 module_cd_run "$DPT_EXE_DIR" java -jar "$DPT_JAR" \
   -f "$IN_APK" \
   -o "$DPT_OUT" \
   -x \
   ${DPT_EXTRA_ARGS[@]+"${DPT_EXTRA_ARGS[@]}"} \
-  -r "$DPT_RULES_USE"
+  -r "$DPT_RULES_USE" || _DPT_RC=$?
+if [[ "$_DPT_RC" -ne 0 ]]; then
+  log_err "dpt 加壳失败（退出码 $_DPT_RC）"
+  exit 1
+fi
 
 # ── 取产物 ──────────────────────────────────────────────────────────
 # 不硬编码 <包名>_unsign.apk（包名含点、转文件名易错，且 dpt 版本换名会炸）：
-# 只认「_unsign.apk 后缀」这一个契约，扫描命中多个即 fail-fast。
-produced="$(find "$DPT_OUT" -maxdepth 1 -name '*_unsign.apk' -type f 2>/dev/null || true)"
+# 只认「后缀」这一个契约，扫描命中多个即 fail-fast。
+#
+# ⚠️⚠️ 2026-11-08 真事故（CI run 42435473015）：原来只找 `*_unsign.apk`。
+#    dpt 的实现（AndroidPackage.java:1119-1133）是：
+#        out = new FileOutputStream(unsignedPackagePath);   // 立即创建文件
+#        zipalign(unzipalignPackagePath, unsignedPackagePath);
+#        // 失败则 zipalignSuccess=false，但那个 FileOutputStream 已经创建了
+#        // 一个 0 字节的 *_unsign.apk，且【不会被删除】
+#    于是 0 字节的 *_unsign.apk 一直躺在输出目录里，被 find 命中。
+#    正确取法（按 dpt 的 resultPath 逻辑）：
+#        willSign = zipalignSuccess ? unsigned : unzipalign
+#        result   = signed.exists() ? signed : willSign
+#    dpt 在 -x（不签名）时会把 willSign 复制成 *_signed.apk，故：
+#        · *_signed.apk 存在 → 最优（那是 dpt 认定的最终产物）
+#        · 否则退回 *_unzipalign.apk（zipalign 失败时的保底）
+#    **绝不能**再挑 *_unsign.apk —— 它在失败路径上是空壳。
+_find_dpt_apk() {
+  local pattern="$1"
+  find "$DPT_OUT" -maxdepth 1 -name "$pattern" -type f -size +100k 2>/dev/null || true
+}
+produced="$(_find_dpt_apk '*_signed.apk')"
 if [[ -z "$produced" ]]; then
-  log_err "dpt 未产出 *_unsign.apk（输出目录: $DPT_OUT）"
-  log_err "     检查：dpt 日志有无异常；或该 APK 是否已是加固壳包"
+  produced="$(_find_dpt_apk '*_unzipalign.apk')"
+  if [[ -n "$produced" ]]; then
+    log_warn "dpt 未产出 *_signed.apk，退回 *_unzipalign.apk（zipalign 可能失败，包未对齐）"
+  fi
+fi
+if [[ -z "$produced" ]]; then
+  log_err "dpt 未产出可用的 APK（输出目录: $DPT_OUT）"
+  log_err "     检查：dpt 日志有无 zipalign failed / MergeDex failed"
+  log_err "     已知 *_unsign.apk 在 zipalign 失败时是 0 字节空壳，故不作为候选"
+  ls -la "$DPT_OUT" 2>/dev/null >&2 || true
   exit 1
 fi
 count="$(printf '%s\n' "$produced" | grep -c . || true)"

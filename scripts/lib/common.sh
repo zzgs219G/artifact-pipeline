@@ -43,6 +43,13 @@ normalize_path() {
 # require_file <文件> [描述] — 不存在即退出
 require_file() {
   [[ -f "$1" ]] || { log_err "$2 缺失: $1"; exit 1; }
+  # ⚠️ 2026-11-08 新增非空检查（真事故：CI run 42435473015 产出 0 字节 APK）
+  #    dpt-shell 加壳时 "Zipalign failed!"，但仍写出一个 0 字节的
+  #    *_unsign.apk；旧版 require_file 只查 [-f] 存在 → 通过 → 被 cp 成
+  #    最终产物 → 上传 R2（content-length: 0）→ CI 仍 SUCCESS。
+  #    这是「静默降级」的典型：用户拿到一个 0 字节包，但流水线说成功。
+  #    AGENTS.md 3.3 的推论：拿不到就拒绝，且必须在产物侧断言。
+  [[ -s "$1" ]] || { log_err "$2 是空文件（0 字节）: $1"; exit 1; }
 }
 
 # require_dir <目录> [描述] — 不存在即退出
