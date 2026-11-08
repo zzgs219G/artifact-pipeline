@@ -757,6 +757,42 @@ jobs:
             done
           } | tee -a build.log
 
+      # apksigner / zipalign 在 Android SDK build-tools 里，ubuntu runner 默认
+      # 不装。用 setup-android 装一份并写进 PATH。
+      #
+      # ⚠️⚠️ 2026-11-08 由 `if: inputs.sign` 改为【无条件安装】。
+      #    真事故（CI run 42435473015）：只勾 --packer 不勾 sign 时，
+      #    build-tools 没装 → 没有 zipalign →
+      #      protect.sh 的 finish_apk 跳过对齐（只 warn）→
+      #      dpt 拿到未对齐包 → dpt 内部 zipalign 失败 →
+      #      创建 0 字节 *_unsign.apk 但 java 返回 0 →
+      #      上传 0 字节包，CI 仍 SUCCESS。
+      #    zipalign 不只签名要，【加壳也要】—— dpt 的输入必须是已对齐的包。
+      #    故无条件安装（体积约 50MB，setup-android 有缓存）。
+      - name: 安装 Android build-tools（签名 + 加壳都需要 zipalign）
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;34.0.0'
+
+      - name: 把 build-tools 加进 PATH（zipalign / apksigner）
+        run: |
+          set -o pipefail
+          # setup-android 把工具装在 $ANDROID_HOME/build-tools/<ver>/ 下，
+          # 但默认不在 PATH 里。后续步骤（protect.sh 的 finish_apk、
+          # 加壳、签名）都要直接 `command -v zipalign` 能找到。
+          BT=""
+          for cand in "$ANDROID_HOME"/build-tools/*/; do
+            if [[ -x "${cand}zipalign" ]]; then BT="$cand"; break; fi
+          done
+          if [[ -z "$BT" ]]; then
+            echo "❌ build-tools 里找不到 zipalign —— 加壳与签名都会失效" | tee -a build.log
+            ls "$ANDROID_HOME"/build-tools/ 2>/dev/null | tee -a build.log || true
+            exit 1
+          fi
+          echo "$BT" >> "$GITHUB_PATH"
+          echo "build-tools: $BT" | tee -a build.log
+          "$BT/zipalign" 2>&1 | head -1 | tee -a build.log || true
+
       - name: 下载 APK
         timeout-minutes: 5
         env:
@@ -806,42 +842,6 @@ jobs:
       #
       # secrets 缺失时 fail-fast，不静默跳过 —— 否则用户以为签了，装上去
       # 还是"未签名，无法安装"。
-      # apksigner / zipalign 在 Android SDK build-tools 里，ubuntu runner 默认
-      # 不装。用 setup-android 装一份并写进 PATH。
-      #
-      # ⚠️⚠️ 2026-11-08 由 `if: inputs.sign` 改为【无条件安装】。
-      #    真事故（CI run 42435473015）：只勾 --packer 不勾 sign 时，
-      #    build-tools 没装 → 没有 zipalign →
-      #      protect.sh 的 finish_apk 跳过对齐（只 warn）→
-      #      dpt 拿到未对齐包 → dpt 内部 zipalign 失败 →
-      #      创建 0 字节 *_unsign.apk 但 java 返回 0 →
-      #      上传 0 字节包，CI 仍 SUCCESS。
-      #    zipalign 不只签名要，【加壳也要】—— dpt 的输入必须是已对齐的包。
-      #    故无条件安装（体积约 50MB，setup-android 有缓存）。
-      - name: 安装 Android build-tools（签名 + 加壳都需要 zipalign）
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'build-tools;34.0.0'
-
-      - name: 把 build-tools 加进 PATH（zipalign / apksigner）
-        run: |
-          set -o pipefail
-          # setup-android 把工具装在 $ANDROID_HOME/build-tools/<ver>/ 下，
-          # 但默认不在 PATH 里。后续步骤（protect.sh 的 finish_apk、
-          # 加壳、签名）都要直接 `command -v zipalign` 能找到。
-          BT=""
-          for cand in "$ANDROID_HOME"/build-tools/*/; do
-            if [[ -x "${cand}zipalign" ]]; then BT="$cand"; break; fi
-          done
-          if [[ -z "$BT" ]]; then
-            echo "❌ build-tools 里找不到 zipalign —— 加壳与签名都会失效" | tee -a build.log
-            ls "$ANDROID_HOME"/build-tools/ 2>/dev/null | tee -a build.log || true
-            exit 1
-          fi
-          echo "$BT" >> "$GITHUB_PATH"
-          echo "build-tools: $BT" | tee -a build.log
-          "$BT/zipalign" 2>&1 | head -1 | tee -a build.log || true
-
       - name: 签名产物（可选）
         if: inputs.sign
         env:
