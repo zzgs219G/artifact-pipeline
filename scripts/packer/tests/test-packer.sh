@@ -26,6 +26,12 @@ STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR"' EXIT
 fail=0
 
+# 造一个 >100KB 的假文件。
+# ⚠️ 2026-11-08：require_file 加了非空检查（修 0 字节 APK 事故），
+#    packer.sh 的产物候选也加了 `-size +100k` 过滤。
+#    故测试里所有"应该被接受"的 APK 都必须有实际内容，不能用 `: >` 建空文件。
+_mkbig() { head -c 131072 /dev/zero > "$1"; }
+
 check() { if [[ "$2" == "$3" ]]; then echo "  ✅ $1"; else echo "  ❌ $1  期望[$3] 实际[$2]"; fail=1; fi; }
 
 echo "== packer.sh 产物提取链路冒烟 =="
@@ -48,10 +54,22 @@ while [[ $# -gt 0 ]]; do
 done
 printf 'IN=%s\nRULES=%s\nNO_SIGN=%s\nSMALLER=%s\nCWD=%s\nRAW=%s\n' "$inp" "$rules" "$no_sign" "$smaller" "$PWD" "$raw_args" > "$ARGS_FILE"
 mkdir -p "$out"
+# ⚠️ 2026-11-08：桩产物名与大小都要跟生产对齐。
+#   ① 名字：packer.sh 现在优先找 *_signed.apk，退回 *_unzipalign.apk，
+#      绝不挑 *_unsign.apk（该文件在 dpt 的 zipalign 失败路径上是 0 字节空壳，
+#      见 AndroidPackage.java:1122-1133）。
+#   ② 大小：packer.sh 的候选过滤加了 `-size +100k`，0 字节文件会被跳过。
+#      故桩必须写出 >100KB 的文件，否则连"正常路径"都过不了。
+_mkbig() { head -c 131072 /dev/zero > "$1"; }
 case "$STUB_MODE" in
-  one)   : > "$out/com.test.app_unsign.apk" ;;
+  one)   _mkbig "$out/com.test.app_signed.apk" ;;
   none)  : ;;
-  multi) : > "$out/a_unsign.apk"; : > "$out/b_unsign.apk" ;;
+  multi) _mkbig "$out/a_signed.apk"; _mkbig "$out/b_signed.apk" ;;
+  # 专项：只有 0 字节的 *_unsign.apk（模拟 dpt zipalign 失败后的空壳）
+  only_empty_unsign) : > "$out/com.test.app_unsign.apk" ;;
+  # 专项：zipalign 失败，但有可用的 *_unzipalign.apk（应退回并成功）
+  fallback_unzipalign) : > "$out/com.test.app_unsign.apk"
+                       _mkbig "$out/com.test.app_unzipalign.apk" ;;
 esac
 STUB
 chmod +x "$STUB_DIR/bin/java"
@@ -62,7 +80,7 @@ run_stub() {  # run_stub <mode> <in> <out>
 }
 
 echo "" # 正常路径
-: > "$STUB_DIR/in.apk"
+_mkbig "$STUB_DIR/in.apk"
 run_stub one "$STUB_DIR/in.apk" "$STUB_DIR/o.apk"; rc=$?
 check "①正常路径 exit 0" "$rc" "0"
 check "②输入绝对路径透传" "$(grep -c "^IN=$STUB_DIR/in.apk" "$STUB_DIR/args.txt")" "1"
@@ -98,6 +116,25 @@ echo ""
 echo "" # 输入缺失
 run_stub one "$STUB_DIR/nope.apk" "$STUB_DIR/o.apk"; rc=$?
 check "⑫输入缺失 exit!=0" "$([[ $rc -ne 0 ]] && echo nonzero || echo zero)" "nonzero"
+
+echo "" # ⑫j(2026-11-08 修 0 字节事故)只有 0 字节 *_unsign.apk → 必须 fail-fast
+#   背景：dpt 在 zipalign 失败时会用 FileOutputStream 创建一个 0 字节的
+#   *_unsign.apk 且不删除。旧版 packer.sh 恰好只找这个后缀 → 上传 0 字节包。
+rm -f "$STUB_DIR/o.apk"
+run_stub only_empty_unsign "$STUB_DIR/in.apk" "$STUB_DIR/o.apk"; rc=$?
+check "⑫j 只有 0 字节 _unsign.apk → exit!=0" \
+  "$([[ $rc -ne 0 ]] && echo nonzero || echo zero)" "nonzero"
+check "⑫j 且不落盘半成品" \
+  "$([[ -f "$STUB_DIR/o.apk" ]] && echo yes || echo no)" "no"
+
+echo "" # ⑫k zipalign 失败但有 *_unzipalign.apk → 应退回并成功
+rm -f "$STUB_DIR/o.apk"
+run_stub fallback_unzipalign "$STUB_DIR/in.apk" "$STUB_DIR/o.apk"; rc=$?
+check "⑫k 退回 *_unzipalign.apk → exit 0" "$rc" "0"
+check "⑫k 且产物已落盘" \
+  "$([[ -f "$STUB_DIR/o.apk" ]] && echo yes || echo no)" "yes"
+check "⑫k 落盘的不是 0 字节空壳" \
+  "$([[ -s "$STUB_DIR/o.apk" ]] && echo yes || echo no)" "yes"
 
 echo "" # ⑫b(报错四十三)PACKER_SMALLER=1 → dpt 收到 --smaller(体积优化)
 PACKER_SMALLER=1 run_stub one "$STUB_DIR/in.apk" "$STUB_DIR/o.apk"
@@ -144,7 +181,7 @@ check "⑫g 三源合并 → smaller/exclude/自由文本全部在位" \
 # 证书只能来自上传的原始已签名 APK；漏传 = dpt 提不到证书 = 整个加壳失败
 # （run 40428658987 实证）。
 rm -f "$STUB_DIR/args.txt"
-: > "$STUB_DIR/orig-signed.apk"
+_mkbig "$STUB_DIR/orig-signed.apk"
 CERT_SOURCE_APK="$STUB_DIR/orig-signed.apk" \
   run_stub one "$STUB_DIR/in.apk" "$STUB_DIR/o.apk"
 check "⑫h CERT_SOURCE_APK → dpt 收到 --cert-source" \
