@@ -26,15 +26,21 @@
 #    本文件用桩函数替换 I/O 层，被测代码就是 env_probes.c 原文。
 #
 # ── 覆盖范围 ────────────────────────────────────────────────────────
-#   已覆盖（走 safe_read_alloc / safe_lines_open）：
-#     frida_maps_probe / frida_unix_probe / tracer_probe /
-#     tracer_all_threads_probe / stat_state_probe
-#   未覆盖（输入源不同，需另换桩，见文件末尾「未覆盖」注释）：
-#     frida_port_probe     真 socket
-#     frida_thread_probe   还要 opendir
-#     xposed_file_probe    access()
+#   已覆盖（14 个探针里的 7 个）：
+#     frida_maps_probe         safe_read_alloc / safe_lines_*
+#     frida_unix_probe         safe_read_alloc / safe_lines_*
+#     frida_thread_probe       opendir / readdir（目录桩）
+#     xposed_file_probe        access()（存在性桩）
+#     tracer_probe             safe_read_alloc / safe_lines_*
+#     tracer_all_threads_probe safe_read_alloc（逐线程 status）
+#     stat_state_probe         safe_read_alloc
+#   未覆盖（输入源无法用桩模拟，见文件末尾说明）：
+#     frida_port_probe     真 socket 连接
+#     frida_tcp_table_probe  依赖真实 /proc/net/tcp 的内核状态
+#     xposed_maps_probe    同上（走 maps）
 #     trap_probe           真信号 + 线程
-#     libc_hook_probe / libc_text_crc_probe / self_text_crc_probe  真实内存
+#     libc_hook_probe      真实内存布局
+#     libc_text_crc_probe / self_text_crc_probe   真实 ELF + 内存映射
 #
 # ── 用法 ────────────────────────────────────────────────────────────
 #   bash scripts/guard/tests/test-probe-logic.sh
@@ -143,6 +149,88 @@ void envlog_c(int is_err, lsg_id_t id, const char *detail) {
 void env_fail(void) { }
 int  ncguard_unlock(void) { return 0; }
 
+/* ── 目录遍历桩 ────────────────────────────────────────────────────
+ * frida_thread_probe 用 opendir/readdir/closedir 遍历 /proc/self/task。
+ * 这里给一个「假目录」：fake_dir_set() 登记某路径下有哪些文件名，
+ * readdir 依次吐出它们（外加真实的 "." / ".."，与生产行为一致）。
+ * ⚠️ 只支持一层、且同时只能有一个打开的假目录 —— 被测探针也只开一个。 */
+#include <dirent.h>
+
+#define FAKE_DIR_MAX 16
+static char g_dir_path[256];
+static char g_dir_names[FAKE_DIR_MAX][64];
+static int  g_dir_n = 0;
+static int  g_dir_open = 0;
+static int  g_dir_cursor = 0;
+static struct dirent g_dirent;
+
+void fake_dir_clear(void) { g_dir_path[0] = 0; g_dir_n = 0; g_dir_open = 0; g_dir_cursor = 0; }
+
+void fake_dir_set(const char *path, const char *const *names, int n) {
+    int i;
+    snprintf(g_dir_path, sizeof g_dir_path, "%s", path);
+    if (n > FAKE_DIR_MAX) n = FAKE_DIR_MAX;
+    g_dir_n = n;
+    for (i = 0; i < n; i++) {
+        snprintf(g_dir_names[i], sizeof g_dir_names[i], "%s", names[i]);
+    }
+    g_dir_open = 0; g_dir_cursor = 0;
+}
+
+DIR *opendir(const char *path) {
+    if (g_dir_path[0] == 0 || strcmp(path, g_dir_path) != 0) return NULL;
+    g_dir_open = 1; g_dir_cursor = 0;
+    return (DIR *)&g_dir_open;          /* 非空即可，被测代码只判 NULL */
+}
+
+struct dirent *readdir(DIR *d) {
+    (void)d;
+    if (!g_dir_open) return NULL;
+    /* 先吐 "." 与 ".." —— 生产环境的目录一定有，探针靠首字符非数字跳过 */
+    if (g_dir_cursor == 0) {
+        g_dir_cursor++;
+        snprintf(g_dirent.d_name, sizeof g_dirent.d_name, ".");
+        g_dirent.d_type = DT_DIR;
+        return &g_dirent;
+    }
+    if (g_dir_cursor == 1) {
+        g_dir_cursor++;
+        snprintf(g_dirent.d_name, sizeof g_dirent.d_name, "..");
+        g_dirent.d_type = DT_DIR;
+        return &g_dirent;
+    }
+    if (g_dir_cursor - 2 >= g_dir_n) return NULL;
+    snprintf(g_dirent.d_name, sizeof g_dirent.d_name, "%s", g_dir_names[g_dir_cursor - 2]);
+    g_dirent.d_type = DT_DIR;
+    g_dir_cursor++;
+    return &g_dirent;
+}
+
+int closedir(DIR *d) { (void)d; g_dir_open = 0; return 0; }
+
+/* ── access() 桩 ───────────────────────────────────────────────────
+ * xposed_file_probe 用 access(path, F_OK) 判 5 个固定路径是否存在。
+ * 这里查一个「存在的路径」小表。 */
+#define FAKE_EXIST_MAX 8
+static char g_exist[FAKE_EXIST_MAX][128];
+static int  g_exist_n = 0;
+
+void fake_exist_clear(void) { g_exist_n = 0; }
+void fake_exist_add(const char *path) {
+    if (g_exist_n < FAKE_EXIST_MAX) {
+        snprintf(g_exist[g_exist_n], sizeof g_exist[g_exist_n], "%s", path);
+        g_exist_n++;
+    }
+}
+int access(const char *path, int mode) {
+    int i;
+    (void)mode;
+    for (i = 0; i < g_exist_n; i++) {
+        if (strcmp(g_exist[i], path) == 0) return 0;
+    }
+    return -1;
+}
+
 /* ── 行迭代器三个函数 ──────────────────────────────────────────────
  * 生产实现定义在 env_check.c（基础设施那一侧）。本测试只编 env_probes.c，
  * 所以要在这里提供一份【逐字一致】的实现。它们只做缓冲切片，不含任何
@@ -184,8 +272,14 @@ int frida_unix_probe(void);
 int tracer_probe(void);
 int tracer_all_threads_probe(void);
 int stat_state_probe(void);
+int frida_thread_probe(void);
+int xposed_file_probe(void);
 void fake_set(const char *path, const char *content);
 void fake_clear(void);
+void fake_dir_set(const char *path, const char *const *names, int n);
+void fake_dir_clear(void);
+void fake_exist_add(const char *path);
+void fake_exist_clear(void);
 
 static int pass = 0, fail = 0;
 static void ok(const char *m)  { pass++; printf("  \xe2\x9c\x93 %s\n", m); }
@@ -314,6 +408,72 @@ int main(void) {
     fake_clear();
     expect("unix: 读不到文件 → 应 clean", frida_unix_probe(), 0);
 
+    /* ═══ frida_thread_probe ═══ /proc/self/task/<tid>/comm
+     * 判定: gum-js-loop 单命中即判；其余线程名要求 ≥2 个（压误报） */
+    {
+        const char *t1[] = { "1234" };
+        fake_clear(); fake_dir_clear();
+        fake_dir_set("/proc/self/task", t1, 1);
+        fake_set("/proc/self/task/1234/comm", "gum-js-loop\n");
+        expect("thread: 唯一线程是 gum-js-loop → 应命中", frida_thread_probe(), 1);
+
+        const char *t2[] = { "1234" };
+        fake_clear(); fake_dir_clear();
+        fake_dir_set("/proc/self/task", t2, 1);
+        fake_set("/proc/self/task/1234/comm", "pool-frida\n");
+        expect("thread: 只有 1 个非 gum 特征 → 应 clean（要求≥2）", frida_thread_probe(), 0);
+
+        const char *t3[] = { "1234", "1235" };
+        fake_clear(); fake_dir_clear();
+        fake_dir_set("/proc/self/task", t3, 2);
+        /* 特征表是 strcmp 精确比对（不是子串），表里 5 个词：
+         * gum-js-loop / gmain / gdbus / pool-frida / frida
+         * 所以用 pool-frida + frida 两个【表内】词验证"≥2 即判"。 */
+        fake_set("/proc/self/task/1234/comm", "pool-frida\n");
+        fake_set("/proc/self/task/1235/comm", "frida\n");
+        expect("thread: 2 个表内特征线程 → 应命中", frida_thread_probe(), 1);
+
+        /* gmain / gdbus 是 GLib 标准线程名 —— 正常库会同时起这两个。
+         * 当前实现把它们也算特征 → hits=2 → 命中（误报风险）。
+         * 此断言【记录现状】，若将来移除这两个词，应改成 want=0。 */
+        const char *t4[] = { "1234", "1235" };
+        fake_clear(); fake_dir_clear();
+        fake_dir_set("/proc/self/task", t4, 2);
+        fake_set("/proc/self/task/1234/comm", "gmain\n");
+        fake_set("/proc/self/task/1235/comm", "gdbus\n");
+        expect("thread: gmain+gdbus（GLib 标准名）→ 当前实现判命中", frida_thread_probe(), 1);
+
+        const char *t5[] = { "1234", "1235" };
+        fake_clear(); fake_dir_clear();
+        fake_dir_set("/proc/self/task", t5, 2);
+        fake_set("/proc/self/task/1234/comm", "main\n");
+        fake_set("/proc/self/task/1235/comm", "GC\n");
+        expect("thread: 正常线程名 → 应 clean", frida_thread_probe(), 0);
+
+        fake_clear(); fake_dir_clear();
+        expect("thread: 打不开目录 → 应 clean", frida_thread_probe(), 0);
+    }
+
+    /* ═══ xposed_file_probe ═══ access() 判 5 个固定路径 */
+    fake_exist_clear();
+    fake_exist_add("/data/adb/lspd");
+    expect("xposed: /data/adb/lspd 存在 → 应命中", xposed_file_probe(), 1);
+
+    fake_exist_clear();
+    fake_exist_add("/data/adb/modules/zygisk_lsposed");
+    expect("xposed: zygisk_lsposed 模块存在 → 应命中", xposed_file_probe(), 1);
+
+    fake_exist_clear();
+    fake_exist_add("/system/framework/XposedBridge.jar");
+    expect("xposed: XposedBridge.jar 存在 → 应命中", xposed_file_probe(), 1);
+
+    fake_exist_clear();
+    fake_exist_add("/system/lib64/libc.so");
+    expect("xposed: 只有无关路径 → 应 clean", xposed_file_probe(), 0);
+
+    fake_exist_clear();
+    expect("xposed: 一个路径都不存在 → 应 clean", xposed_file_probe(), 0);
+
     printf("\n==============================================================\n");
     printf("结果: %d 通过, %d 失败\n", pass, fail);
     printf("==============================================================\n");
@@ -353,12 +513,12 @@ echo ""
 RC=$?
 
 echo ""
-echo "未覆盖的探针（输入源不同，需另换桩）："
-echo "  frida_port_probe      真 socket      → 真机验证（已做过）"
-echo "  frida_thread_probe    还要 opendir   → 需替换目录遍历"
-echo "  xposed_file_probe     access()       → 需替换 access"
-echo "  trap_probe            真信号+线程    → 需真实信号环境"
-echo "  libc_hook_probe       真实内存       → 需真实内存布局"
-echo "  libc/self_text_crc_probe 真实 ELF+内存 → 需真实产物"
+echo "未覆盖的探针（输入源无法用桩模拟）："
+echo "  frida_port_probe        真 socket 连接        → 真机验证（已做过）"
+echo "  frida_tcp_table_probe   真实 /proc/net/tcp    → 需内核态数据"
+echo "  xposed_maps_probe       真实 maps             → 同 frida_maps_probe，未单独写"
+echo "  trap_probe              真信号 + 线程         → 需真实信号环境"
+echo "  libc_hook_probe         真实内存布局          → 需真实进程"
+echo "  libc/self_text_crc      真实 ELF + 内存映射   → 需真实产物"
 
 exit $RC
