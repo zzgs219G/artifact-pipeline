@@ -445,6 +445,101 @@ CI 的 `setup-toolchain` action 会校验，源码形态会直接失败：
 
 ---
 
+## 9.5 当前进度与下一步（2026-11-09 更新）
+
+> **新接手的 AI 先读这一节。** 它回答"现在做到哪了、接下来该干什么"——
+> 这是本文其他地方都不覆盖的信息。
+
+### 已完成并真机验证
+
+| 项 | 状态 |
+|---|---|
+| **纯 C 解密桩**（`--stringenc-native`） | ✅ 云端 r27d / r29 产物均真机跑通 |
+| 算法与密钥离开 dex | ✅ dex 内 `GAMMA/keyByte/mix64/nc_strdec` 命中 **0 处** |
+| 算法进 `.ncx` 锁箱段 | ✅ arm64 0x1e70，`objdump` 看到的是密文 |
+| 密钥编译进 so | ✅ `nc_strdec_cfg.h` 的 `NC_STRDEC_KEY_BYTES`，dex 零密钥 |
+| JNI 短名绑定（不进 `.dynsym`） | ✅ 只导出 `Java_<随机包名>_<随机方法名>` |
+| 三套测试进 CI | ✅ 291 + 184 + 13 项 |
+
+### 当前配置的实际形态
+
+```
+schema: stringenc.stub_impl  ← type=checkbox, value_kind=flag
+        勾选 → --stringenc-native
+        不勾 → Java 桩（默认）
+```
+
+**注意：`stub_impl` 和 `dex2c_stub` 是两个独立复选框，可以同时勾** ——
+那是非法组合，靠 CLI / `protect.sh` / 云端 `resolve-config` 三层 fail-fast 拦。
+**UI 层没拦。**
+
+### 下一步（按优先级）
+
+#### ① 把 Java/C 桩改成真单选（推荐先做）
+
+**现状**：两个复选框，能同时勾，靠报错兜底。
+**目标**：一个下拉框，只能选一个。
+
+**好消息：能力已经全在，只缺一处实现。**
+
+```
+✅ jian_box UI        ProtectConfigCard.kt 的 ChildSelect() 已完整实现
+                      （ExposedDropdownMenuBox + options + default 校验）
+✅ check-schema.py    if c["type"] == "select" 的校验分支已存在
+❌ resolve-config.py  没有 select 分支 ← 唯一缺口，约 25 行
+❌ config-schema.json 从没用过 select 类型
+```
+
+**要做的事：**
+
+1. `configs/v1/config-schema.json`：`stringenc.stub_impl` 从
+   `type=checkbox` 改成 `type=select`，加 `options: [{value,label},...]`，
+   `default: "java"`，每个 option 带自己的 `arg_on`
+2. `scripts/actions/resolve-config.py`：加 `value_kind == "choice"` 分支
+   （读选中值 → 查 options → 追加对应 `arg_on`；值不在 options 里即 fail-fast）
+3. `scripts/actions/tests/test-resolve-config.py`：补用例
+4. 确认 `zzgs219G/json` 仓库（schema 镜像）同步
+
+**⚠️ 改之前必须确认**：`jian_box` 的 `ProtectConfigSchema.kt` 里
+`Child.type` 注释写的是 `"text" | "select" | "checkbox"`，
+说明 select 是设计过的；但**从没有任何 schema 用过它**，可能存在未暴露的 bug。
+先在 `demo` 包上试一次再推。
+
+#### ② 算法可选框（splitmix64 / ChaCha20）
+
+**动机不是速度**（实测方案② 只省 1.45ms，占 1%），而是**强度**：
+
+```
+splitmix64（现状）：可逆。攻击者猜中一条明文 → 反推出种子 → 全包沦陷
+ChaCha20：不可逆。猜中一条只泄漏那一条
+```
+
+**用户明确要求**：保留 splitmix64 作为"速度优先"选项，ChaCha20 作为
+"安全优先"选项，做成可选。
+
+**实现要点：**
+
+- 只影响两处：`encrypt-strings.py` 的 `key_byte()`、`nc_strdec.c` 的 `nc_block_ks()`
+- **密文格式会变**：ChaCha20 每条要多存 nonce → Base64 长度变长
+- 必须是**编译期常量**（`NC_STRDEC_ALGO`），不能是运行期开关
+- 约 3~4 小时 + 真机验证
+
+#### ③ 其他待办（优先级低）
+
+- `armeabi-v7a` 真机验证（本机只有 arm64）
+- 本地 Termux 环境为何产出坏 so（22 字节 SIMD 栈偏移差异，原因未查清）
+- `--stringenc-native` 纯桩（不带 `--sigcheck`）为何崩（`.ncx` 缺 `.ncxr`，
+  锁箱链不完整）—— 目前靠"必须配 sigcheck"规避
+
+### 千万别做的事
+
+| 别做 | 原因 |
+|---|---|
+| **本地 Termux 构建后装机验证** | 产物必 SIGILL，连纯 sigcheck 也崩。见 §8.4.1 |
+| 删 Java 桩 | `--dex2c-stub` 联动只能走它；且是所有现有用户的默认路径 |
+| 给 `nc_strdec.c` 加计算量来"提升强度" | 加轮数不解决可逆性，白慢 |
+| 在 `stub_impl` 上再加一个 flag | 那是单选语义，加 flag 只会更乱 |
+
 ## 10. 一句话交接
 
 **先看源码，再看文档。** 这个项目的文档写得很细（`流程文档.md` 2300 行、
