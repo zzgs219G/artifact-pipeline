@@ -466,7 +466,13 @@ NKEYS=4        ：块密钥流 = XOR over t of mix64(key[t] + (blk+t)*gamma[t])
 - ~~算法可选框（splitmix64 / ChaCha20）未实现~~ → **2026-11-09 已实现**：
   `stringenc.algo`（横向单选，`visible_when{stub_impl,c}`）。
   ChaCha20 抗「猜中一条明文反推全包」，体积零增长（offset 当 counter）。
-  实测吞吐 311 MB/s（宿主 aarch64），整包增量 0.15~0.77 ms。
+  块粒度 8→64 字节带来 **7.6~8.3×** 加速（理论值精确 8.0×：旧版每 8 字节
+  重跑一次 20 轮，白算 7/8），整包增量 0.15~0.77 ms。
+  ⚠️ 这里刻意不写绝对 MB/s —— 宿主是共享的移动设备，负载与 CPU 频率浮动
+  会让绝对值失真到无法复现（详见 docs/AI接手文档.md §9.5② 的更正说明）。
+  要对比就同进程交替测，只信比值 —— 复现用
+  `bash scripts/string-enc/tests/bench-chacha20-blocksize.sh`（会把两版块粒度
+  实现内联进同一程序交替跑 5 轮，输出比值与判定）。
 
 ## 依赖与环境
 
