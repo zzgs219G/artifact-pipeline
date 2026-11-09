@@ -459,11 +459,14 @@ NKEYS=4        ：块密钥流 = XOR over t of mix64(key[t] + (blk+t)*gamma[t])
 - **纯 `--stringenc-native`（不带 `--sigcheck`）会崩** —— 该组合下 `.ncx`
   只有算法（1120 字节）、缺 `.ncxr`，锁箱解锁链不完整。**必须配 `--sigcheck`。**
 - `--stringenc-native` 与 `--dex2c-stub` 的互斥目前只在 CLI/protect.sh 层拦截，
-  **UI 层还是两个独立复选框**（可同时勾，靠 fail-fast 兜底）。schema 现只有
-  `flag`/`arg_value`/`rules_file` 三种 `value_kind`；`select`（单选/下拉）
-  在 `check-schema.py` 与 `jian_box` UI 里**都已支持**，只缺
-  `resolve-config.py` 的分支——加约 25 行即可做真单选。
-- 算法可选框（splitmix64 / ChaCha20）未实现
+  **UI 层仍可同时勾**（靠 fail-fast 兜底）。`stub_impl` 已从 flag 改成
+  `value_kind=choice`（下拉框），`dex2c_stub` 用 `visible_when` 在纯 C 桩时
+  整行消失 —— 但**两者之间没有互斥约束**（schema 没有表达「互斥」的能力，
+  `required.unless` 只能表达必填豁免）。详见 `docs/配置schema.md` §5.5。
+- ~~算法可选框（splitmix64 / ChaCha20）未实现~~ → **2026-11-09 已实现**：
+  `stringenc.algo`（横向单选，`visible_when{stub_impl,c}`）。
+  ChaCha20 抗「猜中一条明文反推全包」，体积零增长（offset 当 counter）。
+  实测吞吐 311 MB/s（宿主 aarch64），整包增量 0.15~0.77 ms。
 
 ## 依赖与环境
 
