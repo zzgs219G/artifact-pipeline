@@ -274,8 +274,14 @@ def describe_plan(cfg_json: str) -> str:
          bool(c.get("stringenc", {}).get("enabled")),
          ("规则: %s%s" % (
              c["stringenc"].get("rules_file", ""),
+             # ⚠️ 判 is True（布尔），不是 == "native"（字符串）。
+             # 2026-11-09 实测发现：build_config() 在 :245 写的是布尔 True
+             # （因为 schema 里 stub_impl 是 value_kind=flag），而这里原先判
+             # 字符串 "native" → 恒不成立 → 回执里永远看不到「解密桩=纯C」。
+             # 症状是静默的：构建结果正确，只有触发前的自查清单是错的。
+             # 历史：4a1ba9c 把写入值从 "native" 改成 True 时，漏改了这个读点。
              "，解密桩=纯C（算法进 libnc.so）"
-             if c["stringenc"].get("stub_impl") == "native"
+             if c["stringenc"].get("stub_impl") is True
              else ("，解密桩抽进 so" if c["stringenc"].get("dex2c_stub") else "")))
          if c.get("stringenc", {}).get("enabled") else ""),
         ("防对比混淆", bool(c.get("antidiff")), ""),

@@ -478,33 +478,51 @@ schema: stringenc.stub_impl  ← type=checkbox, value_kind=flag
 
 #### ① 把 Java/C 桩改成真单选（推荐先做）
 
+> **2026-11-09 已裁决：用「下拉框」，不用「单选框」。** 判据与反例见
+> **`docs/配置schema.md` §4.2** —— 摘要：子项复选框被压到 20dp（行高 36dp 所迫），
+> 20dp 的圆（radio）与 20dp 的圆角方框（checkbox）并排时形状差异基本不存在，
+> 用户无法区分"这个框是单选还是多选"；下拉框用**折叠/展开的形态差异**把语义区分开。
+> （例外：APP 顶层「加固方案」用 radio 是对的 —— 独立 SectionCard + 每项带 subtitle。）
+
 **现状**：两个复选框，能同时勾，靠报错兜底。
 **目标**：一个下拉框，只能选一个。
 
 **好消息：能力已经全在，只缺一处实现。**
 
 ```
-✅ jian_box UI        ProtectConfigCard.kt 的 ChildSelect() 已完整实现
+✅ jian_box UI        ProtectConfigCard.kt:143 已分发 "select" → ChildSelect()
                       （ExposedDropdownMenuBox + options + default 校验）
-✅ check-schema.py    if c["type"] == "select" 的校验分支已存在
-❌ resolve-config.py  没有 select 分支 ← 唯一缺口，约 25 行
+                      ★ 且 jian_box 对本改动【零代码改动】：
+                        type=select 的 default 走 optString、状态存 String、
+                        buildProtectConfig 走 else 分支写字符串 —— 通路已完整
+✅ check-schema.py    type=="select" 时断言 default ∈ options 的分支已存在
+❌ resolve-config.py  没有 value_kind=="choice" 分支 ← 唯一缺口，约 25 行
 ❌ config-schema.json 从没用过 select 类型
 ```
 
 **要做的事：**
 
 1. `configs/v1/config-schema.json`：`stringenc.stub_impl` 从
-   `type=checkbox` 改成 `type=select`，加 `options: [{value,label},...]`，
-   `default: "java"`，每个 option 带自己的 `arg_on`
+   `type=checkbox` 改成 `type=select`，`value_kind` 从 `flag` 改成 `choice`，
+   加 `options: [{value,label,arg_on},...]`，`default: "java"`
 2. `scripts/actions/resolve-config.py`：加 `value_kind == "choice"` 分支
-   （读选中值 → 查 options → 追加对应 `arg_on`；值不在 options 里即 fail-fast）
-3. `scripts/actions/tests/test-resolve-config.py`：补用例
-4. 确认 `zzgs219G/json` 仓库（schema 镜像）同步
+   （读选中值 → 查 options → 追加对应 `arg_on`；值不在 options 里即 fail-fast；
+   `arg_on` 为空串时跳过 ARG_RE 校验）。**三条实现要点见 `配置schema.md` §3.4**
+3. `scripts/actions/tests/test-resolve-config.py`：补用例（含 T17c 那条
+   "字符串必须被拒"要改语义 —— 改完后字符串 "native" 不再是错值而是非法枚举值）
+4. `scripts/trigger_build.py`：`--stringenc-native` 的 config 写入改回枚举值
+   `"c"`（当前写 `True`，那是 `flag` 时代的形态）
 
-**⚠️ 改之前必须确认**：`jian_box` 的 `ProtectConfigSchema.kt` 里
+**⚠️ 改之前必须确认**：`jian_box` 的 `ProtectConfigSchema.kt:54` 里
 `Child.type` 注释写的是 `"text" | "select" | "checkbox"`，
 说明 select 是设计过的；但**从没有任何 schema 用过它**，可能存在未暴露的 bug。
 先在 `demo` 包上试一次再推。
+
+**⚠️ UI 层不拦互斥**：改成 select 后 `stub_impl` 与 `dex2c_stub` 在 UI 上仍是
+两个独立控件（一个下拉 + 一个复选框），**同时选仍然可选**。互斥继续靠
+`trigger_build.py` / `protect.sh` / `resolve-config` 三层 fail-fast 兜底。
+要真正在 UI 层拦住，需要 `ProtectConfigSchema.validate()` 支持跨字段规则 ——
+当前 schema 没有这个表达力（`required.unless` 只能表达"必填豁免"，不能表达"互斥"）。
 
 #### ② 算法可选框（splitmix64 / ChaCha20）
 

@@ -120,7 +120,7 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/actions/check-schema.py configs/v1/config-schema.json
 
-      - name: schema 解释器回归（37 用例）
+      - name: schema 解释器回归（40 用例）
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/actions/tests/test-resolve-config.py
 
@@ -138,7 +138,7 @@ jobs:
 
       # inject-loadlib 是冻结模块，历史上出过 14 次事故（53 条报错里最多），
       # 却一直没有独立测试。纯 stdlib，秒级，无外部依赖。
-      - name: inject-loadlib 插桩（69 断言，纯 stdlib）
+      - name: inject-loadlib 插桩（73 断言，纯 stdlib）
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/inject/tests/test_inject_loadlib.py
 

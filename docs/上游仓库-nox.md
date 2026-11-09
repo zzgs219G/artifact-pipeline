@@ -41,7 +41,7 @@ nox/
 ├── test.sh                    ★ 自测：V1–V10，零参数即可跑（用包内 fixture；判据 0 失败）
 ├── AGENTS.md                  ★ 上游的硬约束（冻结契约、加密纪律、发版纪律）
 ├── README.md                    一句话介绍
-├── VERSION                      当前 2026.11.02-final
+├── VERSION                      当前 v0.9.11-obf（取数：cat tools/nox/VERSION）
 ├── .github/workflows/release.yml  两关：verify（自测+例子）→ build（打包+校验+冒烟）
 ├── docs/
 │   └── SOURCE.txt               独立化时的来源与 sha256 校验清单
@@ -308,12 +308,17 @@ bash scripts/lib/tests/test-so-lock.sh       # 需 ../nox 源码形态
 
 ## 8. 版本现状与已知不一致（如实记录）
 
-| 项 | 实际值 | 文档里曾写的 |
+⚠️ **本表只写取数命令，不抄具体值。** 这张表本身就是为"记录漂移"而存在的，
+结果 2026-11-09 复核时发现表里的「实际值」已经过期了两轮（写成
+`2026.11.02-final` / sha `432c3459…`，实际是 `v0.9.11-obf` / sha `adf7e739…`）——
+**记录漂移的表自己漂移了**。凡可枚举事实，一律给命令。
+
+| 项 | 取数命令 | 文档里曾写的（仅存档） |
 |---|---|---|
-| 包内 `nox/VERSION` | `2026.11.02-final` | `v0.4.2`（`tools/工具包版本.md`） |
-| `tools/nox.zip` sha256 | `432c34593aae9c51…` | `4ca8126c…` |
-| 最新 git tag | `v0.9.11-obf`（共 22 个 tag） | —— |
-| CI 用的 nox ref | `main` | `v0.4.2`（`AGENTS.md` §3） |
+| 包内 `nox/VERSION` | `cat tools/nox/VERSION` 或 `unzip -p tools/nox.zip nox/VERSION`（两者必须一致） | `v0.4.2`、`2026.11.02-final` |
+| `tools/nox.zip` sha256 | `sha256sum tools/nox.zip` | `4ca8126c…`、`432c34593aae9c51…` |
+| 最新 git tag | `cd ../nox && git tag --list --sort=-v:refname \| head -1`（当前共 22 个） | `v0.4.0` |
+| CI 用的 nox ref | `grep -n 'nox-ref' .github/workflows/protect-modules.yml`（默认 `main`） | `v0.4.2`（`AGENTS.md` §3） |
 
 **为什么 CI 不锁 tag**：`v0.4.2` 这个 tag **在 nox 仓库里根本不存在**
 （当时最新是 `v0.4.0`，而 `v0.4.0` 早于修复 `nc_guard_jni` 缺失的那个提交
