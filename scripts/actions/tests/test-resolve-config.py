@@ -292,5 +292,27 @@ rc, args, files, err = run(cfg(antidiff={"enabled": "yes"}))
 check("T16e 旧 dict 形态 enabled 非布尔 → 报错退出",
       rc != 0 and "布尔" in err, f"rc={rc} err={err}")
 
+# ── T17: stringenc.stub_impl（纯 C 桩，2026-11-09）───────────────────
+# 为什么必须钉死"值只能是布尔"：
+#   云端首跑就是这么挂的 —— trigger_build.py 传了字符串 "native"，
+#   而 resolve-config 对 value_kind=flag 的口径是"值为布尔，true 才追加"，
+#   于是云端直接 400："值必须是布尔，实际 'native'"。
+#   "用哪种实现"由 arg_on 本身表达（--stringenc-native），不需要第三种取值。
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": True}))
+check("T17a stub_impl=true → 吐出 --stringenc-native",
+      rc == 0 and "--stringenc-native" in args, f"rc={rc} args={args} err={err}")
+
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": False}))
+check("T17b stub_impl=false → 不吐 --stringenc-native",
+      rc == 0 and "--stringenc-native" not in args, f"rc={rc} args={args}")
+
+# 关键回归：字符串形态必须被拒（云端首跑就是这个形态）
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": "native"}))
+check("T17c stub_impl='native'（字符串）→ 必须报错",
+      rc != 0 and "布尔" in err, f"rc={rc} err={err}")
+
 print(f"\n结果: {passed} 通过, {failed} 失败")
 sys.exit(1 if failed else 0)

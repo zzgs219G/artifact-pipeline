@@ -235,7 +235,14 @@ def build_config(args) -> str:
                     "--stringenc-native 互斥。请改用逐个开关，例如：\n"
                     "    --sigcheck --dex2c --stringenc --stringenc-native "
                     "--antidiff --envcheck --packer")
-            cfg["stringenc"]["stub_impl"] = "native"
+            # ⚠️ 值必须是【布尔 true】，不是字符串 "native"。
+            # schema 里 stub_impl 是 value_kind=flag（勾选即追加 arg_on），
+            # 而 resolve-config.py 对 flag 的口径是"值为布尔，true 才追加"。
+            # 首版传了 "native" → 云端 400：
+            #   "模块 stringenc.stub_impl 的值必须是布尔，实际 'native'"
+            # "用哪种实现"这件事由 arg_on 本身表达（--stringenc-native），
+            # schema 里不需要也不允许第三种取值。
+            cfg["stringenc"]["stub_impl"] = True
         elif args.dex2c_stub or args.all:
             cfg["stringenc"]["dex2c_stub"] = True
 
