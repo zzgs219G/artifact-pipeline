@@ -356,6 +356,45 @@ echo "[strip] ⚠️ .comment 移除失败（objcopy 异常）——继续但不
 **推论**：不能阻塞出包的步骤，**必须在产物侧有断言**（写进 `test.sh`），
 不能只看日志有没有报错。
 
+### 8.4.1 本地 Termux 构建的 so 装机必崩 —— 验证只能走云端（2026-11-09 血泪）
+
+```
+本地 Termux (NDK r29, linux-aarch64) 编译 → 装机 SIGILL
+  且：连纯 --sigcheck（完全不含 stringenc-native 代码）也崩
+  且：关掉段标记也崩
+云端 CI (r27d / r29 都试过) → 全部正常
+```
+
+逐字节对比两边 `.text`：**大小完全相同（166772），只差 22 字节，
+全是 SIMD 栈访问偏移**（`ldr q1,[x9,#0x290]` vs `#0x280`）——
+高度怀疑与 nox VMP 对栈布局的隐含依赖有关（未证实）。
+
+**教训：本地装机的"能跑/不能跑"结论一律不可采信。**
+这一条不懂，会像我一样连续误判"锁箱失败""clang 版本不兼容"，
+每次都要重跑云端才发现方向错了。
+
+**正确姿势**：
+```bash
+RELAY_TOKEN=... python3 scripts/trigger_build.py --sigcheck --stringenc \
+    --stringenc-native --stringenc-rules '**' --sign
+# → 下载 → adb install → 看 logcat
+```
+
+### 8.4.2 C 桩的五个必崩点（改这块前必读）
+
+真机实测，每条都是硬崩溃：
+
+| # | 症状 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | `无法得知本次的随机桩名` | STEP3 编 so 早于 STEP5 注桩 | `emit-stub-decl` 只算名字不注入 |
+| 2 | `library "libnc.so" not found` | STEP5 放 so 的条件漏了 `WANT_NATIVE_STUB` | 条件补上 |
+| 3 | `JNI_ERR returned from JNI_OnLoad` | 桩 `<clinit>` 里 loadLibrary 时类正在初始化，`FindClass` 自己失败 | 删自建 OnLoad，改 JNI 短名绑定 |
+| 4 | `NoSuchMethodError: ncSetKey([B)V` | ART 在**类链接阶段**解析 native 短名（早于 `<clinit>`） | 密钥编译进 so，不经 Java |
+| 5 | App 起得来但功能全废（Room 报 `no table with name <密文>`） | `bootstrap` 只在 `JNI_OnLoad` 里调，纯 native 桩组合没有 OnLoad → **密钥永远没设** | `nc_ensure_key()` 惰性注入 |
+
+**第 5 条最危险**：解密失败是静默的（返回原密文，不崩不报错）。
+为此加了 `nc_strdec_fail_count()` —— **非 0 就说明加固在静默劣化**。
+
 ### 8.5 加密了内容 ≠ 隐藏了结构
 
 六段 RC4+HMAC 把字节变成密文，但 `.eh_frame` 里 709 个 FDE 把每个函数的

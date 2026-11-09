@@ -445,11 +445,25 @@ NKEYS=4        ：块密钥流 = XOR over t of mix64(key[t] + (blk+t)*gamma[t])
 这条踩了很多次：曾据此误判过"锁箱失败""clang 版本不兼容"，都不是真因，
 白花了两轮排查。
 
-### 尚未验证
+### 已验证 / 未验证
 
-- `--sigcheck` + `--stringenc-native` 组合（两者一起时 so 的 constructor 链
-  与 javacheck 注入时序未验证）
+**已真机验证**（2026-11-09）：
+- `--sigcheck --stringenc --stringenc-native`（云端 r27d 与 r29 各一次）
+  → 进程稳定 30 分钟+、业务页全中文正确、`nc_strdec_fail_count()==0`
+- dex 内 `GAMMA/keyByte/mix64/nc_strdec` 命中 **0 处**
+- so 导出符号只有随机短名（无 `ncDec`/`ncSetKey`）
+- `.ncx` 锁箱生效（arm64 0x1e70）
+
+**未验证**：
 - `armeabi-v7a` 真机（本机只有 arm64，v7a 仅离线编译验证）
+- **纯 `--stringenc-native`（不带 `--sigcheck`）会崩** —— 该组合下 `.ncx`
+  只有算法（1120 字节）、缺 `.ncxr`，锁箱解锁链不完整。**必须配 `--sigcheck`。**
+- `--stringenc-native` 与 `--dex2c-stub` 的互斥目前只在 CLI/protect.sh 层拦截，
+  **UI 层还是两个独立复选框**（可同时勾，靠 fail-fast 兜底）。schema 现只有
+  `flag`/`arg_value`/`rules_file` 三种 `value_kind`；`select`（单选/下拉）
+  在 `check-schema.py` 与 `jian_box` UI 里**都已支持**，只缺
+  `resolve-config.py` 的分支——加约 25 行即可做真单选。
+- 算法可选框（splitmix64 / ChaCha20）未实现
 
 ## 依赖与环境
 
@@ -468,6 +482,9 @@ NKEYS=4        ：块密钥流 = XOR over t of mix64(key[t] + (blk+t)*gamma[t])
 | `tests/test-structure-resume.sh` | 续跑（offset 分配器）/ 桩结构不变量（含 L1 缓存断言） |
 | `tests/test-stub-randomize.sh` | 桩随机化：随机生效/产物零 legacy 痕迹/续跑复用随机名/改名 fail-fast/派生物同步/** 规则两轮水位线（6 断言组） |
 | `tests/test-link-dex2c.sh` | **联动端到端**（2026-10）：随机桩名 → `--emit-stub-filter` → dex2c 转译 → 算法进 so。7 项断言：dn/mix64/keyByte 三方法转译、壳 `d()` 与构造器不转译、splitmix64 常量内联进 C、dn→mix64 反调指向 so 内导出符号。不依赖 android.jar/NDK/真机 |
+| `tests/test-cstrdec.sh` | **【C 桩】三方对拍（291 断言）**：C ↔ Python 的 Base64/密钥流/加解密往返；含 offset%8 全部 residue、emoji、5188B 长串、非法输入、fail-closed。另断言"不得回退到 RegisterNatives" |
+| `tests/test-cstrdec-vs-java.sh` | **【C 桩】vs 真实 Java 桩（184 项）**：反射调用 `StrDec.dn()`，逐字节比对 + UTF-8→UTF-16 码元比对。这是"C 实现能替换 Java 实现"的唯一凭证 |
+| `tests/test-cstrdec-e2e.sh` | **【C 桩】端到端闭环（13 项）**：真实 `encrypt-strings.py --stub-impl native` 产物 → 抠出密文 → C 解开 → 与原文比对；含 apktool 真汇编往返与结构断言 |
 
 > 联动套件只证明**联动语义**（filter 命中 + 转译产物正确），不覆盖全流程
 > （apktool 回编 + NDK 编译 + 真机启动）——后者需 CI/真机环境。
