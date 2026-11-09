@@ -99,6 +99,12 @@ EXCLUDE_ABI=""          # 带值参数标准件(报错四十四):--exclude-abi �
 WANT_STRINGENC=0; STRING_RULES=""
 WANT_ANTIDIFF=0
 WANT_DEX2C_STUB=0     # 联动子复选框:把解密桩内核 dn() 也抽进 dex2c(见 STEP2 顺序手术)
+# --stringenc-native（2026-11-09）：解密桩改成纯 C 实现。
+#   java（默认）：现有 StrDec.java 桩，零漂移
+#   native      ：算法在 csrc/nc_strdec.c，编进 libnc.so，dex 侧只有 native 声明
+# 与 --dex2c-stub 互斥（那需要 Java 内核才能转译）。
+STUB_IMPL="java"
+WANT_NATIVE_STUB=0
 # Amice 混淆（2026-11-05）：编译期 pass，作用于 so 的 .text。
 # 只影响 NDK 编译参数，不影响 dex 层任何步骤。
 WANT_OBFUSCATE=0
@@ -137,6 +143,8 @@ while [[ $# -gt 0 ]]; do
 
     --anti-diff) WANT_ANTIDIFF=1; shift ;;
     --dex2c-stub) WANT_DEX2C_STUB=1; shift ;;
+    # 纯 C 解密桩（2026-11-09）。隐含 stringenc 开启（没有字符串加密就没有桩）。
+    --stringenc-native) WANT_STRINGENC=1; WANT_NATIVE_STUB=1; STUB_IMPL=native; shift ;;
     # Amice 混淆（2026-11-05）。子复选框隐含父模块开启（与 --packer-smaller 同惯例）。
     # 值为空时由 lib-ndk.sh 按"父模块开、子项默认"取默认组合（MBA on / flatten off）。
     --obfuscate) WANT_OBFUSCATE=1; shift ;;
@@ -164,6 +172,23 @@ fi
 if [[ $WANT_DEX2C_STUB -eq 1 ]]; then
   if [[ $WANT_STRINGENC -eq 0 ]]; then
     log_err "--dex2c-stub 必须与 --stringenc 同时勾选(没有字符串加密就没有解密桩可抽)"
+    exit 1
+  fi
+fi
+
+# ── 纯 C 桩的前提与互斥（2026-11-09）────────────────────────────────
+# 与 --dex2c-stub 互斥：那条路的前提是"Java 内核存在、交给 dex2c 转译"，
+# 而 native 桩根本没有 Java 内核。两者同时出现 = 配置自相矛盾，
+# fail-fast 好过让其中一条静默失效（历史上"以为防了其实没防"都是这样来的）。
+if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
+  if [[ $WANT_DEX2C_STUB -eq 1 ]]; then
+    log_err "--stringenc-native 与 --dex2c-stub 互斥"
+    log_err "    前者把算法编进 libnc.so（无需 dex2c）；后者靠 dex2c 转译 Java 内核。"
+    log_err "    两者同时勾 = 没有可转译的对象，请只保留一个。"
+    exit 1
+  fi
+  if [[ $WANT_STRINGENC -eq 0 ]]; then
+    log_err "--stringenc-native 必须与 --stringenc 同时勾选"
     exit 1
   fi
 fi
@@ -223,6 +248,26 @@ if [[ $WANT_STRINGENC -eq 1 ]]; then
 fi
 
 log "勾选 $TOTAL 个模块，按固定顺序执行: sigcheck → dex2c → stringenc → anti-diff → packer"
+
+# ── 纯 C 桩：种子必须在 STEP3 之前定下来（2026-11-09）──────────────
+# 为什么：C 侧的 RegisterNatives 需要桩类名，而桩名与种子同源生成。
+# 种子一旦在 STEP5 才生成，STEP3 就无法预算桩名（实测就是这么失败的）。
+# 这里生成一次，STEP3 用它算桩名、STEP5 用同一个种子 + 同一个桩名加密，
+# 两侧必然一致。
+# ⚠️ 种子是密钥材料：只写进 $WORK（进程结束即删），不打印明细。
+if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
+  if [[ -n "${CSTUB_SEED_HEX:-}" ]]; then
+    if [[ ! "$CSTUB_SEED_HEX" =~ ^[0-9a-fA-F]{16}$ ]]; then
+      log_err "CSTUB_SEED_HEX 必须是 16 位 hex（调试/复现用）"
+      exit 1
+    fi
+    printf '%s\n' "${CSTUB_SEED_HEX,,}" > "$WORK/stub_seed_for_decl.txt"
+    log_info "纯 C 桩种子: 使用外部指定值（仅调试）"
+  else
+    python3 -c "import secrets;print(secrets.token_hex(8))" > "$WORK/stub_seed_for_decl.txt"
+    log_info "纯 C 桩种子: 已生成（8 字节随机，不落日志）"
+  fi
+fi
 
 # ── STEP 1: 提取证书指纹，生成 sig_hash.h + sig_guard2.h（仅 --sigcheck） ──
 # 2026-10 双线:同时生成第二份【独立】标准答案(sig_guard2.h),供
@@ -425,7 +470,13 @@ fi
 # obfuscate（2026-11-05）也在其列 —— 它是编译期 pass，必须有 so 可编。
 # ⚠️ 但单独勾 obfuscate 而不勾任何 so 来源，等于没有可混淆的对象。
 #    那种组合在下面有显式 fail-fast（不能静默跑一遍没效果的流程）。
-if [[ $WANT_SIGCHECK -eq 1 || $WANT_TRANSPILE -eq 1 || $WANT_ENVCHECK -eq 1 ]]; then
+# ⚠️ 2026-11-09 扩条件：$WANT_NATIVE_STUB 也要编 so。
+#    纯 C 桩把算法放在 libnc.so 里，不编 so = 桩没有任何实现
+#    → 首个加密字符串即 UnsatisfiedLinkError（启动闪退）。
+#    这条打破了"纯 stringenc 整体跳过 STEP3/4"（报错二十三）的既有规则，
+#    但只对 native 桩这一条新路径生效，Java 桩组合行为完全不变。
+if [[ $WANT_SIGCHECK -eq 1 || $WANT_TRANSPILE -eq 1 || $WANT_ENVCHECK -eq 1 \
+      || $WANT_NATIVE_STUB -eq 1 ]]; then
 log_step 3 6 "组装 NDK 工程"
 mkdir -p "$WORK/project"
 
@@ -575,6 +626,135 @@ PYEOF
     # 没勾 dex2c：由 nc_link_jni.c 自己提供 JNI_OnLoad（宏在源码里以
     # 默认开启的方式给出，见下）。这里只做提示。
     echo "[jni] 未勾 dex2c → nc_link_jni.c 提供 JNI_OnLoad"
+  fi
+fi
+
+# ── 纯 C 解密桩的注册注入（2026-11-09）──────────────────────────────
+# 与上面 NcLink 完全同款的问题：一个 so 只能有一个 JNI_OnLoad。
+# 本模块【不提供】自己的 OnLoad，而是往"已有的那个"里插一行调用
+# nc_strdec_bootstrap()。三种持有者都要覆盖：
+#   ① 有 dex2c  → Dex2C.cpp 的 OnLoad
+#   ② 无 dex2c 但有 sigcheck → nc_link_jni.c 的 OnLoad
+#   ③ 两者都没有（纯 stringenc-native）→ 本段自己生成一个最小 OnLoad
+#
+# 漏掉 ③ 的症状：so 编出来了、桩也有 native 声明，但没人 RegisterNatives
+# → 首个加密字符串即 UnsatisfiedLinkError（启动闪退，且 logcat 只报
+#   "No implementation found for ... ncDec"，不指向"没注册"这个真因）。
+if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
+  _cstub_jni_dst=""
+  if [[ $WANT_TRANSPILE -eq 1 ]]; then
+    _cstub_jni_dst="$WORK/project/jni/nc"
+  else
+    _cstub_jni_dst="$WORK/project/jni"
+  fi
+
+  _injected=0
+
+  # ① 有 dex2c：往 Dex2C.cpp 的 OnLoad 里插
+  if [[ $WANT_TRANSPILE -eq 1 && -f "$WORK/project/jni/nc/Dex2C.cpp" ]] \
+     && ! grep -q 'nc_strdec_bootstrap' "$WORK/project/jni/nc/Dex2C.cpp"; then
+    python3 - "$WORK/project/jni/nc/Dex2C.cpp" <<'PYEOF_CSTUB'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+i = s.find('JNI_OnLoad')
+if i < 0:
+    sys.exit('❌ Dex2C.cpp 里找不到 JNI_OnLoad')
+tail = s[i:]
+m = re.search(r'\n(\s*)return\s+JNI_VERSION_1_6\s*;', tail)
+if not m:
+    sys.exit('❌ Dex2C.cpp 的 JNI_OnLoad 里找不到 return JNI_VERSION_1_6;')
+inc_anchor = re.search(r'^#include[^\n]*\n', s, re.M)
+if inc_anchor is None:
+    sys.exit('❌ Dex2C.cpp 里找不到 #include 锚点')
+if 'nc_strdec.h' not in s:
+    s = (s[:inc_anchor.end()]
+         + '/* 2026-11-09: 纯 C 解密桩的 RegisterNatives（桩类名构建期注入）。\n'
+           ' * 必须 include 头文件而非本地声明 —— 本文件是 C++，本地声明会\n'
+           ' * 按 C++ 规则 mangled，而 nc_strdec_jni.c 导出的是 C 符号。 */\n'
+           '#include "nc_strdec.h"\n'
+         + s[inc_anchor.end():])
+    i = s.find('JNI_OnLoad')
+    tail = s[i:]
+    m = re.search(r'\n(\s*)return\s+JNI_VERSION_1_6\s*;', tail)
+ind = m.group(1)
+ins = ('\n' + ind + '/* 纯 C 解密桩：注册 ncDec/ncSetKey 到本次随机桩类。\n'
+       + ind + ' * 返回值忽略 —— 注册失败会让解密走 fail-closed（返回密文），\n'
+       + ind + ' * 不崩；由真机日志里的"字符串全是密文"暴露。 */\n'
+       + ind + 'if (nc_strdec_bootstrap(vm, env) != 0) {\n'
+       + ind + '    /* 不返回 JNI_ERR：dex2c 自己的注册可能已经成功，\n'
+       + ind + '     * 因桩注册失败而整体 JNI_ERR 会把 dex2c 也一起废掉。 */\n'
+       + ind + '}\n')
+pos = i + m.start()
+s = s[:pos] + ins + s[pos:]
+open(p, 'w', encoding='utf-8').write(s)
+print('[cstub] Dex2C.cpp 已插入 nc_strdec_bootstrap 调用')
+PYEOF_CSTUB
+    grep -q 'nc_strdec_bootstrap' "$WORK/project/jni/nc/Dex2C.cpp" && _injected=1
+    [[ $_injected -eq 1 ]] && echo "[cstub] 注册注入: Dex2C.cpp 的 JNI_OnLoad"
+  fi
+
+  # ② 无 dex2c 但有 sigcheck：往 nc_link_jni.c 的 OnLoad 里插
+  if [[ $_injected -eq 0 && $WANT_SIGCHECK -eq 1 ]] \
+     && [[ -n "$SIG_DST" && -f "$SIG_DST/nc_link_jni.c" ]] \
+     && ! grep -q 'nc_strdec_bootstrap' "$SIG_DST/nc_link_jni.c"; then
+    python3 - "$SIG_DST/nc_link_jni.c" <<'PYEOF_CSTUB2'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+anchor = '#include "nc_link_jni.h"\n'
+if anchor not in s:
+    sys.exit('❌ nc_link_jni.c 里找不到 include 锚点')
+if 'nc_strdec.h' not in s:
+    s = s.replace(anchor, anchor + '#include "nc_strdec.h"\n', 1)
+# 找到 JNI_OnLoad 函数体内、nc_link_register_natives 之后插入
+m = re.search(r'(\n(\s*)if\s*\(\s*nc_link_register_natives\(env\)[^\n]*\n)', s)
+if not m:
+    sys.exit('❌ nc_link_jni.c 的 JNI_OnLoad 里找不到 nc_link_register_natives 调用')
+ind = m.group(2)
+ins = ('\n' + ind + '/* 纯 C 解密桩（2026-11-09）：同一 OnLoad 里顺带注册。\n'
+       + ind + ' * 失败不影响 NcLink 的判决 —— 解密侧会 fail-closed。 */\n'
+       + ind + '(void)nc_strdec_bootstrap(vm, env);\n')
+s = s[:m.end(1)] + ins + s[m.end(1):]
+open(p, 'w', encoding='utf-8').write(s)
+print('[cstub] nc_link_jni.c 已插入 nc_strdec_bootstrap 调用')
+PYEOF_CSTUB2
+    grep -q 'nc_strdec_bootstrap' "$SIG_DST/nc_link_jni.c" && _injected=1
+    [[ $_injected -eq 1 ]] && echo "[cstub] 注册注入: nc_link_jni.c 的 JNI_OnLoad"
+  fi
+
+  # ③ 两者都没有：自己生成最小 OnLoad（纯 stringenc-native 组合）
+  if [[ $_injected -eq 0 ]]; then
+    cat > "$_cstub_jni_dst/nc_strdec_onload.c" <<'COF'
+/* nc_strdec_onload.c — 纯 C 解密桩独有的 JNI_OnLoad（2026-11-09）
+ *
+ * 何时生成：只勾 --stringenc-native，既没勾 dex2c 也没勾 sigcheck 时。
+ * 那条组合里工程中没有任何 JNI_OnLoad（lib-ndk.sh 会扫描源码，
+ * 没有定义就不往 version script 里声明），桩的 RegisterNatives 无处安放。
+ *
+ * 一旦有其他模块提供 OnLoad，本文件不会被生成 —— 一个 so 只能有一个。
+ */
+#include <jni.h>
+#include "nc_strdec.h"
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved)
+{
+    JNIEnv *env;
+    (void)reserved;
+    if (vm == NULL || (*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_ERR;
+    }
+    if (nc_strdec_bootstrap(vm, env) != 0) {
+        /* fail-closed：桩注册不上 = 解密能力不存在。
+         * 这里返回 JNI_ERR 是刻意的 —— 本组合里没有别的模块需要这个 so，
+         * 与其带着"解不了密"的半残状态跑（所有字符串变密文），不如在
+         * 加载点就炸（Guard 的 catch(UnsatisfiedLinkError) 会处置）。 */
+        return JNI_ERR;
+    }
+    return JNI_VERSION_1_6;
+}
+COF
+    echo "[cstub] 注册注入: 生成了独立的 JNI_OnLoad（nc_strdec_onload.c）"
   fi
 fi
 if [[ $WANT_ENVCHECK -eq 1 ]]; then
@@ -742,6 +922,97 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   log_info "混淆用 NDK: $AMICE_NDK_HOME（bundle 自带，与插件配套）"
 fi
 
+# ── 纯 C 解密桩的源码（2026-11-09）────────────────────────────────
+# 放在 ndk_write_mk 之前：mk 用 wildcard 收 *.c，拷晚了不会被编进去
+# （报错十一同型：mk 在 include $(BUILD_SHARED_LIBRARY) 那一刻快照源文件列表）。
+#
+# 两个文件必须一起拷（漏 .c = 链接缺符号；漏 .h = 编译期 file not found）。
+# JNI 层单独一个文件，是为将来"桩搬进别处"留的口子 —— 只换 JNI 边界。
+if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
+  if [[ $WANT_TRANSPILE -eq 1 ]]; then
+    _cstub_dst="$WORK/project/jni/nc"
+  else
+    _cstub_dst="$WORK/project/jni"
+  fi
+  mkdir -p "$_cstub_dst"
+  cp "$ROOT/scripts/string-enc/csrc/nc_strdec.c"     "$_cstub_dst/"
+  cp "$ROOT/scripts/string-enc/csrc/nc_strdec.h"     "$_cstub_dst/"
+  cp "$ROOT/scripts/string-enc/csrc/nc_strdec_jni.c" "$_cstub_dst/"
+  # NKEYS 档位必须与 encrypt-strings.py 一致（两侧不同 = 全包乱码）。
+  # 这里从 Python 侧抽真值，抽不到即 fail-fast —— 不写死常量。
+  _nk="$(python3 -c "
+import sys; sys.path.insert(0, '$ROOT/scripts/string-enc')
+import native_stub
+print(native_stub.NC_STRDEC_NKEYS)
+" 2>/dev/null)" || _nk=""
+  if [[ -z "$_nk" ]]; then
+    log_err "读不到 native_stub.NC_STRDEC_NKEYS —— 纯 C 桩的档位契约无法确认"
+    log_err "    （C 侧 NKEYS 与 Python 侧不一致 ⇒ 构建期加密 / 运行期解密不同源）"
+    exit 1
+  fi
+  # ── 桩类描述符：必须【在 STEP3 就算出来】，不能等 STEP5 ────────────
+  # 顺序困局（2026-11-09 本地实测踩到）：
+  #   C 侧 RegisterNatives 需要真实类名（桩名每包随机）；
+  #   而桩是 stringenc 在 STEP5 才注入的，STEP3 时组件标记还不存在。
+  # 第一版从 stringenc-components.json 读 → STEP3 必然失败：
+  #   "找不到组件标记 ... 无法得知本次的随机桩名"
+  #
+  # 解法：不搬整个 stringenc（那会破坏 STEP2 的 dex2c 顺序），
+  # 只把【桩名】这一个信息提前算出来（emit-stub-decl 子命令）。
+  # 名字的生成规则不依赖解包目录内容，所以提前算与 STEP5 再算结果一致 ——
+  # 前提是【两边都读到同一个组件标记，或都走同一次随机】。这里用后者：
+  # 把算出来的名字写进 $WORK/cstub_decl.txt，STEP5 通过 --stub-name 复用。
+  _cstub_seed_hex="$(cat "$WORK/stub_seed_for_decl.txt" 2>/dev/null || true)"
+  if [[ -z "$_cstub_seed_hex" ]]; then
+    log_err "内部错误：没有本轮的桩种子（stub_seed_for_decl.txt）"
+    exit 1
+  fi
+  _decl_spec=""
+  if [[ -n "${CSTUB_FIXED_NAME:-}" ]]; then
+    _decl_spec="--stub-name $CSTUB_FIXED_NAME"
+  fi
+  _decl="$(python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
+             emit-stub-decl "$WORK/decompiled" "$_cstub_seed_hex" $_decl_spec \
+           2>&1)" || {
+    log_err "emit-stub-decl 失败：$_decl"
+    exit 1
+  }
+  _stub_class="$(printf '%s' "$_decl" | cut -f1)"
+  _stub_pkg_dot="$(printf '%s' "$_decl" | cut -f3)"
+  _stub_cls_name="$(printf '%s' "$_decl" | cut -f4)"
+  if [[ -z "$_stub_class" || "$_stub_class" != */* ]]; then
+    log_err "emit-stub-decl 输出无法解析: $_decl（期望 4 个 tab 分隔字段）"
+    exit 1
+  fi
+  # 存下来给 STEP5 的 encrypt-strings.py --stub-name 复用，
+  # 保证"C 侧注册的类"与"dex 里实际生成的类"是同一个。
+  printf '%s.%s:%s\n' "$_stub_pkg_dot" "$_stub_cls_name" \
+    "$(printf '%s' "$_decl" | cut -f2)" > "$WORK/cstub_decl.txt"
+  log_info "纯 C 桩类名（构建期预定）: L$_stub_class;"
+  # 生成 C 侧的编译期常量头：桩类名 + 档位。与 sig_hash.h 同型
+  # （构建期生成、不进 git、由 C 侧 include）。
+  cat > "$_cstub_dst/nc_strdec_cfg.h" <<EOF
+/* nc_strdec_cfg.h — 由 protect.sh 构建期生成，不进 git（2026-11-09）
+ *
+ * 为什么必须生成而不是写死：桩类名每包随机（防固定签名），
+ * C 侧 RegisterNatives 的 FindClass 需要真名。
+ */
+#ifndef _NC_STRDEC_CFG_H_
+#define _NC_STRDEC_CFG_H_
+
+/* 桩类（斜杠分隔，供 FindClass 用） */
+#define NC_STRDEC_STUB_CLASS "$_stub_class"
+
+/* 密钥档位：必须与 native_stub.NC_STRDEC_NKEYS 一致 */
+#ifndef NC_STRDEC_NKEYS
+#  define NC_STRDEC_NKEYS $_nk
+#endif
+
+#endif
+EOF
+  echo "[cstub] 纯 C 解密桩: 类=$_stub_class NKEYS=$_nk"
+fi
+
 ndk_write_mk "$WORK/project/jni" nc "$GUARD_LIB_DIR" "$_OBF_SPEC"   # mk 模板唯一来源（报错十一），模块名固定 nc
 
 # ── 通用段标记（2026-10 设施化第2层）──────────────────────────────
@@ -789,6 +1060,60 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   fi
   echo "[mark] 完成：$MARKED 处 .ncx 标记（含探针与转译函数）"
 
+fi
+
+# ── 纯 C 解密桩的段标记（2026-11-09）────────────────────────────────
+# 为什么必须做：native 桩的算法就在 nc_strdec.c 里，不标记 = 整份算法
+# 以明文躺在 .text，`objdump -d` 直接读出 mix64 常量与密钥流结构，
+# 前面所有"dex 侧看不到算法"的努力全部落空。
+#
+# 标哪些：nc_strdec_jni_decrypt / nc_strdec_jni_set_key（真正的算法入口）
+# 不标哪些：nc_strdec_register_natives / nc_strdec_bootstrap
+#          —— 它们是 JNI_OnLoad 的调用方，锁进 .ncx 就会"解锁前调用密文"
+#             死锁（与 nc_link.c 的 ncVerify/heartbeat 同一条纪律）。
+#
+# 用 so_section_mark.py 的 --pattern 自定义正则（上游 nox 的通用设施，
+# 不新增脚本）：匹配 `jstring nc_strdec_jni_decrypt(` / `void nc_strdec_jni_set_key(`。
+# ⚠️⚠️ 标哪个文件是这一步最容易搞错的地方（2026-11-09 自查纠正）：
+#   第一版标的是 nc_strdec_jni.c 的 decrypt/set_key，那就是"加密了壳、
+#   核留在明文"—— nc_strdec_jni.c 只是 JNI 类型转换与缓存，
+#   真正的算法（mix64 常量、密钥流结构、Base64 解码）全在 nc_strdec.c。
+#   与被外部实测报告打 2.5 分的那个错误完全同型。
+#
+# 正确对象（算法层，全在 nc_strdec.c）：
+#   nc_strdec_decrypt      解密主流程（块展开 + XOR）
+#   nc_block_ks            密钥流块生成（含 splitmix64 与 NKEYS 异或合并）
+#   nc_mix64               splitmix64 终混合（算法指纹所在）
+#   nc_strdec_b64_decode   Base64 解码
+#   nc_strdec_utf8_to_utf16 UTF-8 解码
+#
+# 不标（调用方 / 门槛函数，标了会死锁或纯属浪费）：
+#   nc_strdec_has_key      只是读一个 flag
+#   nc_strdec_set_key      只在 <clinit> 调一次
+if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
+  echo "[mark] 段标记：纯 C 解密桩【算法层】→ .ncx"
+  python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec.c" \
+    --pattern '^[ \t]*((?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_strdec_decrypt|nc_strdec_b64_decode|nc_strdec_utf8_to_utf16|nc_block_ks|nc_mix64)[ \t]*\()' \
+    --section .ncx \
+    -v 2>&1 | sed 's/^/  [mark] /' || {
+    echo "❌ 纯 C 解密桩段标记失败 —— 算法将以明文留在 .text" >&2
+    exit 1
+  }
+  # 静默失防守卫：算法层 5 个函数必须全部标上。
+  # 少标一个 = 那部分算法明文可读，而这不会有任何运行期症状
+  # （功能完全正常），属于最难发现的"假绿"。
+  # 计数用固定串（-F）：'section(".ncx")' 里的引号/点号在正则下都要转义，
+  # 手写正则极易与 so_section_mark.py 的实际输出形式错开（本次就错了：
+  # 写成 section("\\.ncx") → grep 收到 \.ncx → 一个都匹配不到 → 假红）。
+  _cstub_marked=$(grep -cF 'section(".ncx")' "$_cstub_jni_dst/nc_strdec.c" 2>/dev/null || true)
+  _cstub_marked="${_cstub_marked:-0}"
+  if [[ -z "$_cstub_marked" || "$_cstub_marked" -lt 5 ]]; then
+    echo "❌ 纯 C 桩段标记只命中 ${_cstub_marked:-0} 处（应为 5：decrypt/b64_decode/utf8/block_ks/mix64）" >&2
+    echo "   → nc_strdec.c 的函数头形态变了，正则已脱节" >&2
+    echo "   → 不许静默放行：那等于算法以明文进产物" >&2
+    exit 1
+  fi
+  echo "[mark] 完成：$_cstub_marked 处 .ncx 标记（纯 C 桩算法层）"
 fi
 
 log_step 4 6 "NDK 编译"
@@ -1106,11 +1431,32 @@ if [[ $WANT_STRINGENC -eq 1 ]]; then
     # 被抽进 so 的方法跳过 —— 它们的字符串会在 so 里,dex 侧没必要再加密
     STRING_ENC_ARGS+=(--exclude-methods "$WORK/project/jni/nc/compiled_methods.txt")
   fi
+  # ── 纯 C 解密桩（2026-11-09）──────────────────────────────────────
+  # 与下面 packer 分支互斥：native 桩没有可搬壳的 Java 类（dex 侧只有
+  # 一个 native 声明 + <clinit>，本身就不含算法，搬壳无收益）。
+  # 密钥注入走 ncSetKey（<clinit> 里 fill-array-data），不经 Java 静态字段。
+  if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
+    # ⚠️ 必须传 --seed-hex + --stub-name：
+    #   种子与桩名都已在 STEP3 之前定下（C 侧已按它生成注册代码），
+    #   这里再随机一次 = 两边的类名/密钥不同 → 解密必失败且不报编译错。
+    _cstub_seed_hex="$(cat "$WORK/stub_seed_for_decl.txt")"
+    _cstub_spec="$(cat "$WORK/cstub_decl.txt")"
+    if [[ -z "$_cstub_seed_hex" || -z "$_cstub_spec" ]]; then
+      log_err "内部错误：纯 C 桩的种子/桩名未在 STEP3 之前定下"
+      exit 1
+    fi
+    log_info "纯 C 桩复用构建期桩名: $_cstub_spec"
+    python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
+      "$WORK/decompiled" "$STRING_RULES" "${STRING_ENC_ARGS[@]}" \
+      --apk "$STEP5_APK" \
+      --stub-impl native \
+      --seed-hex "$_cstub_seed_hex" \
+      --stub-name "$_cstub_spec"
   # ── packer 联动（仅勾了 packer 时）：桩搬进壳 dex ──────────────────
   # ⚠️ 模块化红线：--emit-stub-dex 会【把桩从业务 dex 摘除】。不勾 packer 时
   #    绝不能让这件事发生——那时没有壳 dex 承载桩，摘除 = 运行期 ClassNotFound。
   #    所以只有 WANT_PACKER=1 才传该参数；其余组合与改动前逐字节一致。
-  if [[ $WANT_PACKER -eq 1 ]]; then
+  elif [[ $WANT_PACKER -eq 1 ]]; then
     # --compiled-methods：判断桩是否真被 dex2c 转译。不在其中 → 桩保持明文
     # Java（不 native 化）。缺这个参数会导致「dex2c+stringenc+packer 且不勾
     # --dex2c-stub」组合产出声明 native 却无实现的桩 → 启动闪退。

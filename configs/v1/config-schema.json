@@ -94,6 +94,15 @@
           "default": false,
           "value_kind": "flag",
           "arg_on": "--dex2c-stub"
+        },
+        {
+          "key": "stub_impl",
+          "label": "解密桩用纯 C 实现",
+          "desc": "算法与密钥流编进 libnc.so（.ncx 加密段），dex 侧只剩 native 声明。与「解密桩也抽进 so」互斥（后者靠 dex2c 转译 Java 内核）。性能：首次解密多算几条 mix64，走缓存后无差异",
+          "type": "checkbox",
+          "default": false,
+          "value_kind": "flag",
+          "arg_on": "--stringenc-native"
         }
       ]
     },

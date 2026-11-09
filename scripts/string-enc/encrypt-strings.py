@@ -59,6 +59,10 @@ STUB_FILE = 'StrDec.smali'
 STUB_GEN_MARK = '# nc-strdec-gen v2'          # 桩文件内的生成标记(识别"这是我们写的")
 # 解密主方法名 —— 「只盯最危险一步」的警报器只管这个方法(见 _check_stub_registers)
 STUB_DECRYPT_METHOD = 'd'
+# 桩实现选择（--stub-impl）：'java'（默认）| 'native'
+# 默认 java = 与改动前逐字节一致，零漂移。
+# native 走 csrc/nc_strdec.c（纯 C 算法编进 libnc.so），dex 侧只有声明。
+STUB_IMPL = 'java'
 # 解密内核方法名(2026-10 两层拆分):算法本体在 dn(),d() 只剩 try/catch 壳。
 # 桩随机化只改 d 不改 dn —— dn 是 dex2c 联动要转译的目标(见 protect.sh
 # --dex2c 分支),且它是真正调用系统 Base64 解码工具的方法(报错二十二锚点)。
@@ -2000,6 +2004,45 @@ def main():
         print(f'✅ 清理残留解密桩: {removed} 个')
         return 0
 
+    # 子命令:emit-stub-decl（2026-11-09）
+    #   只【算出】本次要用的随机桩名并写出去，不加密、不注入、不碰 smali。
+    #   为什么需要它：纯 C 桩的 RegisterNatives 需要真实类名，而类名是
+    #   本模块在 STEP5 才生成的（每包随机）。STEP3 编 so 时必须先知道它。
+    #   解法不是"把 stringenc 整体提前"（那会破坏 STEP2 的 dex2c 顺序），
+    #   而是把【名字】这一个信息提前算出来 —— 名字的生成规则不依赖
+    #   解包目录内容（除了撞名检查，而撞名检查用的是同一批随机序列）。
+    #
+    #   输出格式（一行一字段，供 bash 用 IFS 读）：
+    #     <斜杠分隔类名>	<方法名>	<点分包名>	<类名>
+    #   固定名（--stub-name）与随机名都支持；给出 --seed-hex 时不使用。
+    if argv and argv[0] == 'emit-stub-decl':
+        if len(argv) < 3:
+            print('用法: encrypt-strings.py emit-stub-decl <解包目录> '
+                  '<种子hex> [--stub-name 包.类[:方法]]', file=sys.stderr)
+            return 1
+        _dec = argv[1]
+        _seed_hex = argv[2]
+        _spec = None
+        if '--stub-name' in argv:
+            _i = argv.index('--stub-name')
+            if _i + 1 < len(argv):
+                _spec = argv[_i + 1]
+        if len(_seed_hex) != 16:
+            print(f'❌ 种子必须是 16 位 hex（本次 {len(_seed_hex)} 位）', file=sys.stderr)
+            return 1
+        # 与主流程同源：先看组件标记（续跑复用），再 --stub-name，最后随机
+        if not recover_identifiers_from_stamp(_dec):
+            if _spec:
+                apply_stub_identifiers(*parse_stub_name(_spec))
+            else:
+                # 撞名检查需要解包目录；无解包目录时退化为"不检查"
+                # （随机名撞现有类的概率 <10^-5，且真正写入时会再查一次）
+                apply_stub_identifiers(*generate_stub_identifiers())
+        print('%s\t%s\t%s\t%s' % (
+            STUB_DESC[1:-1], STUB_DECRYPT_METHOD,
+            '.'.join(STUB_PKG_DIR), STUB_FILE[:-len('.smali')]))
+        return 0
+
     # 子命令:remove-stub(只摘除桩,不加密不注入)
     #   dex2c 联动的前置轮必须保住桩（--keep-stub-in-dex）让 dex2c 能转译
     #   dn()/mix64()/keyByte() 进 libnc.so；摘除推迟到 STEP5 解包之后再执行。
@@ -2024,6 +2067,11 @@ def main():
     ap.add_argument('--stub-name',
                     help="固定桩名 '包名.类名[:方法名]'(如 com.nc.strdec.StrDec:d),"
                          "仅供测试/复现;不传 = 每包随机生成(生产默认,防引擎固定签名)")
+    ap.add_argument('--stub-impl', choices=('java', 'native'), default='java',
+                    help="解密桩实现：java（默认，现有 Java 桩 + 可选 dex2c 联动）"
+                         "或 native（纯 C，算法在 libnc.so，dex 侧只有 native 声明）。"
+                         "native 模式下 --emit-stub-filter / --emit-stub-dex "
+                         "无意义（不存在 Java 内核可转译），会被显式拒绝。")
     ap.add_argument('--assume-stub-transpiled', action='store_true',
                     help='声明"本次 dex2c 会转译桩内核"（由 protect.sh 在'
                          '--dex2c-stub 联动时传入）。用于 --emit-stub-dex '
@@ -2063,6 +2111,34 @@ def main():
                     help='原始 APK(报错五十九): 给了就从 dex header 读权威方法数,'
                          '据此决定解密桩落在哪个 dex;不给则按扫描估算(保守上浮)')
     args = ap.parse_args(argv)
+
+    global STUB_IMPL
+    STUB_IMPL = args.stub_impl
+
+    # ── native 桩与 Java 专属参数互斥（fail-fast，不静默忽略）──────────
+    # 理由：native 桩没有 Java 内核可转译/可搬壳，这些参数若被静默接受，
+    # 用户会以为联动生效了，实际什么都没发生（历史上"以为防了其实没防"
+    # 的假绿都是这种形态）。
+    if STUB_IMPL == 'native':
+        _conflict = []
+        if args.emit_stub_filter:
+            _conflict.append('--emit-stub-filter（dex2c 联动需要 Java 内核）')
+        if args.emit_stub_dex:
+            _conflict.append('--emit-stub-dex（搬壳需要可汇编的 Java 桩）')
+        if args.compiled_methods:
+            _conflict.append('--compiled-methods（仅用于判断 Java 桩是否被转译）')
+        if args.stub_seed_from_shell:
+            _conflict.append('--stub-seed-from-shell（native 桩的密钥注入走 '
+                             'ncSetKey，不经 Java 静态字段）')
+        if args.assume_stub_transpiled:
+            _conflict.append('--assume-stub-transpiled')
+        if _conflict:
+            print('❌ --stub-impl native 与以下参数不兼容：', file=sys.stderr)
+            for c in _conflict:
+                print('     · ' + c, file=sys.stderr)
+            print('   native 模式下算法在 libnc.so，dex 侧只有 native 声明 —— '
+                  '上述参数所依赖的 Java 内核不存在。', file=sys.stderr)
+            return 1
 
     if not os.path.isdir(args.decompiled):
         print(f'❌ 解包目录不存在: {args.decompiled}', file=sys.stderr)
@@ -2175,11 +2251,38 @@ def main():
             inject_clinit_backfills(path, backfills)
 
     if need_write_stub and total_str > 0:
-        stub_path = write_stub(args.decompiled, seed)
-        stamp = write_components_stamp(args.decompiled, STUB_DESC)
-        if not args.quiet:
-            print(f'  🔧 注入解密桩: {os.path.relpath(stub_path, args.decompiled)}'
-                  f' (组件标记 {os.path.basename(stamp)})')
+        if STUB_IMPL == 'native':
+            # ── 纯 C 桩路径（--stub-impl native）─────────────────────
+            # 算法在 libnc.so（csrc/nc_strdec.c），dex 侧只有 native 声明
+            # + <clinit>（loadLibrary + setKey）。
+            # 桩名/方法名已由上面的随机化逻辑写进 STUB_DESC 等全局变量。
+            import native_stub as _ns
+            stub_path = _ns.write_native_stub(
+                args.decompiled, STUB_DESC, STUB_PKG_DIR, STUB_FILE,
+                STUB_DECRYPT_METHOD, seed.hex(), _pick_smali_root(args.decompiled))
+            stamp = write_components_stamp(args.decompiled, STUB_DESC)
+            # 把"本次用的是 native 实现"写进标记 —— 续跑时据此判断是否
+            # 需要重新生成 C 侧的头文件（Java/native 两种桩互不兼容）。
+            try:
+                with open(stamp, encoding='utf-8') as _fp:
+                    _d = json.load(_fp)
+                _d['stub_impl'] = 'native'
+                _d['nkeys'] = _ns.NC_STRDEC_NKEYS
+                with open(stamp, 'w', encoding='utf-8') as _fp:
+                    json.dump(_d, _fp, ensure_ascii=False, indent=2)
+                    _fp.write('\n')
+            except (OSError, ValueError) as _e:
+                raise SystemExit(f'❌ 写 stub_impl 标记失败: {_e}')
+            if not args.quiet:
+                print(f'  🔧 注入 native 解密桩: '
+                      f'{os.path.relpath(stub_path, args.decompiled)}'
+                      f' (组件标记 {os.path.basename(stamp)})')
+        else:
+            stub_path = write_stub(args.decompiled, seed)
+            stamp = write_components_stamp(args.decompiled, STUB_DESC)
+            if not args.quiet:
+                print(f'  🔧 注入解密桩: {os.path.relpath(stub_path, args.decompiled)}'
+                      f' (组件标记 {os.path.basename(stamp)})')
     # 复用桩的场景 S2 无需任何字段合并:桩里只有种子,续跑时种子原样保留,
     # 新密文用同一种子 + 新区段即可解 —— 这正是 S2 相对 v1/S1 的幂等优势。
 

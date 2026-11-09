@@ -219,7 +219,24 @@ def build_config(args) -> str:
         cfg["stringenc"]["rules_file"] = enc_rules
         # 联动子选项：把桩内核也抽进 so（对应 schema 的 dex2c_stub）
         # --all 隐含打开它：这是保护强度项，不是可选优化
-        if args.dex2c_stub or args.all:
+        # ── 桩实现选择（2026-11-09）──────────────────────────────────
+        # stub_impl 与 dex2c_stub 互斥：前者把算法编进 libnc.so（不需要
+        # dex2c 转译），后者靠 dex2c 转译 Java 内核。同时勾 = 没有可转译
+        # 的对象，protect.sh 会 fail-fast；这里提前拦，省一次云端构建。
+        if args.stringenc_native:
+            if args.dex2c_stub:
+                die("--stringenc-native 与 --dex2c-stub 互斥："
+                    "前者把算法编进 libnc.so（无需 dex2c），"
+                    "后者靠 dex2c 转译 Java 内核。只保留一个。")
+            if args.all:
+                # --all 里 dex2c_stub 是硬编码 True（出厂强度），与 native
+                # 互斥 —— 明确报错而不是静默让步，否则用户以为 native 生效了。
+                die("--all 预设含 dex2c_stub（Java 内核转译），与 "
+                    "--stringenc-native 互斥。请改用逐个开关，例如：\n"
+                    "    --sigcheck --dex2c --stringenc --stringenc-native "
+                    "--antidiff --envcheck --packer")
+            cfg["stringenc"]["stub_impl"] = "native"
+        elif args.dex2c_stub or args.all:
             cfg["stringenc"]["dex2c_stub"] = True
 
     return json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
@@ -248,8 +265,11 @@ def describe_plan(cfg_json: str) -> str:
          if c.get("dex2c", {}).get("enabled") else ""),
         ("字符串加密",
          bool(c.get("stringenc", {}).get("enabled")),
-         ("规则: %s%s" % (c["stringenc"].get("rules_file", ""),
-                          "，解密桩抽进 so" if c["stringenc"].get("dex2c_stub") else ""))
+         ("规则: %s%s" % (
+             c["stringenc"].get("rules_file", ""),
+             "，解密桩=纯C（算法进 libnc.so）"
+             if c["stringenc"].get("stub_impl") == "native"
+             else ("，解密桩抽进 so" if c["stringenc"].get("dex2c_stub") else "")))
          if c.get("stringenc", {}).get("enabled") else ""),
         ("防对比混淆", bool(c.get("antidiff")), ""),
         ("环境检测", bool(c.get("envcheck")), ""),
@@ -691,6 +711,11 @@ def main() -> int:
     r.add_argument("--dex2c-rules", default="",
                    help="Dex2C 类名规则，一行一条。留空 = 自动抽 Manifest 主类"
                         "（需同时勾 sigcheck）。⚠️ 不要填 ** —— 整个 App 转译，上游不支持")
+    r.add_argument("--stringenc-native", action="store_true",
+                   help="解密桩用【纯 C 实现】：算法编进 libnc.so，dex 侧只有 "
+                        "native 声明（不含任何密钥/算法）。需同时开字符串加密；"
+                        "与 --dex2c-stub / --all 互斥。对应 schema 的 "
+                        "stringenc.stub_impl=native。")
     r.add_argument("--dex2c-stub", action="store_true",
                    help="联动：把解密桩内核也抽进 libnc.so（需同时勾 dex2c + stringenc）。"
                         "勾选后走 LINK_STUB 路径 —— 桩先注入再转译，"

@@ -55,6 +55,7 @@ encrypt-strings.py ◄─────────────────┘
 | 文件 | 职责 |
 |---|---|
 | `stub-src/StrDec.java` | **唯一源码真相**。算法只改这里，然后重跑 `build-stub.sh` |
+| `csrc/nc_strdec.c` / `.h` | **纯 C 解密桩**（2026-11-09 新增）：Base64(4-way) + splitmix64 密钥流 + 无 JNI。用于不依赖 dex2c 的路线，见下方「纯 C 桩」节 |
 | `build-stub.sh` | 编译链 javac → d8 → baksmali → 桩骨架 smali（含三道自检） |
 | `stub-src/StrDec.smali` | **自动生成的中间产物，人永远不要手改**（报错二十一/二十二/二十五） |
 | `encrypt-strings.py` | 构建期主脚本：找字符串 → 加密 → 改写 → 注入桩（最大单体） |
@@ -295,6 +296,118 @@ keyByte(JJ)I               --dynamic-register 时 dex 内 Java 调用一律按
 | 报错二十五 | 桩骨架三防线（占位符残留/类体顶层裸指令/so 名合法性）——泛型字段也会撞它（Signature 注解） |
 | 报错四十八 | 桩随机化只改 4 个主变量，import 期派生物（STUB_DOT 与 3 个引用正则）不随重建 → 随机名下续跑水位线失明（offset 复用=静默乱码）、`**` 规则下桩被二次加密、报错二十二/二十四防线失明；**凡派生自主变量的东西，改名时必须同源重建并有断言锁住** |
 | 2026-10 联动三层拆分 | ① `dn()` 拆出 try/catch 后 `new String(out,"UTF-8")` 的受检异常暴露 → 内核须显式 `throws UnsupportedEncodingException`；② 报错二十二自检锚点须从 `d` 改到 `dn`（真正调 Base64 的是内核，沿用旧锚点会误报壳的 `move-result-object` 并放过内核真实风险）；③ **只转 `dn` 不够**——`mix64`/`keyByte` 会留在 dex 被 JNI 反调，splitmix64 常量仍可读，filter 必须三条齐上 |
+
+## 纯 C 解密桩（2026-11-09）
+
+`csrc/nc_strdec.c` 是解密算法的 C 实现，与 `stub-src/StrDec.java` **并列**（不是替换）：
+Java 桩走 dex2c 联动，C 桩走"不依赖引擎"的路线。
+
+### 为什么要它
+
+| | Java 桩（现有） | 纯 C 桩（新增） |
+|---|---|---|
+| 进 so 的方式 | dex2c 转译，要吃**额外一次 apktool 往返**（+30~60s） | 直接编进 `libnc.so` |
+| 依赖 | dex2c 引擎（版本漂移即翻车） | 无 |
+| 算法可见性 | dex2c 全抽后 dex 侧只剩 native 声明 | 同（dex 侧也只有 native 声明） |
+
+**净收益是工程性的（省一个引擎、省一次回编），不是安全性的。** 安全边界见下。
+
+### 两个强度档位（`NC_STRDEC_NKEYS`）
+
+```
+NKEYS=1（默认）：块密钥流 = mix64(key[0] + blk*GAMMA)
+                ↔ 与 StrDec.java / encrypt-strings.py 逐字节等价
+                用途：分阶段验证（C 能替换 Java 的直接凭证）
+
+NKEYS=4        ：块密钥流 = XOR over t of mix64(key[t] + (blk+t)*gamma[t])
+                256 位秘密，猜中一条明文只能解出那一条
+```
+
+**改档位必须两侧同步**（C 的 `NC_STRDEC_NKEYS` ↔ `encrypt-strings.py` 的同名逻辑），
+否则构建期加密与运行期解密不一致 → **全包乱码**，且构建期不报错。
+
+### 已知安全边界（如实记录，别高估）
+
+`NKEYS=1` 时，**若攻击者已拿到算法**（解开了 `.ncx`，或 dump 内存），
+则猜中任意一条明文 → 算出该段密钥流 → 反演 `mix64`（可逆双射）→ 得到种子 → 全包沦陷。
+
+实测：这一步约 6 微秒。`NKEYS=4` 把未知数从 1 个提到 4 个，反推退化为一维搜索
+（2^192），这是唯一有效的加强方式。
+
+⚠️ **加轮数无效**：`mix64` 的每一步（乘法、异或右移）都可逆，
+叠多少层整体仍可逆，攻防成本同比例上涨。实测加 512 轮，攻/防成本比仍是 3.4e-05。
+
+### Base64 为什么保留、又为什么要重写实现
+
+必须保留：payload 要落进 smali 字符串字面量，原始字节可能含 `0x00`/`"`/`\`，会破坏语法。
+代价是体积 +37% —— 这笔交易是必要的。
+
+但**实现必须 4 字符一组**：逐字符版在真实负载下慢约 20 倍
+（1.11 ms vs 0.05 ms / 1.3 万条），而它是整条解密链路里最大的一笔开销，
+**比密钥流生成本身大一个数量级**。
+
+```
+现状整包第一次全解： 密钥流 0.07ms + Base64 1.11ms = 1.18ms
+4-way 之后：         密钥流 0.07ms + Base64 0.05ms = 0.12ms
+```
+
+### 测试
+
+| 套件 | 覆盖 | 依赖 |
+|---|---|---|
+| `tests/test-cstrdec.sh` | **287 断言**：C↔Python 三方对拍（Base64/密钥流/往返），含 offset%8 全部 residue、emoji、5188B 长串、非法输入、fail-closed | clang + python3 |
+| `tests/test-cstrdec-vs-java.sh` | **152 条**：C vs **真实 StrDec.java**（反射调 `dn()`）逐字节一致 | clang + JDK（缺失 skip） |
+
+**反向验证**（必须做，否则是假绿）：
+- 把块展开内层 `j` 改成固定从 0 起（历史事故原型）→ 152 条里 133 条变红
+- 把 Base64 4-way 的字符顺序互换 → 全部解析失败
+
+### 接入流水线（2026-11-09 已完成）
+
+`protect.sh --stringenc-native` 走这条路。默认关闭（`--stub-impl java`），
+现有组合行为零漂移。
+
+**改动面（4 个文件）**：
+
+| 文件 | 改动 |
+|---|---|
+| `encrypt-strings.py` | 新增 `--stub-impl {java,native}`；native 与 4 个 Java 专属参数互斥（fail-fast） |
+| `native_stub.py` | 新增：native 桩 smali 生成 + 生成期自检 |
+| `protect.sh` | STEP3/4 触发条件加 native 桩；拷 C 源；生成 `nc_strdec_cfg.h`；JNI_OnLoad 三方归属；算法层段标记 |
+| `protect-modules.yml` | 三套新测试挂 CI |
+
+**三个必须记住的实现决定**：
+
+1. **STEP3/4 触发条件被打破**：原先"纯 stringenc 整体跳过 STEP3/4"（报错二十三）。
+   native 桩必须编 so，故条件加 `|| WANT_NATIVE_STUB`。**只对 native 路径生效**，
+   Java 桩组合完全不变。
+
+2. **JNI_OnLoad 三方归属**：一个 so 只能有一个 OnLoad，已有
+   `Dex2C.cpp`（勾 dex2c）/ `nc_link_jni.c`（勾 sigcheck 无 dex2c）两个潜在提供者。
+   本模块**从不提供** OnLoad，只导出 `nc_strdec_bootstrap()` 供持有者调用；
+   两者都没有时（纯 stringenc-native）由 `protect.sh` 生成一个最小 OnLoad。
+   漏掉第三种情况的症状：`No implementation found for ... ncDec`（启动闪退）。
+
+3. **段标记标的必须是算法层，不是 JNI 层**。
+   第一版标的是 `nc_strdec_jni.c` 的 decrypt/set_key —— 那是"加密了壳、
+   核留在明文"，与外部报告打 2.5 分的那次错误同型。
+   正确对象是 `nc_strdec.c` 里的 5 个函数（decrypt / b64_decode / utf8_to_utf16 /
+   block_ks / mix64）。实测 `.text` 只剩 `set_key`/`has_key` 两个门槛函数，
+   mix64 常量以 `movk` 立即数落在 `.ncx`（锁箱后变密文）。
+
+**验收（本机实测）**：
+
+```
+ndk-build 双 ABI         ✅ arm64 18872B / v7a 10008B
+.ncx 段生成              ✅ arm64 0x3b0 / v7a 0x338
+导出符号                  ✅ 只有 JNI_OnLoad（ncDec/ncSetKey 走 RegisterNatives）
+.text 内算法常量          ✅ 零命中
+现有 stringenc 五套       ✅ 无回归
+新增三套                  ✅ 288 + 184 + 12 项
+```
+
+**尚未验证（如实标注）**：真机启动。需 `--stringenc-native` 出包 →
+装设备 → 确认字符串正确显示 + logcat 无 ULE。这是唯一必须真机的环节。
 
 ## 依赖与环境
 

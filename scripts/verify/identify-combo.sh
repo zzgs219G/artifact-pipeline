@@ -52,9 +52,22 @@ fi
 # stringenc 解密桩：用桩骨架的结构不变量。
 # ⚠️ 不能靠类名——桩类名每包随机（实测全模块产物 grep -c strdec = 0）。
 STRDEC=0
+# ── stringenc 判据：两种桩实现要分别识别（2026-11-09）──────────────
+# 为什么旧判据不够：它靠 `strings | grep GAMMA|keyByte|mix64` 认 Java 桩。
+# 而 native 桩（--stringenc-native）【刻意】让这些常量不出现在 dex ——
+# 算法在 libnc.so 的 .ncx 里。旧判据会把 native 桩产物误判成"没有 stringenc"，
+# 进而把整个组合判错（真机上就会被引向错误方向查问题）。
+#
+#   JAVA 桩：dex 里能找到 GAMMA/keyByte/mix64（算法在 dex）
+#   NATIVE 桩：dex 里能找到 nc-strdec-native 标记 + ncDec/ncSetKey 调用，
+#              且【找不到】GAMMA/keyByte/mix64（这恰恰是它的正确形态）
+STRDEC=0
+STRDEC_IMPL=""
 if unzip -p "$APK" classes.dex >"$TMPD/dex" 2>/dev/null; then
   if strings "$TMPD/dex" 2>/dev/null | grep -E 'GAMMA|keyByte|mix64' >/dev/null; then
-    STRDEC=1
+    STRDEC=1; STRDEC_IMPL="java"
+  elif strings "$TMPD/dex" 2>/dev/null | grep -qE 'nc-strdec-native|ncSetKey'; then
+    STRDEC=1; STRDEC_IMPL="native"
   fi
 fi
 
@@ -64,7 +77,8 @@ printf '  assets/xixin_config        : %s   ← packer 独有\n' "$XIXIN_CFG"
 printf '  assets/xixin_data          : %s   ← packer 独有\n' "$XIXIN_DATA"
 printf '  Manifest 改 Proxy*         : %s   ← packer 独有\n' "$PK_MANIFEST"
 printf '  lib/*/libnc.so             : %s   ← sigcheck / dex2c / envcheck\n' "$LIBNC"
-printf '  stringenc 解密桩           : %s\n' "$STRDEC"
+printf '  stringenc 解密桩           : %s%s\n' "$STRDEC" \
+  "${STRDEC_IMPL:+（实现: $STRDEC_IMPL）}"
 
 IS_PACKER=0
 [[ "$XIXIN_SO" -gt 0 && "$XIXIN_CFG" -gt 0 ]] && IS_PACKER=1
@@ -77,10 +91,17 @@ if [[ "$IS_PACKER" -eq 0 ]]; then
     echo "→ **未加壳，也无模块产物**"
     echo "  可能是原始 APK，或 protect.sh 未成功执行（看 build.log）。"
   elif [[ "$STRDEC" -eq 1 ]]; then
-    echo "→ **全模块但不勾 packer**（guard/dex2c/stringenc/envcheck，无壳）"
+    if [[ "$STRDEC_IMPL" == "native" ]]; then
+      echo "→ **字符串加密（纯 C 桩）+ 部分模块，不勾 packer**"
+      echo "  预期：加载 libnc.so；字符串由 so 里的 ncDec 解密。"
+      echo "  ⚠️ dex 里【不该】出现 GAMMA/keyByte/mix64 —— 那是正确形态"
+      echo "     （算法在 .ncx，不在 dex）。若在 dex 里搜到，说明段标记没生效。"
+    else
+      echo "→ **全模块但不勾 packer**（guard/dex2c/stringenc/envcheck，无壳）"
+      echo "  预期：没有 [kl] 日志（壳 so 不存在）；桩仍在业务 dex 里。"
+      echo "  测试重点：桩能否正常解字符串（纯 Java，不依赖 so）。"
+    fi
     echo "  ⚠️ 这不是壳包：无 .bitcode / 配置 / 载荷抽取，业务 dex 未抽取。"
-    echo "  预期：没有 [kl] 日志（壳 so 不存在）；桩仍在业务 dex 里。"
-    echo "  测试重点：桩能否正常解字符串（纯 Java，不依赖 so）。"
     echo
     echo "  ⚠️ 用 verify-on-device.sh 跑它会因「无 [kl] 日志」判 FAIL ——"
     echo "     那是**预期的**，不是缺陷。"

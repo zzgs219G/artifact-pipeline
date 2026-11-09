@@ -200,6 +200,23 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/string-enc/tests/test-link-dex2c.sh
 
+      # ── 纯 C 解密桩（2026-11-09）──────────────────────────────────
+      # 两套：① 三方对拍（C↔Python，287 断言，需 clang+python3）
+      #       ② C↔真实 Java 桩逐字节对拍（152 条，需 JDK；无 JDK 则 skip）
+      # 分两套的原因：②对拍的是"线上正在用的实现"，是 C 能否替换它的
+      # 唯一凭证；①只证明 C 与参考实现一致，替代不了②。
+      - name: 纯 C 解密桩三方对拍（287 断言）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/string-enc/tests/test-cstrdec.sh
+
+      - name: 纯 C 解密桩 vs 真实 Java 桩（184 项）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/string-enc/tests/test-cstrdec-vs-java.sh
+
+      - name: 纯 C 解密桩端到端闭环（加密→产物→C 解出原文）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/string-enc/tests/test-cstrdec-e2e.sh
+
       # ── 第三批（2026-11-01）：so 层与签名校验，需要 nox 源码 / clang ──
       # 这批覆盖 Bug 1 那类"so 侧缺实现导致装机闪退"的事故面，
       # 也是历史上唯一靠真机才能发现的地方 —— 现在至少有宿主端断言兜底。
