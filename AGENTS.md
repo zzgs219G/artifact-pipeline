@@ -45,7 +45,7 @@ AI 不得"顺手优化"、"重构"、"重命名"、"整理格式"。它们的正
 > 与 `scripts/guard/src/` 下的 nc_guard_* 与 so-section 脚本）
 > 均已不存在。跨仓库边界见 §1.1，冻结契约随源码一起搬到 nox 的 `AGENTS.md`。
 >
-> 📖 **上游仓库 nox 的完整说明（结构 / CLI / 18 项自测 / 两种分发形态 /
+> 📖 **上游仓库 nox 的完整说明（结构 / CLI / 23 项自测 / 两种分发形态 /
 > 加密契约 / 改法与发版流程）见 `docs/上游仓库-nox.md`**。
 
 ### 1.0 本仓库内的冻结清单
@@ -77,7 +77,7 @@ tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
   只有 *.h + *.py + lib/<abi>/libnox.a，【无 .c】
 ```
 
-> 📖 **上游仓库的完整说明见 `docs/上游仓库-nox.md`**（结构 / CLI / 18 项自测 /
+> 📖 **上游仓库的完整说明见 `docs/上游仓库-nox.md`**（结构 / CLI / 23 项自测 /
 > 两种分发形态 / 加密契约 / 改法与发版流程）。本节只讲跨仓库边界。
 
 - **改设施 = 去 nox 仓库改**，冻结契约见该仓库的 `AGENTS.md`。本仓库对它的
@@ -192,7 +192,7 @@ git diff                          # 自查: 只含预期改动
 >
 > | 层 | 内容（与 workflow 的 step 一一对应） | 触发 |
 > |---|---|---|
-> | `test` job 第一批（<10s） | 文档路径校验 / schema 结构 / resolve-config 37 用例 / workflow yml / smali 参数槽 / dex 版本头 / **inject-loadlib 73 断言** / **mark-native 42 断言** | 按改动范围过滤，与构建**并行** |
+> | `test` job 第一批（<10s） | 文档路径校验 / schema 结构 / resolve-config 40 用例 / workflow yml / smali 参数槽 / dex 版本头 / **inject-loadlib 73 断言** / **mark-native 42 断言** | 按改动范围过滤，与构建**并行** |
 > | `test` job 第二批（~4min） | anti-diff 冒烟 / **dex 容量 33 断言** / packer 26 项 / **stringenc 五套**（含 apktool 真汇编、密钥流 468 例、联动端到端） | 仅改代码时跑 |
 > | `test` job 第三批（~5min） | **so-lock 52 项** / sig-guard2 / mem-readable / lsgs-strings（需 `../nox` 源码；CI 用 `setup-toolchain` 的 `nox-source: true`，**ref 为 `main` 而非 tag**） | 仅改代码时跑 |
 > | 本地手工 | `javacheck`（需 `ndk-build`）/ `packer-wiring`（需 `zipalign`）/ **`sig-verify`（需真实已签名 APK 夹具）** | **CI 不跑**，改动后必须本地跑 |
@@ -201,7 +201,7 @@ git diff                          # 自查: 只含预期改动
 > - **`sig-verify` 不在 CI**。workflow 里有显式注释：该脚本没有 APK 时是
 >   "skip + exit 0"，接进来等于"0 通过 0 失败"的**假绿**，比不接更糟。
 >   本文此前把它列在第三批，是错的。
-> - **CI 不锁 nox tag**。nox 最新 tag 是 `v0.4.0`，它早于修复 `nc_guard_jni`
+> - **CI 不锁 nox tag**。当时的 `v0.4.0`（现在最新是 `v0.9.11-obf`，共 22 个 tag）早于修复 `nc_guard_jni`
 >   缺失的提交（`1f1a732`），锁它等于测旧代码；且 `v0.4.2` 这个 tag
 >   **在 nox 仓库里根本不存在**（当初凭 `tools/nox/VERSION` 猜的，
 >   checkout 直接失败）。现用 `ref: main`。

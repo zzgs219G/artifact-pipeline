@@ -55,13 +55,13 @@
    ```
 3. **改完必须换 zip 并删解压产物**：
    ```bash
-   cd ../nox && ./test.sh                     # 18 通过 0 失败
+   cd ../nox && ./test.sh                     # 23 通过 0 失败（2026-11-09 实测）
    export ANDROID_NDK_HOME=/path/to/ndk-r27d
    bash scripts/make-zip-lib.sh <版本号>       # 静态库形态（生产用）
    cp dist/nox-<版本>.zip ../artifact-pipeline/tools/nox.zip
    rm -rf ../artifact-pipeline/tools/nox      # ← 不删会静默用旧版
    ```
-4. **两个 tag 陷阱**：nox 最新 tag 是 **`v0.4.0`**（不是 v0.4.2，那个不存在）；
+4. **两个 tag 陷阱**：nox 现有 **22 个 tag，最新是 `v0.9.11-obf`**（`v0.4.2` 仍然不存在）；
    CI clone nox 用的是 `ref: main`，不是 tag。详见 `上游仓库-nox.md` §8。
 
 ---
@@ -413,7 +413,7 @@ RELAY_TOKEN=... python3 scripts/trigger_build.py --sigcheck --stringenc \
 
 ```bash
 # nox 改了什么（在 nox 仓库）
-cd ../nox && ./test.sh          # 必须 18 通过 0 失败（2026-11-05 实测 18/0）
+cd ../nox && ./test.sh          # 必须 23 通过 0 失败（2026-11-09 实测 23/0）
 
 # 分发包要更新（artifact-pipeline 消费的是 zip，不是你的工作区）
 export ANDROID_NDK_HOME=/data/data/com.termux/files/home/android-ndk-r29-aarch64/android-ndk-r29
@@ -441,7 +441,8 @@ CI 的 `setup-toolchain` action 会校验，源码形态会直接失败：
 
 ⚠️ **不要凭 `tools/nox.zip` 里的 `VERSION` 去写 CI 的 `ref`**——
 那是包版本（形如 `2026.11.02-final`），不是 git tag。nox 仓库的 tag
-只有 `v0.1.0`…`v0.4.0`，当年凭 "v0.4.2" 猜 tag 导致 checkout 直接失败。
+共 22 个（`v0.1.0` … `v0.9.11-obf`），当年凭 "v0.4.2" 猜 tag 导致 checkout 直接失败。
+⚠️ 但"最新 tag 是 v0.4.0"这个说法 2026-11-09 已过期——现在最新是 `v0.9.11-obf`。
 
 ---
 

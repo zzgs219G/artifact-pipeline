@@ -24,7 +24,7 @@
 | 本地路径 | 与本仓库**同级**：`../nox` |
 | 作用 | 把标了 `__attribute__((section(".ncx")))` 的 C 函数加密进独立段，运行时自解密 |
 | 依赖方向 | **单向**：`artifact-pipeline` 消费 nox；nox 不认识本仓库 |
-| 现有 tag | `v0.1.0` … `v0.4.0`（**最新 tag 是 v0.4.0**，没有 v0.4.2） |
+| 现有 tag | 共 22 个，`v0.1.0` … **`v0.9.11-obf`**（最新）。没有 `v0.4.2` |
 
 它不加密"已编好的成品 so"——没有 `.ncx` 段就没有可加密的单元；也不接受
 无证书场景——密钥由 APK 证书派生，读不到就 fail-closed。
@@ -116,7 +116,7 @@ cd ../nox && ./test.sh                    # 用 fixtures/sample.apk
 cd ../nox && ./test.sh /path/to/真机.apk   # 用真实包
 ```
 
-实测输出（2026-11-05 本机复跑）：**`=== 结果: 18 通过, 0 失败 ===`**
+实测输出（2026-11-09 本机复跑）：**`=== 结果: 23 通过, 0 失败 ===`**
 
 | 组 | 断言数 | 验的是什么 |
 |---|---|---|
@@ -312,11 +312,11 @@ bash scripts/lib/tests/test-so-lock.sh       # 需 ../nox 源码形态
 |---|---|---|
 | 包内 `nox/VERSION` | `2026.11.02-final` | `v0.4.2`（`tools/工具包版本.md`） |
 | `tools/nox.zip` sha256 | `432c34593aae9c51…` | `4ca8126c…` |
-| 最新 git tag | `v0.4.0` | —— |
+| 最新 git tag | `v0.9.11-obf`（共 22 个 tag） | —— |
 | CI 用的 nox ref | `main` | `v0.4.2`（`AGENTS.md` §3） |
 
 **为什么 CI 不锁 tag**：`v0.4.2` 这个 tag **在 nox 仓库里根本不存在**
-（最新是 `v0.4.0`，而 `v0.4.0` 早于修复 `nc_guard_jni` 缺失的那个提交
+（当时最新是 `v0.4.0`，而 `v0.4.0` 早于修复 `nc_guard_jni` 缺失的那个提交
 `1f1a732`，锁它等于测旧代码）。当初凭 `VERSION` 文件里的 "v0.4.2" 想当然
 写成 `ref: v0.4.2`，导致 checkout 直接失败。现在 `setup-toolchain` 的
 `nox-ref` 默认 `main`，注释里留了这条教训：**写 ref 前必须 `git tag -l` 核实**。
