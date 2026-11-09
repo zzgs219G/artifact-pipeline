@@ -629,17 +629,25 @@ PYEOF
   fi
 fi
 
-# ── 纯 C 解密桩的注册注入（2026-11-09）──────────────────────────────
-# 与上面 NcLink 完全同款的问题：一个 so 只能有一个 JNI_OnLoad。
-# 本模块【不提供】自己的 OnLoad，而是往"已有的那个"里插一行调用
-# nc_strdec_bootstrap()。三种持有者都要覆盖：
-#   ① 有 dex2c  → Dex2C.cpp 的 OnLoad
-#   ② 无 dex2c 但有 sigcheck → nc_link_jni.c 的 OnLoad
-#   ③ 两者都没有（纯 stringenc-native）→ 本段自己生成一个最小 OnLoad
+# ── 纯 C 解密桩的 JNI 绑定方式（2026-11-09 最终形态）────────────────
 #
-# 漏掉 ③ 的症状：so 编出来了、桩也有 native 声明，但没人 RegisterNatives
-# → 首个加密字符串即 UnsatisfiedLinkError（启动闪退，且 logcat 只报
-#   "No implementation found for ... ncDec"，不指向"没注册"这个真因）。
+# 用 JNI 【短名绑定】，不用 RegisterNatives。原因（真机实测两轮）：
+#
+#   ① 桩类在自己的 <clinit> 里 loadLibrary("nc")，此刻该类【正在初始化中】，
+#      ART 不允许 FindClass 到未完成初始化的类 → RegisterNatives 失败
+#      → 若在 JNI_OnLoad 里 fail-fast 返回 JNI_ERR，启动即
+#        UnsatisfiedLinkError: JNI_ERR returned from JNI_OnLoad。
+#
+#   ② 即使注册成功，ART 对 native 方法的短名解析发生在【类链接阶段】，
+#      早于 <clinit> 执行 —— 那时 so 还没加载，ART 记下"方法不存在"，
+#      之后调用必抛 NoSuchMethodError（真机日志：at <clinit>:12）。
+#
+# 短名绑定（Java_<mangled>_<method>）由 ART 在【首次调用时】dlsym，
+# 天然满足"so 已加载"这个前提。类名与解密方法名都是每包随机的，
+# 所以这个封装文件必须构建期生成。
+#
+# 代价：这两个符号会出现在 .dynsym（短名绑定的固有代价，与 dex2c 产物同）。
+# 名字是随机包名，不含业务语义。
 if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
   _cstub_jni_dst=""
   if [[ $WANT_TRANSPILE -eq 1 ]]; then
@@ -647,115 +655,10 @@ if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
   else
     _cstub_jni_dst="$WORK/project/jni"
   fi
-
-  _injected=0
-
-  # ① 有 dex2c：往 Dex2C.cpp 的 OnLoad 里插
-  if [[ $WANT_TRANSPILE -eq 1 && -f "$WORK/project/jni/nc/Dex2C.cpp" ]] \
-     && ! grep -q 'nc_strdec_bootstrap' "$WORK/project/jni/nc/Dex2C.cpp"; then
-    python3 - "$WORK/project/jni/nc/Dex2C.cpp" <<'PYEOF_CSTUB'
-import re, sys
-p = sys.argv[1]
-s = open(p, encoding='utf-8').read()
-i = s.find('JNI_OnLoad')
-if i < 0:
-    sys.exit('❌ Dex2C.cpp 里找不到 JNI_OnLoad')
-tail = s[i:]
-m = re.search(r'\n(\s*)return\s+JNI_VERSION_1_6\s*;', tail)
-if not m:
-    sys.exit('❌ Dex2C.cpp 的 JNI_OnLoad 里找不到 return JNI_VERSION_1_6;')
-inc_anchor = re.search(r'^#include[^\n]*\n', s, re.M)
-if inc_anchor is None:
-    sys.exit('❌ Dex2C.cpp 里找不到 #include 锚点')
-if 'nc_strdec.h' not in s:
-    s = (s[:inc_anchor.end()]
-         + '/* 2026-11-09: 纯 C 解密桩的 RegisterNatives（桩类名构建期注入）。\n'
-           ' * 必须 include 头文件而非本地声明 —— 本文件是 C++，本地声明会\n'
-           ' * 按 C++ 规则 mangled，而 nc_strdec_jni.c 导出的是 C 符号。 */\n'
-           '#include "nc_strdec.h"\n'
-         + s[inc_anchor.end():])
-    i = s.find('JNI_OnLoad')
-    tail = s[i:]
-    m = re.search(r'\n(\s*)return\s+JNI_VERSION_1_6\s*;', tail)
-ind = m.group(1)
-ins = ('\n' + ind + '/* 纯 C 解密桩：注册 ncDec/ncSetKey 到本次随机桩类。\n'
-       + ind + ' * 返回值忽略 —— 注册失败会让解密走 fail-closed（返回密文），\n'
-       + ind + ' * 不崩；由真机日志里的"字符串全是密文"暴露。 */\n'
-       + ind + 'if (nc_strdec_bootstrap(vm, env) != 0) {\n'
-       + ind + '    /* 不返回 JNI_ERR：dex2c 自己的注册可能已经成功，\n'
-       + ind + '     * 因桩注册失败而整体 JNI_ERR 会把 dex2c 也一起废掉。 */\n'
-       + ind + '}\n')
-pos = i + m.start()
-s = s[:pos] + ins + s[pos:]
-open(p, 'w', encoding='utf-8').write(s)
-print('[cstub] Dex2C.cpp 已插入 nc_strdec_bootstrap 调用')
-PYEOF_CSTUB
-    grep -q 'nc_strdec_bootstrap' "$WORK/project/jni/nc/Dex2C.cpp" && _injected=1
-    [[ $_injected -eq 1 ]] && echo "[cstub] 注册注入: Dex2C.cpp 的 JNI_OnLoad"
-  fi
-
-  # ② 无 dex2c 但有 sigcheck：往 nc_link_jni.c 的 OnLoad 里插
-  if [[ $_injected -eq 0 && $WANT_SIGCHECK -eq 1 ]] \
-     && [[ -n "$SIG_DST" && -f "$SIG_DST/nc_link_jni.c" ]] \
-     && ! grep -q 'nc_strdec_bootstrap' "$SIG_DST/nc_link_jni.c"; then
-    python3 - "$SIG_DST/nc_link_jni.c" <<'PYEOF_CSTUB2'
-import re, sys
-p = sys.argv[1]
-s = open(p, encoding='utf-8').read()
-anchor = '#include "nc_link_jni.h"\n'
-if anchor not in s:
-    sys.exit('❌ nc_link_jni.c 里找不到 include 锚点')
-if 'nc_strdec.h' not in s:
-    s = s.replace(anchor, anchor + '#include "nc_strdec.h"\n', 1)
-# 找到 JNI_OnLoad 函数体内、nc_link_register_natives 之后插入
-m = re.search(r'(\n(\s*)if\s*\(\s*nc_link_register_natives\(env\)[^\n]*\n)', s)
-if not m:
-    sys.exit('❌ nc_link_jni.c 的 JNI_OnLoad 里找不到 nc_link_register_natives 调用')
-ind = m.group(2)
-ins = ('\n' + ind + '/* 纯 C 解密桩（2026-11-09）：同一 OnLoad 里顺带注册。\n'
-       + ind + ' * 失败不影响 NcLink 的判决 —— 解密侧会 fail-closed。 */\n'
-       + ind + '(void)nc_strdec_bootstrap(vm, env);\n')
-s = s[:m.end(1)] + ins + s[m.end(1):]
-open(p, 'w', encoding='utf-8').write(s)
-print('[cstub] nc_link_jni.c 已插入 nc_strdec_bootstrap 调用')
-PYEOF_CSTUB2
-    grep -q 'nc_strdec_bootstrap' "$SIG_DST/nc_link_jni.c" && _injected=1
-    [[ $_injected -eq 1 ]] && echo "[cstub] 注册注入: nc_link_jni.c 的 JNI_OnLoad"
-  fi
-
-  # ③ 两者都没有：自己生成最小 OnLoad（纯 stringenc-native 组合）
-  if [[ $_injected -eq 0 ]]; then
-    cat > "$_cstub_jni_dst/nc_strdec_onload.c" <<'COF'
-/* nc_strdec_onload.c — 纯 C 解密桩独有的 JNI_OnLoad（2026-11-09）
- *
- * 何时生成：只勾 --stringenc-native，既没勾 dex2c 也没勾 sigcheck 时。
- * 那条组合里工程中没有任何 JNI_OnLoad（lib-ndk.sh 会扫描源码，
- * 没有定义就不往 version script 里声明），桩的 RegisterNatives 无处安放。
- *
- * 一旦有其他模块提供 OnLoad，本文件不会被生成 —— 一个 so 只能有一个。
- */
-#include <jni.h>
-#include "nc_strdec.h"
-
-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved)
-{
-    JNIEnv *env;
-    (void)reserved;
-    if (vm == NULL || (*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
-        return JNI_ERR;
-    }
-    if (nc_strdec_bootstrap(vm, env) != 0) {
-        /* fail-closed：桩注册不上 = 解密能力不存在。
-         * 这里返回 JNI_ERR 是刻意的 —— 本组合里没有别的模块需要这个 so，
-         * 与其带着"解不了密"的半残状态跑（所有字符串变密文），不如在
-         * 加载点就炸（Guard 的 catch(UnsatisfiedLinkError) 会处置）。 */
-        return JNI_ERR;
-    }
-    return JNI_VERSION_1_6;
-}
-COF
-    echo "[cstub] 注册注入: 生成了独立的 JNI_OnLoad（nc_strdec_onload.c）"
-  fi
+  # 本段在下面"C 源拷贝"的 mkdir 之前执行，纯 --stringenc-native 组合下
+  # jni/ 还不存在 —— 这里必须先建（否则 cat > 报 No such file，set -e 杀流水线）
+  mkdir -p "$_cstub_jni_dst"
+  echo "[cstub] JNI 绑定方式: 短名（构建期生成封装，见 nc_strdec_bind.c）"
 fi
 if [[ $WANT_ENVCHECK -eq 1 ]]; then
   # 环境检测(Frida/Xposed/调试器):与 sigcheck 同型并入同一 libnc.so(constructor 天然共存)
@@ -935,8 +838,8 @@ if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
     _cstub_dst="$WORK/project/jni"
   fi
   mkdir -p "$_cstub_dst"
-  cp "$ROOT/scripts/string-enc/csrc/nc_strdec.c"     "$_cstub_dst/"
   cp "$ROOT/scripts/string-enc/csrc/nc_strdec.h"     "$_cstub_dst/"
+  cp "$ROOT/scripts/string-enc/csrc/nc_strdec.c"     "$_cstub_dst/"
   cp "$ROOT/scripts/string-enc/csrc/nc_strdec_jni.c" "$_cstub_dst/"
   # NKEYS 档位必须与 encrypt-strings.py 一致（两侧不同 = 全包乱码）。
   # 这里从 Python 侧抽真值，抽不到即 fail-fast —— 不写死常量。
@@ -980,6 +883,11 @@ print(native_stub.NC_STRDEC_NKEYS)
   _stub_class="$(printf '%s' "$_decl" | cut -f1)"
   _stub_pkg_dot="$(printf '%s' "$_decl" | cut -f3)"
   _stub_cls_name="$(printf '%s' "$_decl" | cut -f4)"
+  # 解密方法名也是每包随机的（防固定签名），短名封装必须用它。
+  # 漏了它的症状（真机实测）：
+  #   No implementation found for java.lang.String il.wd.ct.ae.y9(java.lang.String)
+  #   (tried Java_il_wd_ct_ae_y9 ...) —— ART 找的是随机名，而我们只导出了 ncDec
+  _stub_dec_method="$(printf '%s' "$_decl" | cut -f2)"
   if [[ -z "$_stub_class" || "$_stub_class" != */* ]]; then
     log_err "emit-stub-decl 输出无法解析: $_decl（期望 4 个 tab 分隔字段）"
     exit 1
@@ -1008,8 +916,59 @@ print(native_stub.NC_STRDEC_NKEYS)
 #  define NC_STRDEC_NKEYS $_nk
 #endif
 
+/* 密钥本体（$_nk 个 uint64，大端字节序），由 bootstrap 直接 set_key。
+ * 为什么不经过 dex：见 native_stub.py 里 <clinit> 的说明 —— native 方法
+ * 在类链接阶段解析，那时 so 尚未加载 → NoSuchMethodError（真机实测）。
+ * 改为编译进 so 后，密钥不出现在 dex 的任何位置（本需求的核心）。 */
+#define NC_STRDEC_KEY_BYTES { $([ "$_nk" = "1" ] && echo "" )$(python3 -c "
+import sys
+k='$_cstub_seed_hex'
+print(', '.join('0x%s' % k[i:i+2] for i in range(0, len(k), 2)))
+") }
+
 #endif
 EOF
+  # ── JNI 短名绑定封装（2026-11-09）────────────────────────────────
+  # 为什么不用 RegisterNatives（真机实测踩过）：
+  #   桩类在自己的 <clinit> 里 loadLibrary("nc")，此刻该类【正在初始化中】，
+  #   ART 不允许 FindClass 到未完成初始化的类 → RegisterNatives 返回非 0
+  #   → JNI_OnLoad 返回 JNI_ERR
+  #   → UnsatisfiedLinkError: JNI_ERR returned from JNI_OnLoad（真机日志）
+  #
+  # 改用 JNI 短名绑定：ART 在首次调用 native 方法时按
+  #   Java_<包名点换_>_<类名>_<方法名>
+  # 去 so 的 .dynsym 里 dlsym —— 不需要 FindClass，也没有初始化时序问题。
+  # 类名是构建期已知的（每包随机），所以函数名可以在这里生成。
+  #
+  # 代价（如实）：这两个符号会出现在 .dynsym（短名绑定的固有代价，
+  # 与 dex2c 产物同）。名字是随机包名，不含业务语义。
+  _jni_cls="$(printf '%s' "$_stub_class" | tr '/' '_')"
+  cat > "$_cstub_dst/nc_strdec_bind.c" <<EOF
+/* nc_strdec_bind.c — 由 protect.sh 构建期生成，不进 git（2026-11-09）
+ *
+ * 作用：把桩类的 native 方法名绑定到 nc_strdec_jni.c 的实现上。
+ * 为什么需要它：见 protect.sh 里"JNI 短名绑定封装"那一节的说明 ——
+ * RegisterNatives 在类初始化期间会失败，只能走短名。
+ *
+ * ⚠️ 类名 $_stub_class 是每包随机的，改由构建期注入。
+ * ⚠️ 方法名 ncDec / ncSetKey 必须与 nc_strdec_jni.c 的混淆表一致
+ *    （那边用 XOR 0x5A 存的就是这两个名字）。
+ */
+#include <jni.h>
+#include "nc_strdec.h"
+
+/* ⚠️ 方法名 ${_stub_dec_method} 是每包随机的（防固定签名），必须与
+ * dex 侧桩类里的声明同名 —— 漏用真名会让 ART 找不到实现：
+ *   No implementation found for ... ->${_stub_dec_method}(...)
+ *   (tried Java_..._${_stub_dec_method} ...)                            */
+JNIEXPORT jstring JNICALL
+Java_${_jni_cls}_${_stub_dec_method}(JNIEnv *env, jclass clazz, jstring payload)
+{
+    return nc_strdec_jni_decrypt(env, clazz, payload);
+}
+EOF
+  echo "[cstub] 已生成短名绑定: Java_${_jni_cls}_${_stub_dec_method}"
+
   echo "[cstub] 纯 C 解密桩: 类=$_stub_class NKEYS=$_nk"
 fi
 
@@ -1090,7 +1049,7 @@ fi
 # 不标（调用方 / 门槛函数，标了会死锁或纯属浪费）：
 #   nc_strdec_has_key      只是读一个 flag
 #   nc_strdec_set_key      只在 <clinit> 调一次
-if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
+if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
   echo "[mark] 段标记：纯 C 解密桩【算法层】→ .ncx"
   python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec.c" \
     --pattern '^[ \t]*((?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_strdec_decrypt|nc_strdec_b64_decode|nc_strdec_utf8_to_utf16|nc_block_ks|nc_mix64)[ \t]*\()' \
@@ -1488,10 +1447,17 @@ if [[ $WANT_ANTIDIFF -eq 1 ]]; then
   python3 "$ROOT/scripts/anti-diff/anti-diff.py" "$WORK/decompiled" --enable-f
 fi
 
-if [[ $WANT_SIGCHECK -eq 1 || $WANT_TRANSPILE -eq 1 || $WANT_ENVCHECK -eq 1 ]]; then
+# ⚠️ 2026-11-09 扩条件：纯 C 桩（$WANT_NATIVE_STUB）也必须放 so。
+#    漏了它的症状：dex 里 native 声明 + <clinit> 调 loadLibrary("nc")，
+#    但 APK 里没有 libnc.so → 启动即
+#    UnsatisfiedLinkError: dlopen failed: library "libnc.so" not found
+#    （真机实测，本地 .c1 产物复现）。
+#    这条与 STEP3/4 的触发条件是同一个前提：native 桩 = 有 so。
+if [[ $WANT_SIGCHECK -eq 1 || $WANT_TRANSPILE -eq 1 || $WANT_ENVCHECK -eq 1 \
+      || $WANT_NATIVE_STUB -eq 1 ]]; then
   repack_install_so "$WORK/decompiled" "$WORK/project/libs"
   # 强制解压 so 加载（本方案唯一允许的 Manifest 修改）——只在有 so 的组合执行;
-  # 纯 dex 组合(仅 stringenc)没有 libnc.so,manifest 无需改写(报错二十三)
+  # 纯 dex 组合(仅 stringenc 且用 Java 桩)没有 libnc.so,manifest 无需改写(报错二十三)
   repack_force_extractnativelibs "$WORK/decompiled"
   # 2026-11-08：清掉 apktool.yml 里继承来的 doNotCompress 条目（so / dex）。
   # 这是"继承输入 APK 规则"的后果：输入包若把 so/dex 列为"不压缩"，

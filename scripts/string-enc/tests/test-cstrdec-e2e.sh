@@ -92,12 +92,21 @@ else
   else
     ok
   fi
-  # loadLibrary 必须在 ncSetKey 之前
-  li=$(grep -n 'loadLibrary' "$STUB" | head -1 | cut -d: -f1)
-  sk=$(grep -n 'ncSetKey' "$STUB" | head -1 | cut -d: -f1)
-  if [[ -n "$li" && -n "$sk" && "$li" -lt "$sk" ]]; then ok; else bad "loadLibrary 必须早于 ncSetKey"; fi
-  # 密钥必须落在 array-data 字节里，不能是明文 hex 串
-  grep -q '\.array-data 1' "$STUB" && ok || bad "密钥未以 array-data 形式写入"
+  # <clinit> 必须 loadLibrary（so 未加载则 native 方法全部不可用）
+  grep -q 'loadLibrary' "$STUB" && ok || bad "桩 <clinit> 缺少 loadLibrary"
+  # 密钥【不得】出现在 dex 里（2026-11-09 改设计：编译进 so 的 cfg 头）
+  # 这条断言保证"改回把密钥写进 dex"会立刻红。
+  if grep -q '\.array-data 1' "$STUB"; then
+    bad "桩里出现 array-data（密钥又回到 dex 了 —— 本需求明确禁止）"
+  else
+    ok
+  fi
+  # 只看 invoke 指令行（注释里提到 ncSetKey 是在解释"为什么不用它"）
+  if grep -E '^[[:space:]]*invoke-.*ncSetKey' "$STUB" >/dev/null; then
+    bad "桩里仍调用 ncSetKey（密钥经 Java 注入 —— 会触发 NoSuchMethodError）"
+  else
+    ok
+  fi
   # 桩内不得出现 16 位 hex 字符串（防止有人改回 const-string 形态）
   if grep -qE 'const-string[^,]*,[[:space:]]*"0x[0-9a-fA-F]{16}"' "$STUB"; then
     bad "桩内出现明文 hex 密钥串"

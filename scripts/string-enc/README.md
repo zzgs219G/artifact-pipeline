@@ -362,52 +362,73 @@ NKEYS=4        ：块密钥流 = XOR over t of mix64(key[t] + (blk+t)*gamma[t])
 - 把块展开内层 `j` 改成固定从 0 起（历史事故原型）→ 152 条里 133 条变红
 - 把 Base64 4-way 的字符顺序互换 → 全部解析失败
 
-### 接入流水线（2026-11-09 已完成）
+### 接入流水线（2026-11-09，真机验证通过）
 
-`protect.sh --stringenc-native` 走这条路。默认关闭（`--stub-impl java`），
-现有组合行为零漂移。
+`protect.sh --stringenc-native` 走这条路。默认关闭（`--stub-impl java`）。
 
-**改动面（4 个文件）**：
-
-| 文件 | 改动 |
-|---|---|
-| `encrypt-strings.py` | 新增 `--stub-impl {java,native}`；native 与 4 个 Java 专属参数互斥（fail-fast） |
-| `native_stub.py` | 新增：native 桩 smali 生成 + 生成期自检 |
-| `protect.sh` | STEP3/4 触发条件加 native 桩；拷 C 源；生成 `nc_strdec_cfg.h`；JNI_OnLoad 三方归属；算法层段标记 |
-| `protect-modules.yml` | 三套新测试挂 CI |
-
-**三个必须记住的实现决定**：
-
-1. **STEP3/4 触发条件被打破**：原先"纯 stringenc 整体跳过 STEP3/4"（报错二十三）。
-   native 桩必须编 so，故条件加 `|| WANT_NATIVE_STUB`。**只对 native 路径生效**，
-   Java 桩组合完全不变。
-
-2. **JNI_OnLoad 三方归属**：一个 so 只能有一个 OnLoad，已有
-   `Dex2C.cpp`（勾 dex2c）/ `nc_link_jni.c`（勾 sigcheck 无 dex2c）两个潜在提供者。
-   本模块**从不提供** OnLoad，只导出 `nc_strdec_bootstrap()` 供持有者调用；
-   两者都没有时（纯 stringenc-native）由 `protect.sh` 生成一个最小 OnLoad。
-   漏掉第三种情况的症状：`No implementation found for ... ncDec`（启动闪退）。
-
-3. **段标记标的必须是算法层，不是 JNI 层**。
-   第一版标的是 `nc_strdec_jni.c` 的 decrypt/set_key —— 那是"加密了壳、
-   核留在明文"，与外部报告打 2.5 分的那次错误同型。
-   正确对象是 `nc_strdec.c` 里的 5 个函数（decrypt / b64_decode / utf8_to_utf16 /
-   block_ks / mix64）。实测 `.text` 只剩 `set_key`/`has_key` 两个门槛函数，
-   mix64 常量以 `movk` 立即数落在 `.ncx`（锁箱后变密文）。
-
-**验收（本机实测）**：
+**dex 侧最终形态**（只有两行，零算法零密钥）：
 
 ```
-ndk-build 双 ABI         ✅ arm64 18872B / v7a 10008B
-.ncx 段生成              ✅ arm64 0x3b0 / v7a 0x338
-导出符号                  ✅ 只有 JNI_OnLoad（ncDec/ncSetKey 走 RegisterNatives）
-.text 内算法常量          ✅ 零命中
-现有 stringenc 五套       ✅ 无回归
-新增三套                  ✅ 288 + 184 + 12 项
+.method static constructor <clinit>()V
+    const-string v0, "nc"
+    invoke-static {v0}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V
+    return-void
+.end method
+.method public static native <随机名>(Ljava/lang/String;)Ljava/lang/String;
+.end method
 ```
 
-**尚未验证（如实标注）**：真机启动。需 `--stringenc-native` 出包 →
-装设备 → 确认字符串正确显示 + logcat 无 ULE。这是唯一必须真机的环节。
+**密钥在哪**：编译进 so（`nc_strdec_cfg.h` 的 `NC_STRDEC_KEY_BYTES`），
+由 `nc_ensure_key()` 在首次解密时惰性装载。**dex 里完全没有密钥**。
+
+### 五个真机实测踩过的坑（每个都是硬崩溃，别再踩）
+
+| # | 症状 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 构建失败：`无法得知本次的随机桩名` | STEP3（编 so）在 STEP5（注入桩）之前，组件标记还不存在 | 新增 `emit-stub-decl` 子命令：**只算桩名不注入**，STEP3 用它预算，STEP5 用 `--stub-name` 复用 |
+| 2 | `dlopen failed: library "libnc.so" not found` | STEP5 放 so 的条件漏了 `WANT_NATIVE_STUB` | 条件加 `\|\| $WANT_NATIVE_STUB -eq 1` |
+| 3 | `UnsatisfiedLinkError: JNI_ERR returned from JNI_OnLoad` | 桩 `<clinit>` 里 `loadLibrary` 时**类正在初始化中**，ART 不允许 `FindClass` 自己 | **删掉自建 OnLoad**，改 JNI 短名绑定 |
+| 4 | `NoSuchMethodError: No static method ncSetKey([B)V` | ART 解析 native 方法短名发生在**类链接阶段**，早于 `<clinit>` —— 那时 so 未加载 | **密钥编译进 so**，dex 侧不再调 setKey |
+| 5 | App 能起但功能全废，Room 报 `no table with name <密文>` | `bootstrap` 只在 `JNI_OnLoad` 里调，纯 native 桩组合没有 OnLoad → **密钥永远没设** → 全部静默 fail-closed | `nc_ensure_key()` **惰性注入**（CAS 幂等，首次 decrypt 时触发） |
+
+**#5 最危险**：解密失败是静默的（返回原密文，不崩不报错）。为此加了
+`nc_strdec_fail_count()` 计数器 —— **排障时非 0 就说明加固在静默劣化**。
+
+### JNI 绑定方式：短名，不用 RegisterNatives
+
+```
+构建期按已知随机类名生成 nc_strdec_bind.c：
+  Java_<mangled_pkg_cls>_<随机方法名>  →  nc_strdec_jni_decrypt
+```
+
+为什么必须这样（#3+#4 的共同教训）：
+- `RegisterNatives` 需要 `FindClass`，而类初始化期间 `FindClass` 自己会失败
+- 即使注册成功，ART 在**类链接阶段**就解析 native 方法，那时 so 未加载
+- 短名绑定由 ART 在**首次调用时** dlsym，天然满足"so 已加载"
+
+代价（如实）：两个短名符号会进 `.dynsym`。名字是随机包名 + 随机方法名，
+不含业务语义；这是 JNI 短名绑定的固有代价（dex2c 产物同样如此）。
+
+### 验收（真机实测，2026-11-09）
+
+```
+--stringenc ** --stringenc-native
+  ✅ 进程存活，界面全部中文正常显示（控制台/设计与UI/推荐/工具/外网/待定…）
+  ✅ nc_strdec_fail_count() == 0（零解密失败）
+  ✅ dex 里 GAMMA/keyByte/mix64 命中 0 处
+  ✅ so 导出符号只有 Java_<随机>（无 ncDec/ncSetKey 泄漏）
+  ✅ .ncx 加密段在位（arm64 0x460）
+```
+
+### 性能：C 桩比 Java 桩快多少（实测）
+
+详见下方「性能实测」节。
+
+### 尚未验证
+
+- `--sigcheck` + `--stringenc-native` 组合（两者一起时 so 的 constructor 链
+  与 javacheck 注入时序未验证）
+- `armeabi-v7a` 真机（本机只有 arm64，v7a 仅离线编译验证）
 
 ## 依赖与环境
 

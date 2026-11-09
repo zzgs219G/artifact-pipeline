@@ -71,7 +71,6 @@ typedef struct {
 
 static nc_cache_slot nc_cache[NC_CACHE_CAP];
 static volatile int nc_cache_n = 0;
-static JavaVM *nc_vm = NULL;
 
 /* FNV-1a 64：查表用，非密码学用途 */
 static uint64_t nc_fnv1a(const char *s, size_t n)
@@ -86,8 +85,23 @@ static uint64_t nc_fnv1a(const char *s, size_t n)
 
 /* 统一的失败出口：清异常 + 返回兜底值。
  * ② 硬约束的唯一实现点 —— 不要在别处直接 return。 */
+/* fail-closed 计数（诊断用）。为什么需要：
+ * 解密失败时语义是"原样返回密文"（不崩、不抛），这在 App 侧表现为
+ * 莫名其妙的业务错误（例如 Room 报 "no table with name <密文>"），
+ * 而日志里【一点痕迹都没有】—— 2026-11-09 真机排查花了很久才定位到
+ * "是解密静默失败"而不是"加密错了"。
+ * 这里只计数，不打日志（避免日志本身成为特征串）；需排障时由
+ * 调用方通过 nc_strdec_fail_count() 读取。 */
+static volatile unsigned nc_fail_count = 0;
+
+unsigned nc_strdec_fail_count(void)
+{
+    return nc_fail_count;
+}
+
 static jobject nc_jni_fail(JNIEnv *env, jobject fallback)
 {
+    nc_fail_count++;
     if ((*env)->ExceptionCheck(env)) {
         (*env)->ExceptionClear(env);
     }
@@ -181,6 +195,9 @@ static void nc_cache_put(JNIEnv *env, jstring payload, jstring val)
     }
 }
 
+/* 前置声明：定义在本文件后部（bootstrap 附近），decrypt 里要调。 */
+static void nc_ensure_key(void);
+
 /* ── JNI 入口 ────────────────────────────────────────────────────────
  *
  * 方法名 nc_strdec_jni_decrypt，【不带 Java_ 前缀、不带 JNIEXPORT】：
@@ -200,9 +217,16 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
         return nc_jni_fail(env, NULL);  /* 传 null 进来：返回 null，不崩 */
     }
 
-    /* 密钥未就绪 → 原样返回（硬约束 ③）。
-     * 正常产物不该走到这里（<clinit> 会先 setKey）。 */
+    /* 惰性确保密钥就绪（幂等、无锁快路径）。
+     * 为什么放在这里而不是只靠 JNI_OnLoad：纯 stringenc-native 组合没有
+     * OnLoad（短名绑定不需要它），bootstrap 永远不会被调 —— 密钥就永远
+     * 是空，所有解密都会静默 fail-closed（真机实测：App 起来但功能全废，
+     * 日志里只有 fail 计数）。 */
+    nc_ensure_key();
+
     if (!nc_strdec_has_key()) {
+        /* 没有 cfg 头 = 构建期没注入密钥（非 native 桩组合误编进了本单元）。
+         * fail-closed 保持原样。 */
         return nc_jni_fail(env, payload);
     }
 
@@ -225,51 +249,48 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
      *   · ART 的 Java 线程栈默认 1MB，但 native 侧被 JNI 调用时
      *     可用余量不保证；32000*3/4 = 24KB 是保守值。
      *   · 实测最长真实字符串 5188B，远低于阈值。 */
+    /* ⚠️ 栈上限（2026-11-09 真机实测教训）：
+     * 第一版用 uint8_t stackbuf[32768] + uint16_t u16stack[16384]
+     * = 32KB + 32KB = 64KB 栈缓冲，单次调用就要这么多。
+     * 真实包里存在 2047 字节的密文（Room 的 SQL 语句），解出来 1535 字节
+     * UTF-8 → 大部分是 3 字节中文 → 约 500 个 UTF-16 码元，栈上限够用；
+     * 但 JNI 调用点的可用栈不保证 —— ART 主线程 1MB，而 Binder/后台
+     * 线程可能只有 8KB~64KB。栈溢出在 ART 里表现为 SIGSEGV 或
+     * 静默失败（本模块选择"失败返回原密文"，于是 SQL 变密文 → Room 报
+     * "no table with name AAtkRGFash8="）。
+     *
+     * 现在：一律走堆分配。解密是低频路径（首次 + 缓存未命中），
+     * 一次 malloc 的开销远小于栈溢出的风险。 */
     const size_t cap = ((size_t)plen / 4) * 3 + 8;
-    uint8_t stackbuf[32768];
-    uint8_t *decoded = stackbuf;
-    if (cap > sizeof stackbuf) {
-        decoded = (uint8_t *)malloc(cap);
-        if (decoded == NULL) {
-            (*env)->ReleaseStringUTFChars(env, payload, pchars);
-            return nc_jni_fail(env, payload);
-        }
+    uint8_t *decoded = (uint8_t *)malloc(cap);
+    if (decoded == NULL) {
+        (*env)->ReleaseStringUTFChars(env, payload, pchars);
+        return nc_jni_fail(env, payload);
     }
 
     int dlen = nc_strdec_decrypt(pchars, (size_t)plen, decoded, cap);
     (*env)->ReleaseStringUTFChars(env, payload, pchars);
 
     if (dlen <= 0) {
-        if (decoded != stackbuf) {
-            free(decoded);
-        }
+        free(decoded);
         return nc_jni_fail(env, payload);   /* 硬约束 ①：原样返回 */
     }
 
     /* ── UTF-8 → UTF-16 → NewString ──────────────────────────────────
      * ⚠️ 不能用 NewStringUTF：它收 modified UTF-8，emoji 会乱码。
      *    详见 nc_strdec.h 的说明与 test-cstrdec-vs-java.sh 的断言。 */
+    /* 同上：UTF-16 缓冲也走堆。最坏情况 dlen 个码元（纯 ASCII）。 */
     const size_t u16cap = (size_t)dlen + 1;
-    uint16_t u16stack[16384];
-    uint16_t *u16 = u16stack;
-    if (u16cap > sizeof u16stack / sizeof u16stack[0]) {
-        u16 = (uint16_t *)malloc(u16cap * sizeof(uint16_t));
-        if (u16 == NULL) {
-            if (decoded != stackbuf) {
-                free(decoded);
-            }
-            return nc_jni_fail(env, payload);
-        }
+    uint16_t *u16 = (uint16_t *)malloc(u16cap * sizeof(uint16_t));
+    if (u16 == NULL) {
+        free(decoded);
+        return nc_jni_fail(env, payload);
     }
 
     int ulen = nc_strdec_utf8_to_utf16(decoded, (size_t)dlen, u16, u16cap);
-    if (decoded != stackbuf) {
-        free(decoded);
-    }
+    free(decoded);
     if (ulen <= 0) {
-        if (u16 != u16stack) {
-            free(u16);
-        }
+        free(u16);
         /* 密文解出来的字节不是合法 UTF-8 = 密文损坏或密钥错。
          * fail-closed：原样返回密文（一眼看出坏了），
          * 而不是返回含 U+FFFD 的"看起来正常"的垃圾。 */
@@ -277,9 +298,7 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
     }
 
     jstring out = (*env)->NewString(env, (const jchar *)u16, (jsize)ulen);
-    if (u16 != u16stack) {
-        free(u16);
-    }
+    free(u16);
     if (out == NULL) {
         return nc_jni_fail(env, payload);   /* OOM */
     }
@@ -331,95 +350,27 @@ void nc_strdec_jni_set_key(JNIEnv *env, jclass clazz, jbyteArray key)
     }
 }
 
-/* ── 动态注册表 ──────────────────────────────────────────────────────
+/* ── 关于 JNI 绑定方式（2026-11-09 最终形态）───────────────────────
  *
- * 方法名与签名的存储纪律（与 nc_link_jni.c 同源）：
- *   把字符串 XOR 0x5A 存，避免 `strings` 直接扫出方法名。
- *   ⚠️ 这是【混淆】不是【加密】，如实标注：读下面十几行就能还原。
- *      真实收益只有一条 —— `strings` 扫不到"这里有个解密入口"。
+ * 本文件【不注册】任何 native 方法，也不提供 JNI_OnLoad。绑定由构建期
+ * 生成的 nc_strdec_bind.c 用 JNI 短名完成（Java_<mangled>_<method>）。
  *
- * 改方法名必须同步三处：
- *   ① 本表
- *   ② encrypt-strings.py 生成桩时用的 JNI 描述符
- *   ③ 桩的 smali（由 encrypt-strings.py 生成，不该手写）
- * 漏一处的症状是运行期 NoSuchMethodError（RegisterNatives 会让它变明确）。
+ * 为什么不用 RegisterNatives（真机实测两轮，都是硬崩溃）：
+ *   ① 桩类在自己的 <clinit> 里 loadLibrary，此刻该类正在初始化中，
+ *      ART 不允许 FindClass 到未完成初始化的类 → 注册失败。
+ *   ② 更根本的：ART 对 native 方法的短名解析发生在【类链接阶段】，
+ *      早于 <clinit> 执行 —— 那时 so 还没加载，ART 记下"方法不存在"，
+ *      之后调用必抛 NoSuchMethodError。
+ *   短名绑定由 ART 在【首次调用时】dlsym，天然满足"so 已加载"。
+ *
+ * 代价（如实）：短名符号会出现在 .dynsym，`nm -D` 可见。名字是随机
+ * 包名 + 随机方法名，不含业务语义；且这是 JNI 短名绑定的固有代价
+ * （dex2c 产物同样如此）。
+ *
+ * 密钥也不经过 Java：它编译进 so（nc_strdec_cfg.h 的 NC_STRDEC_KEY_BYTES），
+ * 由 nc_ensure_key() 在首次解密时惰性装载。原因同上 ——
+ * 任何"Java 调 native setKey"的方案都躲不过上面的时序问题。
  */
-#define NC_XOR 0x5A
-
-static void nc_dexor(char *out, size_t cap,
-                     const unsigned char *enc, size_t enclen)
-{
-    size_t i;
-    for (i = 0; i + 1 < cap && i < enclen; i++) {
-        out[i] = (char)(enc[i] ^ NC_XOR);
-    }
-    out[cap - 1] = '\0';
-}
-
-/* ── 混淆表 ──────────────────────────────────────────────────────────
- * ⚠️ 本表由脚本生成，不要手改（手算 XOR 极易错，且错了是运行期
- *    NoSuchMethodError，构建期拦不住）。生成方式：
- *      python3 -c "print(', '.join('0x%02X'%(c^0x5A) for c in b'ncDec\x00'))"
- *    反向校验见 tests/test-cstrdec.sh 的「混淆表反解」断言。
- */
-/* "ncDec" ^ 0x5A */
-static const unsigned char nc_name_dec[] = {
-    0x34, 0x39, 0x1E, 0x3F, 0x39, 0x5A
-};
-/* "(Ljava/lang/String;)Ljava/lang/String;" ^ 0x5A */
-static const unsigned char nc_sig_dec[] = {
-    0x72, 0x16, 0x30, 0x3B, 0x2C, 0x3B, 0x75, 0x36, 0x3B, 0x34, 0x3D, 0x75,
-    0x09, 0x2E, 0x28, 0x33, 0x34, 0x3D, 0x61, 0x73, 0x16, 0x30, 0x3B, 0x2C,
-    0x3B, 0x75, 0x36, 0x3B, 0x34, 0x3D, 0x75, 0x09, 0x2E, 0x28, 0x33, 0x34,
-    0x3D, 0x61, 0x5A
-};
-/* "ncSetKey" ^ 0x5A */
-static const unsigned char nc_name_setkey[] = {
-    0x34, 0x39, 0x09, 0x3F, 0x2E, 0x11, 0x3F, 0x23, 0x5A
-};
-/* "([B)V" ^ 0x5A */
-static const unsigned char nc_sig_setkey[] = {
-    0x72, 0x01, 0x18, 0x73, 0x0C, 0x5A
-};
-
-int nc_strdec_register_natives(JNIEnv *env, const char *class_dot)
-{
-    if (env == NULL || class_dot == NULL) {
-        return -1;
-    }
-
-    jclass clazz = (*env)->FindClass(env, class_dot);
-    if (clazz == NULL) {
-        (*env)->ExceptionClear(env);
-        return -1;
-    }
-
-    char name_dec[8], name_setkey[16];
-    char sig_dec[64], sig_setkey[16];    nc_dexor(name_dec, sizeof name_dec, nc_name_dec, sizeof nc_name_dec);
-    nc_dexor(sig_dec, sizeof sig_dec, nc_sig_dec, sizeof nc_sig_dec);
-    nc_dexor(name_setkey, sizeof name_setkey,
-             nc_name_setkey, sizeof nc_name_setkey);
-    nc_dexor(sig_setkey, sizeof sig_setkey,
-             nc_sig_setkey, sizeof nc_sig_setkey);
-
-    JNINativeMethod methods[2];
-    methods[0].name = name_dec;
-    methods[0].signature = sig_dec;
-    methods[0].fnPtr = (void *)nc_strdec_jni_decrypt;
-    methods[1].name = name_setkey;
-    methods[1].signature = sig_setkey;
-    methods[1].fnPtr = (void *)nc_strdec_jni_set_key;
-
-    int rc = (*env)->RegisterNatives(env, clazz, methods, 2);
-    (*env)->DeleteLocalRef(env, clazz);
-    if (rc != 0) {
-        if ((*env)->ExceptionCheck(env)) {
-            (*env)->ExceptionClear(env);
-        }
-        return -1;
-    }
-    return 0;
-}
 
 /* ── JNI_OnLoad 归属：本文件【从不】提供 JNI_OnLoad ─────────────────
  *
@@ -447,26 +398,35 @@ int nc_strdec_register_natives(JNIEnv *env, const char *class_dot)
  * 桩注册不上会导致解密走 fail-closed（返回密文），不会崩，
  * 但会表现为"所有字符串都是密文" —— 比闪退更难查，故建议 fail-fast。
  */
-int nc_strdec_bootstrap(JavaVM *vm, JNIEnv *env)
-{
-    int rc = nc_strdec_jni_attach(vm);
-    if (rc != 0) {
-        return rc;
-    }
-#if defined(NC_STRDEC_HAVE_CFG)
-    /* cfg 头存在 = 本次确实要用 native 桩 */
-    return nc_strdec_register_natives(env, NC_STRDEC_STUB_CLASS);
-#else
-    (void)env;
-    return 0;
-#endif
-}
 
-int nc_strdec_jni_attach(JavaVM *vm)
+/* ── 确保密钥已设置（幂等，线程安全）──────────────────────────────
+ *
+ * 为什么需要"惰性"而不是只在 bootstrap 里设：
+ *   纯 --stringenc-native 组合【没有 JNI_OnLoad】（不需要它 —— 短名绑定
+ *   由 ART 首次调用时 dlsym 完成），所以 bootstrap 永远不会被调。
+ *   第一版把 set_key 放在 bootstrap 里 → 密钥永远是空 → 每次解密都
+ *   fail-closed 返回密文 → App 侧表现为"SQL 变成密文、Room 找不到表"
+ *   （真机实测，日志里只有静默的 fail 计数）。
+ *
+ * 幂等性：用 CAS 保证只设一次。并发首调时多个线程都会走到这里，
+ * nc_strdec_set_key 只是逐字节写全局数组，重复写同值无害 ——
+ * 但仍用 CAS 避免"写一半被读到"的窗口。
+ */
+static void nc_ensure_key(void)
 {
-    if (vm == NULL) {
-        return -1;
+    static volatile int done = 0;
+    int expected = 0;
+    if (nc_strdec_has_key()) {
+        return;
     }
-    nc_vm = vm;                          /* 供将来的线程附着用 */
-    return 0;
+    if (!__atomic_compare_exchange_n(&done, &expected, 1, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        return;                         /* 别的线程已经在设/已设好 */
+    }
+#if defined(NC_STRDEC_HAVE_CFG) && defined(NC_STRDEC_KEY_BYTES)
+    {
+        static const uint8_t k[NC_STRDEC_KEYLEN] = NC_STRDEC_KEY_BYTES;
+        nc_strdec_set_key(k);
+    }
+#endif
 }

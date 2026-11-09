@@ -197,37 +197,38 @@ chk "未设密钥不得产明文" "$got" "ERR"
 got="$("$W/host1" dec <<< "$(printf '0f1e2d3c4b5a6978\n%s' "$_payload")")"
 chk "设密钥后同一 payload 可解" "$got" "73"
 
-# ── 6. JNI 层混淆表反解（防手写 XOR 表出错）────────────────────────
-echo "══ 6. JNI 混淆表反解（nc_strdec_jni.c）══"
-# 为什么要这条：方法名/签名用 XOR 0x5A 存，手算极易错，而错了的症状是
-# 运行期 NoSuchMethodError（RegisterNatives 返回非 0），构建期完全拦不住。
-# 本断言直接从源码里抽出十六进制表，反解后与期望字符串比对 ——
-# 把"注释说的"变成"机制保证的"。
-python3 - "$CSRC/nc_strdec_jni.c" <<'PY'
-import re, sys
-src = open(sys.argv[1], encoding='utf-8').read()
-expect = {
-    'nc_name_dec':    'ncDec',
-    'nc_sig_dec':     '(Ljava/lang/String;)Ljava/lang/String;',
-    'nc_name_setkey': 'ncSetKey',
-    'nc_sig_setkey':  '([B)V',
-}
-fail = 0
-for name, want in expect.items():
-    m = re.search(r'unsigned char\s+%s\[\]\s*=\s*\{([^}]*)\}' % name, src)
-    if not m:
-        print("MISSING:%s" % name); fail += 1; continue
-    vals = [int(x, 16) for x in re.findall(r'0x([0-9A-Fa-f]{2})', m.group(1))]
-    got = bytes(v ^ 0x5A for v in vals).rstrip(b'\x00').decode('latin-1')
-    if got != want:
-        print("BAD:%s got=%r want=%r" % (name, got, want)); fail += 1
-sys.exit(1 if fail else 0)
-PY
-if [[ $? -eq 0 ]]; then
-  ok
-  echo "   4 张表反解全部正确"
+# ── 6. JNI 绑定方式（2026-11-09 改短名绑定后）────────────────────
+echo "══ 6. JNI 绑定：必须是短名，不得回退到 RegisterNatives ══"
+# 为什么钉死：RegisterNatives 在"桩类 <clinit> 里 loadLibrary"这个场景下
+# 必然失败（类初始化未完成 → FindClass 失败），或即使注册成功，ART 也会在
+# 类链接阶段就解析 native 方法（那时 so 未加载）→ NoSuchMethodError。
+# 真机实测两轮都是硬崩溃，所以这里断言"旧机制不在"。
+# 只看代码行（去掉注释），注释里提到这些词是说明用途，不算违规
+if grep -vE '^[[:space:]]*(\*|/\*)' "$CSRC/nc_strdec_jni.c" | grep -q 'RegisterNatives'; then
+  bad "nc_strdec_jni.c 里出现 RegisterNatives（会崩，见文件头说明）"
 else
-  bad "JNI 混淆表反解失败（方法名/签名与预期不符 → 运行期 NoSuchMethodError）"
+  ok
+  echo "   ✅ 无 RegisterNatives"
+fi
+if grep -qE '^int nc_strdec_register_natives|^int nc_strdec_bootstrap' "$CSRC/nc_strdec_jni.c"; then
+  bad "残留已废弃的注册入口"
+else
+  ok
+  echo "   ✅ 无废弃注册入口"
+fi
+# 绑定必须由构建期生成的短名封装完成
+if grep -q 'Java_\${_jni_cls}_\${_stub_dec_method}' scripts/pipelines/protect.sh; then
+  ok
+  echo "   ✅ protect.sh 生成短名封装"
+else
+  bad "protect.sh 未生成短名封装"
+fi
+# 密钥不得经过 Java：native_stub 生成的桩里不许有 setKey 调用
+if grep -vE '^[[:space:]]*#' "$SE/native_stub.py" | grep -q 'ncSetKey'; then
+  bad "native_stub.py 仍引用 ncSetKey（密钥会回到 dex）"
+else
+  ok
+  echo "   ✅ 密钥不经 dex（无 ncSetKey 调用）"
 fi
 
 echo

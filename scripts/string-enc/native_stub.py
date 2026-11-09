@@ -22,7 +22,6 @@ NC_STRDEC_KEYLEN = NC_STRDEC_NKEYS * 8
 
 # 与 JNI 层混淆表对应的明文名（nc_strdec_jni.c 里 XOR 0x5A 存的就是这两个）
 NATIVE_DEC_NAME = 'ncDec'
-NATIVE_SETKEY_NAME = 'ncSetKey'
 
 # 生成标记：native 桩与 Java 桩用不同标记，clean/续跑据此区分实现
 NATIVE_GEN_MARK = '# nc-strdec-native v1'
@@ -98,24 +97,23 @@ def render_native_stub(stub_desc, decrypt_method, seed_hex,
 
     invoke-static {{v0}}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V
 
-    # ② 密钥注入：byte[] → ncSetKey([B)V
-    #    为什么走 byte[] 而不是 4 个 long 参数：
-    #    NKEYS 是可配档位（1/4），用数组让 dex 侧代码形态与档位无关，
-    #    改档位只改 hex 长度，不用重写 smali 结构。
-    const/16 v0, {NC_STRDEC_KEYLEN}
-
-    new-array v0, v0, [B
-
-    fill-array-data v0, :keydata
-
-    invoke-static {{v0}}, {stub_desc}->{NATIVE_SETKEY_NAME}([B)V
-
+    # ② 密钥：不在这里注入。
+    #
+    # ⚠️ 为什么（2026-11-09 真机实测，连崩三轮）：
+    #   第一版在本 <clinit> 里直接 invoke-static ncSetKey([B)V ——
+    #   ART 对 native 方法的短名解析发生在【类链接阶段】，早于 <clinit>
+    #   执行，那时 loadLibrary 还没跑 → 记下"方法不存在" → 必抛
+    #     NoSuchMethodError: No static method ncSetKey([B)V
+    #   （真机日志：at <clinit>:12）
+    #   第二版改用反射推迟解析 —— 可行但 smali 复杂、寄存器易错。
+    #
+    #   最终方案：密钥【根本不经过 dex】。
+    #   构建期把种子写进 nc_strdec_cfg.h（protect.sh 生成），
+    #   C 侧的 nc_strdec_bootstrap() 编译进 so 并直接 set_key。
+    #   dex 侧只剩 loadLibrary 一句 —— 没有 native 方法可解析，时序问题消失。
+    #   收益：密钥不出现在 dex 任何位置（本来就是这个需求的核心）。
     return-void
 
-    :keydata
-    .array-data 1
-{payload}
-    .end array-data
 .end method
 
 # 解密入口：纯 native，dex 侧零算法
@@ -140,8 +138,8 @@ def write_native_stub(decompiled_dir, stub_desc, stub_pkg_dir, stub_file,
     # 生成期自检（fail-fast，不让半成品进产物）：
     # ① 必须含 native 声明且【没有方法体】—— 有体会被 ART 判为
     #    "A native method cannot have any instructions"（报错三十九同型）
-    # ② <clinit> 必须先 loadLibrary 再 setKey
-    # ③ 密钥必须落在 array-data 里（不是 const-string / 常量字段）
+    # ② <clinit> 必须 loadLibrary（so 未加载则所有 native 方法不可用）
+    # ③ 密钥【不得】出现在 dex 里（编译进 so 的 nc_strdec_cfg.h）
     bad = []
     if f'.method public static native {decrypt_method}(' not in text:
         bad.append('缺少 native 方法声明')
@@ -149,14 +147,15 @@ def write_native_stub(decompiled_dir, stub_desc, stub_pkg_dir, stub_file,
         bad.append('.end method 数量应为 2（<clinit> + native 声明）')
     if text.count('.method') != 2:
         bad.append('.method 数量应为 2')
-    li = text.find('loadLibrary')
-    sk = text.find(NATIVE_SETKEY_NAME)
-    if li < 0 or sk < 0 or li > sk:
-        bad.append('loadLibrary 必须在 setKey 之前（否则 ULE）')
-    if '.array-data 1' not in text:
-        bad.append('密钥未以 array-data 形式写入')
-    if seed_hex.lower() in text.replace('\n', '').replace(' ', '').replace('\t', ''):
-        bad.append('密钥以明文 hex 形态残留在文本里（应只在 array-data 字节中）')
+    if 'loadLibrary' not in text:
+        bad.append('缺少 loadLibrary（so 未加载 → native 方法全部不可用）')
+    # 密钥不该出现在桩里（2026-11-09 改设计后）：它编译进 so 的
+    # nc_strdec_cfg.h，dex 侧零密钥材料。这条断言保证"改回老做法"会立刻红。
+    if '.array-data 1' in text:
+        bad.append('桩里出现 array-data（密钥又回到 dex 了 —— 本需求明确禁止）')
+    _flat = text.replace('\n', '').replace(' ', '').replace('\t', '').lower()
+    if seed_hex.lower() in _flat:
+        bad.append('密钥以明文 hex 形态残留在桩文本里')
     # native 方法体内不允许出现指令：检查声明行与 .end method 之间
     head = text.split(f'.method public static native {decrypt_method}(')
     if len(head) == 2:

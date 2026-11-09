@@ -161,26 +161,22 @@ int nc_strdec_utf8_to_utf16(const uint8_t *in, size_t len,
  * （如 dpt 壳），只需重写这一层。
  */
 
-/* 把 ncDec / ncSetKey 两个 native 方法注册到 class_dot（点号分隔的类名）。
+/* ── JNI 层（实现在 nc_strdec_jni.c）───────────────────────────────
  *
- * ⚠️ 必须在 JNI_OnLoad 里调用，不能放 constructor：
- *    constructor 由动态链接器在 dlopen 内部执行，此时 classloader
- *    上下文未建立，FindClass 必失败（2026-10-19 真机实证，a7d9cbc）。
+ * 本头文件【不】暴露注册入口：绑定由构建期生成的 nc_strdec_bind.c
+ * 用 JNI 短名完成（Java_<mangled>_<method>），不需要 RegisterNatives，
+ * 也不需要 JNI_OnLoad。原因见 nc_strdec_jni.c 顶部说明。
+ */
+
+/* ── JNI 实现本体（供构建期生成的 nc_strdec_bind.c 转调）────────────
  *
- * 返回 0 = 成功；非 0 = 失败（调用方应返回 JNI_ERR，让 loadLibrary
- * 抛 UnsatisfiedLinkError 走 fail-closed，与"so 缺失"同路径）。 */
-int nc_strdec_register_natives(JNIEnv *env, const char *class_dot);
-
-/* 记录 JavaVM（可选）。由持有 JNI_OnLoad 的一方在 OnLoad 里调用。
- * 返回 0 = 成功；本模块从不自己提供 JNI_OnLoad —— 一个 so 只能有一个，
- * 而 libnc.so 里已有 Dex2C.cpp / nc_link_jni.c 两个潜在提供者，
- * 见 nc_strdec_jni.c 的说明。 */
-int nc_strdec_jni_attach(JavaVM *vm);
-
-/* 统一引导：记录 JavaVM + 把两个 native 方法注册到本次的随机桩类。
- * 桩类名来自构建期生成的 nc_strdec_cfg.h（无该头 = 非 native 桩组合，
- * 退化为只记录 JavaVM）。持有 JNI_OnLoad 的一方在 OnLoad 里调这个即可。 */
-int nc_strdec_bootstrap(JavaVM *vm, JNIEnv *env);
+ * 本头文件在宿主侧不 include <jni.h>，故只在有 jni.h 时声明。
+ * 重复声明必须与定义逐字一致，否则报 conflicting types（实测踩过）。
+ */
+#if !defined(NC_STRDEC_HOST_TEST) && !defined(NC_STRDEC_NO_JNI)
+jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload);
+void    nc_strdec_jni_set_key(JNIEnv *env, jclass clazz, jbyteArray key);
+#endif
 
 /* ── 仅供宿主测试（NC_STRDEC_HOST_TEST）─────────────────────────────
  * 暴露单块密钥流，便于与 Python/Java 侧逐值对拍。
