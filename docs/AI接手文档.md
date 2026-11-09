@@ -515,46 +515,28 @@ scripts/trigger_build.py              写入值 True → "c"；读点同步改�
 表达力（`required.unless` 只能表达"必填豁免"，不能表达"互斥"）。
 **这是"错了才发现"而非"不允许错"，如实记录为缺口。**
 
-#### ② 算法可选框（splitmix64 / ChaCha20）—— ✅ **已完成（2026-11-09）**
+#### ② 算法可选框（splitmix64 / ChaCha20）
 
-**动机不是速度**，而是**可逆性**：
+> **可以复用 ① 的 `choice` 机制**：`value_kind=choice` 已实现，
+> 只需在 `stringenc` 下新增一个子项 + 加 `NC_STRDEC_ALGO` 编译期常量。
+> 不用再动 `resolve-config.py` / `check-schema.py`。
 
-```
-splitmix64：可逆 —— 猜中任意一条明文 → 反解种子 → 全包沦陷
-ChaCha20  ：不可逆 —— 猜中一条只泄漏那一条
-```
-
-**落地形态**（与原计划的差异，都是实测后改的）：
-
-| 原计划 | 实际做的 | 为什么改 |
-|---|---|---|
-| 每条多存 nonce，Base64 变长 | **0 增长**：offset 直接当 counter | offset 本来就是全包唯一的，满足 ChaCha20 的 counter 不重复前提 |
-| 只影响 `key_byte()` 与 `nc_block_ks()` | 还改了**块粒度**（8→64 字节） | 硬套 8 字节契约会算了 64 字节只用 8 字节，浪费 8 倍 |
-| 只影响 C 侧 | 还改了 `nc_strdec.c` 的 include 顺序 | `cfg.h` 曾被头文件的 `#ifndef` 挡住，注入的档位从未生效 |
-
-**UI**：`stringenc.algo`，`type=radio`（横向单选）+ `visible_when{stub_impl,c}`。
-选 Java 桩时整行不显示 —— Java 桩的算法在 dex 里，换算法要重做整条
-d8→baksmali 链路与 384 项对拍，不在范围。
-
-> **为什么用横向单选而不是下拉框**：同一模块里已有一个下拉框（解密桩实现），
-> 两个长得一样会分不清。详见 `docs/配置schema.md` §4.2。
-
-**性能（宿主 aarch64 实测，64 MiB 密钥流）**：
+**动机不是速度**（实测方案② 只省 1.45ms，占 1%），而是**强度**：
 
 ```
-splitmix64        2230 MB/s  (3.6 ns / 8 字节块)
-ChaCha20 优化前     63 MB/s  (126 ns / 8 字节)   ← 8 倍浪费
-ChaCha20 优化后    311 MB/s  (206 ns / 64 字节)  ← 4.9×
+splitmix64（现状）：可逆。攻击者猜中一条明文 → 反推出种子 → 全包沦陷
+ChaCha20：不可逆。猜中一条只泄漏那一条
 ```
 
-换算整包（5526 位点）：增量从 1.7~4.2 ms 降到 **0.15~0.77 ms**。
+**用户明确要求**：保留 splitmix64 作为"速度优先"选项，ChaCha20 作为
+"安全优先"选项，做成可选。
 
-**真机（云端构建 + 装机）**：splitmix64 版与 ChaCha20 版均 TotalTime ≈300ms、
-进程存活、零崩溃、Room 无密文表名报错。
+**实现要点：**
 
-**仍未做**：ChaCha20 真机耗时未单独测量（TotalTime 差异在噪声内，
-只能说"没有可测的代价"，不能说"更快"）；SIMD 未做（v7a 的 NEON 是可选扩展，
-且 §8.4.1 的 SIMD 栈布局问题未查清）。
+- 只影响两处：`encrypt-strings.py` 的 `key_byte()`、`nc_strdec.c` 的 `nc_block_ks()`
+- **密文格式会变**：ChaCha20 每条要多存 nonce → Base64 长度变长
+- 必须是**编译期常量**（`NC_STRDEC_ALGO`），不能是运行期开关
+- 约 3~4 小时 + 真机验证
 
 #### ③ 其他待办（优先级低）
 
