@@ -320,6 +320,35 @@ rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
 check("T17d stub_impl='native'（不在 options 里）→ 必须报错",
       rc != 0 and "options" in err, f"rc={rc} err={err}")
 
+# ── T18: 规则文件路径必须紧跟模块 arg（与 schema children 顺序解耦）─────
+# 为什么必须有这条：2026-11-09 把 stub_impl 从数组末位提到首位（UI 上把
+# 大文本框 rules_file 挪到后面，免得把「解密桩也抽进 so」挤到看不见），
+# 结果 argv 变成 `--stringenc --dex2c-stub schema_rules/stringenc.txt`。
+# 而 protect.sh:123 的取值守卫是 `if [[ $# -ge 1 && "$1" != --* ]]`
+# ——下一个 token 以 -- 开头就认为"没给规则文件"→ STRING_RULES 为空
+# → protect.sh:241 报「必须提供类名规则文件」→ exit 1。
+# 即：**改 UI 排序把构建改挂了**，且 T6/T6o 当时才抓到（纯顺序断言过期）。
+# 修法是把路径延迟到子项循环结束后插回 arg 正后方，从此与数组顺序无关。
+# 本条直接钉"结果"而非"顺序"：不论 schema 怎么排，--stringenc 后必须是路径。
+for label, order in [("stub_impl 在前", {"stub_impl": "java", "dex2c_stub": True}),
+                     ("stub_impl 在后", {"dex2c_stub": True, "stub_impl": "java"})]:
+    rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**", **order}))
+    idx = args.index("--stringenc") if "--stringenc" in args else -1
+    nxt = args[idx + 1] if 0 <= idx < len(args) - 1 else None
+    check(f"T18 {label} → 规则路径紧跟 --stringenc（protect.sh 取值守卫前提）",
+          rc == 0 and nxt == "schema_rules/stringenc.txt",
+          f"rc={rc} args={args} err={err}")
+
+# 反向：若把路径排到 flag 之后，模拟 protect.sh 的守卫判断应为"未提供规则"
+# （证明这条断言不是自证，而是真的覆盖了一个会让构建失败的条件）
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "dex2c_stub": True, "stub_impl": "c"}))
+idx = args.index("--stringenc") if "--stringenc" in args else -1
+nxt = args[idx + 1] if 0 <= idx < len(args) - 1 else None
+check("T18c 纯C桩 + dex2c_stub 同勾 → resolver 不拦（分工：protect.sh 管组合非法）",
+      rc == 0 and nxt == "schema_rules/stringenc.txt",
+      f"rc={rc} args={args} err={err}")
+
 # 非字符串非布尔（如整数）→ 报错
 rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
                                           "stub_impl": 1}))

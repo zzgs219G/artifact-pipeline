@@ -75,27 +75,6 @@
       "group_label": "加密范围",
       "children": [
         {
-          "key": "rules_file",
-          "label": "类名规则",
-          "type": "text",
-          "multiline": true,
-          "default": "",
-          "value_kind": "rules_file",
-          "required": {
-            "when": "always"
-          },
-          "hint": "每行一条，支持 ** / com.test.** / activity*"
-        },
-        {
-          "key": "dex2c_stub",
-          "label": "解密桩也抽进 so",
-          "desc": "解密桩内核也编进 so，dex 里只剩声明。性能：无损（解密结果进缓存，只算一次）",
-          "type": "checkbox",
-          "default": false,
-          "value_kind": "flag",
-          "arg_on": "--dex2c-stub"
-        },
-        {
           "key": "stub_impl",
           "label": "解密桩实现",
           "desc": "与「解密桩也抽进 so」互斥，二选一。性能：首次解密多算几条 mix64，走缓存后无差异",
@@ -116,6 +95,27 @@
               "arg_on": "--stringenc-native"
             }
           ]
+        },
+        {
+          "key": "dex2c_stub",
+          "label": "解密桩也抽进 so",
+          "desc": "解密桩内核也编进 so，dex 里只剩声明。性能：无损（解密结果进缓存，只算一次）",
+          "type": "checkbox",
+          "default": false,
+          "value_kind": "flag",
+          "arg_on": "--dex2c-stub"
+        },
+        {
+          "key": "rules_file",
+          "label": "类名规则",
+          "type": "text",
+          "multiline": true,
+          "default": "",
+          "value_kind": "rules_file",
+          "required": {
+            "when": "always"
+          },
+          "hint": "每行一条，支持 ** / com.test.** / activity*"
         }
       ]
     },

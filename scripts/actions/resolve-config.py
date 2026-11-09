@@ -161,6 +161,20 @@ for m in modules:
     if unknown_in_mod:
         die(f"模块 {key} 出现 schema 未定义的子 key: {unknown_in_mod}（拒绝执行）")
 
+    # ⚠️ 规则文件路径必须【紧跟模块 arg】，不能被子项的 arg_on 插到中间。
+    # 原因：protect.sh 用 `--stringenc` / `--dex2c` 的值解析守卫
+    #   `if [[ $# -ge 1 && "$1" != --* ]]`   （protect.sh:123）
+    # 即"下一个 token 若以 -- 开头就认为没给规则文件"。于是
+    #   --stringenc --dex2c-stub schema_rules/stringenc.txt
+    # 会让 rules 被解析成未提供 → 报「必须提供类名规则文件」→ exit 1。
+    #
+    # 而规则文件在 argv 里的位置【原本由 schema 的 children 数组顺序决定】——
+    # 2026-11-09 把 stub_impl 提到 rules_file 前面（UI 上把大文本框挪到后面、
+    # 免得把开关挤到看不见）时，这个隐性耦合才暴露：**改 UI 顺序把构建改挂了**。
+    # 所以这里不再依赖数组顺序：先把路径攒起来，子项循环结束后插回 arg 之后。
+    arg_pos = len(argv_out)      # m["arg"] 刚 append 完，位置就是它后面
+    deferred_paths = []
+
     for c in m.get("children", []):
         ckey = c.get("key")
         value_kind = c.get("value_kind")
@@ -283,8 +297,14 @@ for m in modules:
         if not blank:
             rule_files.append((key, value))
             # §5.2：路径以 workspace 相对形式追加（schema_rules/<key>.txt），
-            # workflow 在仓库根执行，protect.sh 与后续步骤均按相对路径可访问
-            argv_out.append(f"schema_rules/{key}.txt")
+            # workflow 在仓库根执行，protect.sh 与后续步骤均按相对路径可访问。
+            # 先入 deferred_paths，循环结束后统一插回 arg 之后（见 arg_pos 处注释）。
+            deferred_paths.append(f"schema_rules/{key}.txt")
+
+    # 把规则文件路径插回模块 arg 的正后方，恢复「--stringenc <path> [子项 flags]」
+    # 的解析友好顺序，且与 schema 数组顺序彻底解耦。
+    if deferred_paths:
+        argv_out[arg_pos:arg_pos] = deferred_paths
 
 # 保险丝 d 出口：required 校验失败集中报错（fail-fast，人话）
 if failures:

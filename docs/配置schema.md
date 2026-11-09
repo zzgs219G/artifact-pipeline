@@ -286,9 +286,8 @@ state["模块.子项"] = "java"       ← 两种渲染的状态模型完全相�
 | 5 | 下游模块脚本 | 如 `scripts/packer/packer.sh` 消费该环境变量 |
 | 6 | `docs/流程文档.md` 对应模块章节 | |
 
-⚠️ **不要给 `parent` 模块加"只有一个选项的 checkbox"**。曾经有 `antidiff.reencode`
-这种"勾不勾都一样的复选框"，最后被删了 —— 零损耗功能直接并进模块本体，
-别让用户面对一个没有意义的选择。
+⚠️ **`children` 数组顺序 = UI 渲染顺序，但【不影响 argv 顺序】**（2026-11-09 修正）。
+规则文件路径由 `resolve-config.py` 延迟插入，永远紧跟模块 `arg` —— 见 §5.4。
 
 ### 5.2 加一个模块
 
@@ -322,6 +321,73 @@ keys == ["sigcheck", "dex2c", "obfuscate", "stringenc",
 - **必须标性能影响**：每个模块/子项都有一句 `性能：...`
 
 ---
+
+### 5.4 排 `children` 顺序的两条硬规则
+
+**① 大控件放最后。** `type=text` + `multiline`（类名规则）会占掉半屏，
+如果排在最前，下面的复选框会被挤出可视区，用户以为"没有这个选项"。
+`stringenc` 的实际顺序是：
+
+```
+1. stub_impl     (select)     ← 主选择，决定下面有什么
+2. dex2c_stub    (checkbox)   ← 依赖 stub_impl=java，但目前 UI 不隐藏
+3. rules_file    (text)       ← 大文本框放最后
+```
+
+**② 不要把 `rules_file` 排到别的子项之前就以为"只是改 UI"。**
+`protect.sh` 解析 `--stringenc` / `--dex2c` 的值时有守卫：
+
+```bash
+--stringenc) WANT_STRINGENC=1; shift
+             if [[ $# -ge 1 && "$1" != --* ]]; then STRING_RULES="$(normalize_path "$1")"; fi ;;
+```
+
+即**下一个 token 以 `--` 开头 = 认为没给规则文件**。所以
+`--stringenc --dex2c-stub rules.txt` 会让 `STRING_RULES` 为空 →
+`protect.sh` 报「必须提供类名规则文件」→ `exit 1`。
+
+2026-11-09 就踩了这个：把 `stub_impl` 提到首位后 argv 变成
+`--stringenc --dex2c-stub schema_rules/stringenc.txt`，**改 UI 排序把构建改挂了**，
+而当时只有 T6/T6o 两条纯顺序断言变红，看不出这是真故障。
+
+修法是 `resolve-config.py` **不再依赖数组顺序**：把规则文件路径先攒进
+`deferred_paths`，子项循环结束后 `argv_out[arg_pos:arg_pos] = deferred_paths`
+插回模块 `arg` 正后方。于是「规则路径紧跟 `--stringenc`」由代码保证，
+schema 里怎么排都不会破坏解析。T18 两条断言钉住这个结果（含"stub_impl 在前/在后"两种）。
+
+⚠️ **不要给 `parent` 模块加"只有一个选项的 checkbox"**。曾经有 `antidiff.reencode`
+这种"勾不勾都一样的复选框"，最后被删了 —— 零损耗功能直接并进模块本体，
+别让用户面对一个没有意义的选择。
+
+### 5.5 子项之间的依赖（**当前不能表达，是已知缺口**）
+
+`required.unless` 只能引用**模块**、只能表达"必填豁免"，**不能表达"子项 A 的取值
+决定子项 B 是否可见/是否参与提交"**。所以：
+
+```jsonc
+// 想表达：「抽进 so」只在 stub_impl = "java" 时才有意义
+{ "key": "dex2c_stub",
+  "visible_when": { "key": "stub_impl", "equals": "java" } }   // ← 不存在这个字段
+```
+
+**现状**：`stub_impl` 选「纯 C 桩」后，「解密桩也抽进 so」仍在 UI 上可勾。
+用户勾上 → `protect_config` 同时含 `stub_impl:"c"` + `dex2c_stub:true` →
+`resolve-config` 老实吐出 `--stringenc-native --dex2c-stub` →
+`protect.sh:183` **exit 1**「两者同时勾 = 没有可转译的对象」。
+
+分工是对的（resolver 管"勾了就传"，流水线管"组合非法拒收"），但**用户体验是
+"我只点了合法选项，构建却挂了"**。要真正修好需要：
+
+1. schema 新增 `visible_when: {key, equals}`（或被依赖方的 `hides` 列表）
+2. `jian_box`：渲染时过滤（`ProtectConfigCard.kt` 里那个无条件 `forEach` 加判断）
+   + `buildProtectConfig()` 提交时跳过不满足依赖的子项
+3. `resolve-config.py`：收到该键但条件不满足时**忽略而非报错**
+   （否则旧 App 快照会突然失败）
+4. `check-schema.py`：断言 `visible_when.key` 指向同模块内已存在的子项、
+   `equals` 值在该子项的 `options` 里
+
+跨两个仓库、且 jian_box 需要编译验证，**未做**。在那之前，互斥只靠三层
+fail-fast（CLI / `protect.sh` / `resolve-config`）。
 
 ## 6. 消费者各自会拦什么（三层 fail-fast）
 
