@@ -657,7 +657,15 @@ jobs:
         id: toolchain
         uses: ./.github/actions/setup-toolchain
         with:
-          ndk-version: r27d
+          # ⚠️ 临时改成 r29 做兼容性实验（2026-11-09）：
+          #   tools/nox.zip 的 VERSION=v0.9.11-obf，它是走 Amice bundle 的
+          #   NDK r29（clang 21）编出来的，而本 job 默认用 r27d（clang 18）
+          #   链接它 —— 违反 nox 自己 make-zip-lib.sh 第 20 行的
+          #   「.a 与 NDK/编译器版本绑定，不能混链」。
+          #   实测：r27d 链接能跑；本地 r29 编译+链接反而 SIGILL。
+          #   这里换成 r29 验证「纯 r29 链路是否可用」。
+          #   **实验完必须改回 r27d。**
+          ndk-version: r29
           nox-source: 'false'
 
       # ── Amice bundle（仅当 protect_config 勾选 obfuscate 时）────────────
