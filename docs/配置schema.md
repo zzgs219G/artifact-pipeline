@@ -91,6 +91,7 @@ configs/v1/config-schema.json          ← 唯一真相源（UI + 校验 + 执�
 | `arg_on` | ❌ | `value_kind=flag/arg_value` 必填；`choice` 时挂在 option 上 |
 | `arg_value` | ❌ | 仅 `value_kind=arg_value`，与 `arg_on` 成对（见 §3.2） |
 | `options` | ❌ | 仅 `type=select`/`choice`，`[{value,label},...]` |
+| `visible_when` | ❌ | 子项依赖 `{"key": "<同模块子项>", "equals": "<值>"}`，见 §5.5 |
 
 ### 2.1 `type` 与 `value_kind` 是**两套正交语义**
 
@@ -359,35 +360,57 @@ schema 里怎么排都不会破坏解析。T18 两条断言钉住这个结果（
 这种"勾不勾都一样的复选框"，最后被删了 —— 零损耗功能直接并进模块本体，
 别让用户面对一个没有意义的选择。
 
-### 5.5 子项之间的依赖（**当前不能表达，是已知缺口**）
-
-`required.unless` 只能引用**模块**、只能表达"必填豁免"，**不能表达"子项 A 的取值
-决定子项 B 是否可见/是否参与提交"**。所以：
+### 5.5 子项之间的依赖：`visible_when`（2026-11-09 已实现）
 
 ```jsonc
-// 想表达：「抽进 so」只在 stub_impl = "java" 时才有意义
 { "key": "dex2c_stub",
-  "visible_when": { "key": "stub_impl", "equals": "java" } }   // ← 不存在这个字段
+  "visible_when": { "key": "stub_impl", "equals": "java" } }
 ```
 
-**现状**：`stub_impl` 选「纯 C 桩」后，「解密桩也抽进 so」仍在 UI 上可勾。
-用户勾上 → `protect_config` 同时含 `stub_impl:"c"` + `dex2c_stub:true` →
-`resolve-config` 老实吐出 `--stringenc-native --dex2c-stub` →
-`protect.sh:183` **exit 1**「两者同时勾 = 没有可转译的对象」。
+语义：**本子项只在同模块的 `key` 取值等于 `equals` 时存在。**
+依赖不满足 = 该子项**不存在**（不是禁用、不是置灰）—— UI 整行不渲染，
+`protect_config` 里不出现该键，argv 不产生对应参数。
 
-分工是对的（resolver 管"勾了就传"，流水线管"组合非法拒收"），但**用户体验是
-"我只点了合法选项，构建却挂了"**。要真正修好需要：
+**为什么选"消失"而不是"置灰"**（2026-11-09 用户裁决）：
 
-1. schema 新增 `visible_when: {key, equals}`（或被依赖方的 `hides` 列表）
-2. `jian_box`：渲染时过滤（`ProtectConfigCard.kt` 里那个无条件 `forEach` 加判断）
-   + `buildProtectConfig()` 提交时跳过不满足依赖的子项
-3. `resolve-config.py`：收到该键但条件不满足时**忽略而非报错**
-   （否则旧 App 快照会突然失败）
-4. `check-schema.py`：断言 `visible_when.key` 指向同模块内已存在的子项、
-   `equals` 值在该子项的 `options` 里
+置灰要新造一种视觉状态（灰掉的复选框 + 原因文案），而消失是零成本 ——
+容器已有 `animateContentSize`，行进出都是平滑的。代价是用户切回 Java 桩时
+会"多出一行"，但那正是他切换后该看到的结果，不需要解释。
 
-跨两个仓库、且 jian_box 需要编译验证，**未做**。在那之前，互斥只靠三层
-fail-fast（CLI / `protect.sh` / `resolve-config`）。
+**四条实现约束**（别自由发挥）：
+
+| # | 约束 | 违反后果 |
+|---|---|---|
+| 1 | `key` 必须指向**同模块**子项，且被依赖方必须是 `value_kind=choice` | 跨模块取值语义未定义（模块可能整个未启用）；非 choice 则 `equals` 无意义 |
+| 2 | `equals` 必须是被依赖方 `options` 里的合法值 | 该子项**永远不可见** —— 功能静默消失，比报错难查得多 |
+| 3 | **不支持链式**（被依赖方自己不能也有 `visible_when`） | 求值顺序无保证，UI 与 resolver 各实现一遍必然漂移 |
+| 4 | `buildProtectConfig` / `validate` / 渲染 / 帮助弹窗**共用同一个判断函数** | UI 藏了但提交仍带上 = "界面上没有、产物里有" 
+
+第 1~3 条由 `check-schema.py` 静态断言（5 条，含"引用自己"与"多出字段"）。
+第 4 条在 jian_box 侧的落地是 `ProtectConfigSchema.childVisible()` ——
+**它是唯一真相源，4 个调用点全走它**：
+
+```
+ProtectConfigCard.kt:129   帮助弹窗的 hint 列表 .filter { childVisible(...) }
+ProtectConfigCard.kt:148   渲染：不满足 → return@forEach（整行不出）
+ProtectConfigSchema.kt:249 validate：不满足 → 不参与必填校验
+ProtectConfigSchema.kt:293 buildProtectConfig：不满足 → 不写进 JSON
+```
+
+**resolver 侧必须静默跳过，不能报错**（`resolve-config.py`）：
+
+```python
+if dep_actual is not None and dep_actual != dep_expect:
+    continue      # 该项按"未启用"处理
+```
+
+原因：旧 App 快照不认识 `visible_when`，会照旧提交 `dex2c_stub` 键
+（用户先选 Java 桩勾上它，再切纯净 C 桩，旧版 App 不会清键）。
+报错会让**原本能跑的构建突然失败** —— 与 `choice` 的旧布尔兼容同一类处理。
+
+**当前唯一使用者**：`stringenc.dex2c_stub`（`equals: "java"`）。
+`stub_impl` 选「纯 C 桩」时它整行消失 —— 因为纯 C 桩的算法已在 so 里，
+不需要"抽进 so"这个动作，勾了只会让 `protect.sh` 报互斥错。
 
 ## 6. 消费者各自会拦什么（三层 fail-fast）
 
@@ -428,7 +451,7 @@ config 有、schema 没有 → **拒绝执行**。方向性不对称是刻意的
 |---|---|
 | `check-schema.py` 不校验子项 `type` | 拼错成 `"dropdown"` 会静默变成文本框（§4.1） |
 | `check-schema.py` 不校验非 `select` 的 `value_kind` | 写错的 `value_kind` 到运行期才被保险丝 c 抓到（`choice` 的结构已校验，见 §3.4） |
-| UI 层无跨字段互斥 | `stub_impl` × `dex2c_stub` 靠 CLI / `protect.sh` / `resolve-config` 三层兜底 |
+| 旧 App 不认识 `visible_when` | 旧版 App 会继续显示、继续提交被隐藏的子项。resolver 侧静默跳过（不报错），故**构建不会失败**，但旧 App 上仍有"能勾出互斥组合"的观感问题。要彻底解决只能等 App 更新 |
 | APP 读的是镜像不是本仓库 | 改 schema 后若镜像未同步，**APP 上看到的是旧 schema** |
 
 ---

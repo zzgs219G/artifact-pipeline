@@ -124,14 +124,21 @@ expect = ["--sigcheck", "--dex2c", "schema_rules/dex2c.txt",
           "--anti-diff", "--envcheck", "--packer"]
 check("T6 全家桶 → 参数齐全且顺序固定", rc == 0 and args == expect, f"rc={rc} args={args}")
 
-# T6e stringenc.dex2c_stub 子复选框(2026-10 联动;同日防呆复盘改 default false):
-# 缺省 → 不追加。default 曾为 true,与 protect.sh 的依赖校验构成组合矛盾——
-# 只勾 stringenc 的老配置被 resolver 自动追加 --dex2c-stub,protect.sh fail-fast
-# ("必须与 --dex2c 同时勾选")整包构建失败。故 default 改 false(对齐 exclude_x86 先例),
-# 显式勾选才追加(见 T6o);flag 分支:值是布尔、不写规则文件、不进 required 校验。
+# T6e stringenc.dex2c_stub 子复选框(2026-10 联动; 2026-11-09 改回 default true):
+# 缺省 → 追加 --dex2c-stub。演进史：
+#   · 2026-10-16 从 true 改成 false：当时 protect.sh 的依赖校验是
+#     "必须与 --dex2c 同时勾选"，于是默认 true + 只勾 stringenc = 构建失败。
+#   · 2026-11-02 那次架构修正删掉了"必须 --dex2c"（改走 stringenc 自己的
+#     LINK_STUB 接口，见 protect.sh:308 —— 条件是 WANT_STRINGENC && WANT_DEX2C_STUB），
+#     风险根因消失。
+#   · 2026-11-09 改回 true：它是保护强度项（把解密桩内核也抽离 dex），
+#     代价只是构建 +30~60s（解包/回编 2 次），运行期无损。
+#     与 trigger_build.py 的 --all 预设口径一致（那里也默认带它）。
+# 显式 false 仍可不追加（见 T6f）；flag 分支：值是布尔、不写规则文件。
 rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "com.a.**"}))
-check("T6e stringenc.dex2c_stub 缺省 → 按 default(false) 不追加",
-      rc == 0 and args == ["--stringenc", "schema_rules/stringenc.txt"],
+check("T6e stringenc.dex2c_stub 缺省 → 按 default(true) 追加",
+      rc == 0 and args == ["--stringenc", "schema_rules/stringenc.txt",
+                           "--dex2c-stub"],
       f"rc={rc} args={args} err={err}")
 
 # T6f 显式不勾 → 不追加(老路径:桩留在 dex)
@@ -249,7 +256,8 @@ check("T11 全部 disabled → 报错", rc != 0 and "没有" in err, f"rc={rc} e
 tricky = "**/com.test.**  # 注释 行 !排除\nactivity*\n\n$HOME `id` ; rm -rf\n"
 rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": tricky}))
 check("T12 特殊字符规则 → 原样写入文件、argv 仅相对路径",
-      rc == 0 and args == ["--stringenc", "schema_rules/stringenc.txt"]
+      rc == 0 and args == ["--stringenc", "schema_rules/stringenc.txt",
+                           "--dex2c-stub"]     # dex2c_stub 现默认 true（见 T6e）
       and files.get("stringenc.txt") == tricky,
       f"rc={rc} args={args}")
 
@@ -348,6 +356,39 @@ nxt = args[idx + 1] if 0 <= idx < len(args) - 1 else None
 check("T18c 纯C桩 + dex2c_stub 同勾 → resolver 不拦（分工：protect.sh 管组合非法）",
       rc == 0 and nxt == "schema_rules/stringenc.txt",
       f"rc={rc} args={args} err={err}")
+
+# ── T19: visible_when 子项依赖（2026-11-09）─────────────────────────
+# schema 里 dex2c_stub 声明 visible_when={key:stub_impl, equals:"java"}，
+# 语义 = 「只在 Java 桩时存在」。UI 侧直接不渲染该行；resolver 侧必须
+# 【静默跳过】而不是报错 —— 旧 App 快照不认识 visible_when，会照旧提交
+# dex2c_stub 键（用户先选 Java 桩勾上它，再切纯净 C 桩，旧版 App 不会清键）。
+# 若这里报错 → 原本能跑的构建突然失败。
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": "c"}))
+check("T19a stub_impl='c' + dex2c_stub 缺失 → 不追加（依赖不满足）",
+      rc == 0 and "--dex2c-stub" not in args, f"rc={rc} args={args} err={err}")
+
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": "c", "dex2c_stub": True}))
+check("T19b 旧快照：stub_impl='c' + dex2c_stub=true → 静默忽略，不报错不追加",
+      rc == 0 and "--dex2c-stub" not in args, f"rc={rc} args={args} err={err}")
+
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": "java", "dex2c_stub": True}))
+check("T19c stub_impl='java' + dex2c_stub=true → 正常追加",
+      rc == 0 and "--dex2c-stub" in args, f"rc={rc} args={args} err={err}")
+
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": "java"}))
+check("T19d stub_impl='java' + 缺失 → 按 default(true) 追加",
+      rc == 0 and "--dex2c-stub" in args, f"rc={rc} args={args} err={err}")
+
+# 回执一致性：依赖不满足的子项不该出现在「本次勾选的模块」清单里，
+# 否则又是「勾选回执与产物不一致」——那正是这份回执要解决的问题。
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": "c", "dex2c_stub": True}))
+check("T19e 回执里不出现被隐藏的子项（依赖不满足）",
+      rc == 0 and "解密桩也抽进 so" not in err, f"rc={rc} err={err}")
 
 # 非字符串非布尔（如整数）→ 报错
 rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",

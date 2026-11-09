@@ -49,6 +49,37 @@ for m in d["modules"]:
                         f"{k}.{c['key']}: 带 arg_on 的 option 有 {len(nd)} 个，"
                         f"旧快照布尔值无法确定映射（最多 1 个）")
 
+            # 子项依赖（2026-11-09）：visible_when: {key, equals}
+            # 语义 = 本子项只在 key 的取值等于 equals 时存在。四条断言，
+            # 全是"写错了要到运行期才炸、且炸得不像 schema 问题"的类型：
+            if "visible_when" in c:
+                vw = c["visible_when"]
+                assert set(vw) == {"key", "equals"}, (
+                    f"{k}.{c['key']}: visible_when 必须是 key+equals")
+                assert isinstance(vw["key"], str) and isinstance(vw["equals"], str), (
+                    f"{k}.{c['key']}: visible_when 的 key/equals 必须是字符串")
+                # ① 必须指向【同模块内】的子项 —— 跨模块取值语义未定义（模块可能整个未启用）
+                sib = {s["key"]: s for s in m["children"]}
+                assert vw["key"] in sib, (
+                    f"{k}.{c['key']}: visible_when.key={vw['key']!r} 不是同模块的子项")
+                assert vw["key"] != c["key"], (
+                    f"{k}.{c['key']}: visible_when 不能引用自己")
+                # ② 被依赖方必须是带 options 的 choice，否则 equals 无意义
+                dep = sib[vw["key"]]
+                assert dep.get("value_kind") == "choice", (
+                    f"{k}.{c['key']}: visible_when.key={vw['key']!r} 必须是 "
+                    f"value_kind=choice（当前 {dep.get('value_kind')!r}）")
+                # ③ equals 必须是该 choice 的合法 option，否则该子项永远不可见
+                #    （静默永不显示 = 用户永远看不到这个功能，比报错难查得多）
+                dvals = [o["value"] for o in dep["options"]]
+                assert vw["equals"] in dvals, (
+                    f"{k}.{c['key']}: visible_when.equals={vw['equals']!r} "
+                    f"不在 {vw['key']} 的 options {dvals} 里")
+                # ④ 被依赖方自身不能也有 visible_when（链式依赖无法保证求值顺序，
+                #    UI 与 resolver 各实现一遍必然漂移）
+                assert "visible_when" not in dep, (
+                    f"{k}.{c['key']}: visible_when 不支持链式（{vw['key']} 自己也有 visible_when）")
+
 assert len(keys) == len(set(keys)), "模块 key 重复"
 # key 顺序 = 勾选 UI 的展示顺序 = protect.sh 的固定执行顺序
 # （protect.sh 阶段序：指纹 → dex2c 转译(唯一引擎) → 组装 NDK(含 envcheck 并入 libnc.so) → 编译

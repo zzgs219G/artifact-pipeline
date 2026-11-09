@@ -99,11 +99,15 @@
         {
           "key": "dex2c_stub",
           "label": "解密桩也抽进 so",
-          "desc": "解密桩内核也编进 so，dex 里只剩声明。性能：无损（解密结果进缓存，只算一次）",
+          "desc": "解密桩内核也编进 so，dex 里只剩声明。性能：运行期无损（解密结果进缓存，只算一次）；构建 +30~60s（解包/回编变 2 次）",
           "type": "checkbox",
-          "default": false,
+          "default": true,
           "value_kind": "flag",
-          "arg_on": "--dex2c-stub"
+          "arg_on": "--dex2c-stub",
+          "visible_when": {
+            "key": "stub_impl",
+            "equals": "java"
+          }
         },
         {
           "key": "rules_file",

@@ -183,6 +183,23 @@ for m in modules:
             # 不产生任何参数；若网页手填出现了也静默忽略（schema 有定义，不算未知 key）
             continue
 
+        # 子项依赖（2026-11-09）：visible_when: {key: <同模块子项>, equals: <值>}
+        # 语义 = 「本子项只在 <key> 的取值等于 equals 时才存在」。
+        # UI 侧直接不渲染该行；这里必须【静默跳过】，不能报错 ——
+        # 旧 App 快照（不认识 visible_when 字段）会把该子项也提交上来，
+        # 报错会让原本能跑的构建突然失败。典型场景：用户先选 Java 桩
+        # （提交 dex2c_stub:true），再切纯净 C 桩，旧版 App 不会清掉已提交的键。
+        vw = c.get("visible_when")
+        if vw is not None:
+            dep_key = vw.get("key")
+            dep_expect = vw.get("equals")
+            if not isinstance(dep_key, str) or not isinstance(dep_expect, str):
+                die(f"模块 {key}.{ckey} 的 visible_when 必须是 {{key, equals}} 字符串对")
+            dep_actual = cfg_node.get(dep_key)
+            if dep_actual is not None and dep_actual != dep_expect:
+                # 依赖不满足 → 该项整体不存在，按"未启用"处理
+                continue
+
         # 子复选框（v1.1 结构，报错四十三复挂 packer.smaller）：value_kind=flag
         # → 勾选时把 arg_on 追加进 argv。与 text/rules_file 不同：值是布尔、
         # 不写规则文件、不进 required 校验；子键缺失按 schema default（布尔）；
@@ -355,6 +372,12 @@ def _dump_plan(cfg):
             for ch in mod.get("children", []):
                 ck = ch["key"]
                 if ck not in val:
+                    continue
+                # visible_when 不满足 → 该子项不存在，回执里也别印出来
+                # （否则用户看到「✅ 解密桩也抽进 so」而产物里没有该参数，
+                #   正是本回执存在要解决的"勾了与产物不一致"问题）
+                vw = ch.get("visible_when")
+                if vw and val.get(vw.get("key")) != vw.get("equals"):
                     continue
                 cv = val[ck]
                 if ch.get("value_kind") in ("flag", "arg_value"):
