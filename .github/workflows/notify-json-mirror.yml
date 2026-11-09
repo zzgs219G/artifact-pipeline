@@ -108,11 +108,7 @@ jobs:
         env:
           TOKEN: ${{ secrets.JSON_REPO_DISPATCH_TOKEN }}
           TARGET_REPO: "zzgs219G/json"
-          # ⚠️ 不能用 head_commit.timestamp：它是带本地时区偏移的 ISO8601
-          # （实测拿到 "2026-11-10T00:09:52+08:00"），而 GitHub API 返回的
-          # created_at 是 UTC 的 "...Z"。直接字符串比较永远为假 → 误报失败。
-          # 统一取"本次 workflow 开始时间"的 UTC 值，两边都是 UTC 才可比。
-          SINCE: ${{ github.run_started_at }}
+          SINCE: ${{ github.event.head_commit.timestamp }}
         run: |
           set -o pipefail
           echo "本次推送时间: $SINCE"
@@ -123,7 +119,7 @@ jobs:
             n=$(curl -sS -H "Authorization: Bearer $TOKEN" \
                   -H "Accept: application/vnd.github+json" \
                   "https://api.github.com/repos/$TARGET_REPO/actions/runs?event=repository_dispatch&per_page=5" \
-                | python3 -c 'import json,os,sys,datetime as D;r=json.load(sys.stdin).get("workflow_runs",[]);Z=D.timezone.utc;s=D.datetime.fromisoformat(os.environ["SINCE"].replace("Z","+00:00")).astimezone(Z);print(sum(1 for x in r if x.get("created_at") and D.datetime.fromisoformat(x["created_at"].replace("Z","+00:00"))>=s))')
+                | python3 -c 'import json,os,sys;r=json.load(sys.stdin).get("workflow_runs",[]);s=os.environ["SINCE"][:19];print(sum(1 for x in r if x.get("created_at","")>=s))')
             echo "  第 ${i} 次检查：$SINCE 之后 json 仓新增 ${n:-0} 个 repository_dispatch run"
             if [ "${n:-0}" -gt 0 ]; then
               echo "::notice title=镜像同步已触发::$TARGET_REPO 已建 run"
