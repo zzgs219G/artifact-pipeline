@@ -29,7 +29,9 @@ for m in d["modules"]:
                 if "unless" in r:
                     u = r["unless"]
                     assert set(u) == {"key", "is"}, f"{k}.{c['key']}: unless 必须是 key+is（D4）"
-            if c["type"] == "select":
+            # select 与 radio 都是"从 options 里选一个"的渲染形态，校验规则相同。
+            # 区别只在 UI（下拉 vs 横向单选），执行语义都是 value_kind=choice。
+            if c["type"] in ("select", "radio"):
                 vals = [o["value"] for o in c["options"]]
                 assert c["default"] in vals, f"{k}.{c['key']}: default 不在 options"
                 # value_kind=choice（2026-11-09）：值从 options 里选一个，

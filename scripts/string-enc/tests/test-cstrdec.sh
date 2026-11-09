@@ -36,7 +36,7 @@ chk()  { if [[ "$2" == "$3" ]]; then ok; else bad "$1（期望 $3，实得 $2）
 W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
 
-echo "══ 0. 编译（两种 NKEYS 档位）══"
+echo "══ 0. 编译（splitmix64 两档 + ChaCha20）══"
 for n in 1 4; do
   # shellcheck disable=SC2086
   if ! "$CC" -std=c99 -O2 -Wall -Wextra -Wpedantic \
@@ -48,6 +48,15 @@ for n in 1 4; do
   [[ -s "$W/cc$n.log" ]] && { echo "❌ NKEYS=$n 有编译警告:" >&2; cat "$W/cc$n.log" >&2; exit 1; }
   echo "   ✅ NKEYS=$n 零警告编译通过"
 done
+# ChaCha20 档（2026-11-09）：只支持 NKEYS=1（256 位密钥直接当 ChaCha20 key）
+if ! "$CC" -std=c99 -O2 -Wall -Wextra -Wpedantic \
+    -DNC_STRDEC_NKEYS=1 -DNC_STRDEC_ALGO=2 -DNC_STRDEC_HOST_TEST \
+    -I"$CSRC" "$CSRC/nc_strdec.c" "$HERE/host_cstrdec.c" \
+    -o "$W/hostchacha" 2>"$W/ccchacha.log"; then
+  echo "❌ ChaCha20 编译失败:" >&2; cat "$W/ccchacha.log" >&2; exit 1
+fi
+[[ -s "$W/ccchacha.log" ]] && { echo "❌ ChaCha20 有编译警告:" >&2; cat "$W/ccchacha.log" >&2; exit 1; }
+echo "   ✅ ChaCha20 零警告编译通过"
 
 # ── 1. Base64 解码对拍（C vs Python）──────────────────────────────
 echo "══ 1. Base64 解码：C vs Python ══"
@@ -126,6 +135,90 @@ PY
   done
   echo "   NKEYS=$nk 密钥流对拍完成"
 done
+
+# ── 2b. ChaCha20 密钥流（2026-11-09）────────────────────────────────
+# 为什么单独一组：ChaCha20 是新增的可选算法（--stringenc-chacha20），
+# 它不可逆，能挡住"猜中一条明文 → 反推密钥 → 解全包"。
+# 三层验证，缺一层都不算数：
+#   ① RFC 8439 官方测试向量 —— 唯一能抓住"轮函数写错"的判据
+#      （自己跟自己对拍永远发现不了：两侧都错 = 一致）
+#   ② C ↔ Python 逐块对拍 —— 保证构建期加密与运行期解密同源
+#   ③ 往返：Python 加密 → C 解密 —— 保证 offset/counter 映射没搞错
+echo "══ 2b. ChaCha20 密钥流 ══"
+
+# ① RFC 8439 §2.4.2：全零 key/nonce，counter=0 的块前 8 字节
+#    = 76 b8 e0 ad a0 f1 3d 90；counter=1 = 9f 07 e7 be 55 51 38 7a
+chk "ChaCha20 RFC 向量 counter=0" \
+  "$(printf '%s\n%s\n' "0000000000000000" "2" | "$W/hostchacha" gen \
+     | sed -n '1p' | python3 -c "
+import sys
+w=int(sys.stdin.read().strip(),16)
+print(bytes((w>>(i*8))&0xFF for i in range(8)).hex())")" \
+  "76b8e0ada0f13d90"
+chk "ChaCha20 RFC 向量 counter=1" \
+  "$(printf '%s\n%s\n' "0000000000000000" "2" | "$W/hostchacha" gen \
+     | sed -n '2p' | python3 -c "
+import sys
+w=int(sys.stdin.read().strip(),16)
+print(bytes((w>>(i*8))&0xFF for i in range(8)).hex())")" \
+  "9f07e7be5551387a"
+
+# ② C ↔ Python 逐块对拍（多组随机种子 × 200 块）
+SE="$SE" python3 - > "$W/chacha_cases.txt" <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["SE"])
+import importlib.util
+spec = importlib.util.spec_from_file_location("es", os.environ["SE"]+"/encrypt-strings.py")
+es = importlib.util.module_from_spec(spec); spec.loader.exec_module(es)
+for _ in range(4):
+    seed = int.from_bytes(os.urandom(8), 'big')
+    print("%016x" % seed)
+    print("200")
+    for b in range(200):
+        print("%016x" % es._chacha20_block_head(seed, b))
+PY
+total=$(wc -l < "$W/chacha_cases.txt"); i=1
+while [[ $i -le $total ]]; do
+  keyhex="$(sed -n "${i}p" "$W/chacha_cases.txt")"; i=$((i+1))
+  nblk="$(sed -n "${i}p" "$W/chacha_cases.txt")"; i=$((i+1))
+  want="$(sed -n "${i},$((i+nblk-1))p" "$W/chacha_cases.txt")"; i=$((i+nblk))
+  got="$(printf '%s\n%s\n' "$keyhex" "$nblk" | "$W/hostchacha" gen)"
+  chk "ChaCha20 C↔Python 密钥流块序列" "$got" "$want"
+done
+echo "   ChaCha20 密钥流对拍完成"
+
+# ③ 往返 + 关键安全性质：两种算法在同一 offset 的密钥流必须不同
+#    （若相同 = 算法切换没生效，安全档形同虚设）
+SE="$SE" python3 - > "$W/chacha_rt.txt" <<'PY'
+import os, sys, base64
+sys.path.insert(0, os.environ["SE"])
+import importlib.util
+spec = importlib.util.spec_from_file_location("es", os.environ["SE"]+"/encrypt-strings.py")
+es = importlib.util.module_from_spec(spec); spec.loader.exec_module(es)
+seed = int.from_bytes(os.urandom(8), 'big')
+print("%016x" % seed)
+plains = ["hello", "中文测试", "emoji\U0001F600test", "x"*300, "a", ""]
+for off in (0,1,5,7,8,13,1000):
+    for pl in plains:
+        pb = pl.encode()
+        if not pb:
+            continue
+        pay = es.encrypt_payload_v2(seed, off, pb, es.ALGO_CHACHA20)
+        print("%d\t%s\t%s" % (off, pay, pb.hex()))
+PY
+seedhex="$(sed -n '1p' "$W/chacha_rt.txt")"
+rt_fail=0; rt_n=0
+while IFS=$'\t' read -r off pay plainhex; do
+  rt_n=$((rt_n+1))
+  # dec 模式输出的是【hex】，直接与期望明文的 hex 比
+  got="$(printf '%s\n%s\n' "$seedhex" "$pay" | "$W/hostchacha" dec)"
+  if [[ "$got" == "$plainhex" ]]; then ok; else
+    bad "ChaCha20 往返失败 off=$off payload=${pay:0:24}…（期望 $plainhex 实得 $got）"; rt_fail=1
+  fi
+done < <(sed -n '2,$p' "$W/chacha_rt.txt")
+if [[ $rt_fail -eq 0 ]]; then
+  echo "   ChaCha20 往返完成（$rt_n 例）"
+fi
 
 # ── 3. 加解密往返（C decrypt vs Python encrypt）────────────────────
 echo "══ 3. 加解密往返：Python 加密 → C 解密 ══"

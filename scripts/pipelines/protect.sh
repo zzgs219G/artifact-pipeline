@@ -105,6 +105,13 @@ WANT_DEX2C_STUB=0     # 联动子复选框:把解密桩内核 dn() 也抽进 dex
 # 与 --dex2c-stub 互斥（那需要 Java 内核才能转译）。
 STUB_IMPL="java"
 WANT_NATIVE_STUB=0
+# --stringenc-chacha20（2026-11-09）：纯 C 桩的密钥流算法换成 ChaCha20。
+#   （默认）    ：splitmix64 —— 快，但可逆（猜中一条明文可反推密钥解全包）
+#   chacha20    ：ChaCha20  —— 不可逆（猜中一条只泄漏那一条），首次解密多算一点
+# 只对 --stringenc-native 有意义：Java 桩的算法在 dex 里，换算法要重做整条
+# d8→baksmali 链路与 384 项对拍，不在本次范围。
+# 必须与 encrypt-strings.py 的 --algo 同源，否则全包乱码（构建期不报错）。
+WANT_CHACHA20=0
 # Amice 混淆（2026-11-05）：编译期 pass，作用于 so 的 .text。
 # 只影响 NDK 编译参数，不影响 dex 层任何步骤。
 WANT_OBFUSCATE=0
@@ -145,6 +152,8 @@ while [[ $# -gt 0 ]]; do
     --dex2c-stub) WANT_DEX2C_STUB=1; shift ;;
     # 纯 C 解密桩（2026-11-09）。隐含 stringenc 开启（没有字符串加密就没有桩）。
     --stringenc-native) WANT_STRINGENC=1; WANT_NATIVE_STUB=1; STUB_IMPL=native; shift ;;
+    # 密钥流算法（2026-11-09）。隐含 stringenc + native（Java 桩不支持换算法）。
+    --stringenc-chacha20) WANT_STRINGENC=1; WANT_NATIVE_STUB=1; STUB_IMPL=native; WANT_CHACHA20=1; shift ;;
     # Amice 混淆（2026-11-05）。子复选框隐含父模块开启（与 --packer-smaller 同惯例）。
     # 值为空时由 lib-ndk.sh 按"父模块开、子项默认"取默认组合（MBA on / flatten off）。
     --obfuscate) WANT_OBFUSCATE=1; shift ;;
@@ -853,6 +862,9 @@ print(native_stub.NC_STRDEC_NKEYS)
     log_err "    （C 侧 NKEYS 与 Python 侧不一致 ⇒ 构建期加密 / 运行期解密不同源）"
     exit 1
   fi
+  # 密钥流算法档位（2026-11-09）。同样必须与 encrypt-strings.py 同源。
+  # 0 = splitmix64，2 = ChaCha20（见 nc_strdec.h 的 NC_STRDEC_ALGO_*）。
+  if [[ $WANT_CHACHA20 -eq 1 ]]; then _algo=2; _algo_name=chacha20; else _algo=0; _algo_name=splitmix64; fi
   # ── 桩类描述符：必须【在 STEP3 就算出来】，不能等 STEP5 ────────────
   # 顺序困局（2026-11-09 本地实测踩到）：
   #   C 侧 RegisterNatives 需要真实类名（桩名每包随机）；
@@ -914,6 +926,13 @@ print(native_stub.NC_STRDEC_NKEYS)
 /* 密钥档位：必须与 native_stub.NC_STRDEC_NKEYS 一致 */
 #ifndef NC_STRDEC_NKEYS
 #  define NC_STRDEC_NKEYS $_nk
+#endif
+
+/* 密钥流算法：必须与 encrypt-strings.py 的 --algo 一致。
+ * 0 = splitmix64（历史实现），2 = ChaCha20（不可逆）。
+ * 两侧不同源 = 构建期加密用 A、运行期解密用 B ⇒ 全包乱码，且构建期不报错。 */
+#ifndef NC_STRDEC_ALGO
+#  define NC_STRDEC_ALGO $_algo
 #endif
 
 /* 密钥本体（$_nk 个 uint64，大端字节序），由 bootstrap 直接 set_key。
@@ -1405,10 +1424,12 @@ if [[ $WANT_STRINGENC -eq 1 ]]; then
       exit 1
     fi
     log_info "纯 C 桩复用构建期桩名: $_cstub_spec"
+    log_info "密钥流算法: $_algo_name"
     python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
       "$WORK/decompiled" "$STRING_RULES" "${STRING_ENC_ARGS[@]}" \
       --apk "$STEP5_APK" \
       --stub-impl native \
+      --algo "$_algo_name" \
       --seed-hex "$_cstub_seed_hex" \
       --stub-name "$_cstub_spec"
   # ── packer 联动（仅勾了 packer 时）：桩搬进壳 dex ──────────────────

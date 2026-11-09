@@ -51,18 +51,133 @@ static volatile int nc_key_ready = 0;
 /* splitmix64 终混合。
  * 与 StrDec.java 的 mix64()、encrypt-strings.py 的 _mix64() 逐字节等价：
  *   z ^= z >>> 30; z *= C1; z ^= z >>> 27; z *= C2; return z ^ (z >>> 31)
- * long 溢出天然等于 mod 2^64，C 侧用无符号整型同样是定义良好的模运算。 */
+ * long 溢出天然等于 mod 2^64，C 侧用无符号整型同样是定义良好的模运算。
+ *
+ * ⚠️ ChaCha20 档不用它，但 nc_strdec_gamma 等 splitmix 常量还在。
+ *    条件编译掉函数体（而非整段）以保持文件结构可读；
+ *    不加这层会让 -Wunused-function 在 ChaCha20 档报警告，
+ *    而本项目的测试判据是"零警告"（见 test-cstrdec.sh 的编译断言）。 */
+#if NC_STRDEC_ALGO != NC_STRDEC_ALGO_CHACHA20
 static inline uint64_t nc_mix64(uint64_t z)
 {
     z = (z ^ (z >> 30)) * NC_STRDEC_C1;
     z = (z ^ (z >> 27)) * NC_STRDEC_C2;
     return z ^ (z >> 31);
 }
+#endif
+
+/* ── ChaCha20（RFC 8439）密钥流 ──────────────────────────────────────
+ *
+ * 只做"取一个 64 字节块的前 8 字节"这一件事，因为它要嵌进既有的
+ * keyByte(i) = block_ks(i>>3) 契约里（每块 8 字节）。
+ *
+ * 状态布局（RFC 8439 §2.3）：
+ *   c[0..3]   常量 "expa" "nd 3" "2-by" "te k"
+ *   c[4..11]  key（32 字节，小端 8 个 uint32）
+ *   c[12]     counter 低 32 位
+ *   c[13..15] nonce（本实现全零 —— counter 已是全包唯一，见调用处注释）
+ *
+ * counter 只有 32 位：全包密钥流按 8 字节/块计，2^32 块 = 32 GiB，
+ * 远超单包字符串总量（最大实测 ~1.2 万条 × 数百字节 ≈ 数 MiB）。
+ * 不需要 RFC 的 64 位 counter 变体。
+ *
+ * 常量用 4 字节小端拼装而非 0x61707865 这类魔数：可读性优先，
+ * 编译器会折叠成同一个立即数，零开销。
+ */
+#if NC_STRDEC_ALGO == NC_STRDEC_ALGO_CHACHA20
+
+/* QUARTERROUND（RFC 8439 §2.1）
+ *   a += b; d ^= a; d = ROTL32(d, 16);
+ *   c += d; b ^= c; b = ROTL32(b, 12);
+ *   a += b; d ^= a; d = ROTL32(d,  8);
+ *   c += d; b ^= c; b = ROTL32(b,  7);
+ *
+ * ⚠️ 必须是【循环】左移，不是普通左移 —— 普通 `<<` 会把高位丢掉，
+ * 结果完全错且不报错（实测：全零密钥 block0 算出 06 60 f0 ca…，
+ * 而 RFC 期望 76 b8 e0 ad…）。这道 bug 只有对 RFC 测试向量才会暴露，
+ * 自己跟自己对拍永远发现不了（两侧都错 = 一致）。 */
+static inline uint32_t nc_rotl32(uint32_t v, int n)
+{
+    return (v << n) | (v >> (32 - n));
+}
+
+#define NC_QR(a, b, c, d)                          \
+    do {                                           \
+        a += b; d ^= a; d = nc_rotl32(d, 16);      \
+        c += d; b ^= c; b = nc_rotl32(b, 12);      \
+        a += b; d ^= a; d = nc_rotl32(d, 8);       \
+        c += d; b ^= c; b = nc_rotl32(b, 7);       \
+    } while (0)
+
+/* 由 256 位 key 派生第 blk 个块的前 8 字节。
+ *
+ * 注意 key 的排布：nc_chacha20_key 由 nc_strdec_set_key() 从
+ * nc_key（uint64）小端展开成 8 个 uint32，与 Python 侧
+ * struct.pack('<8I', ...) 必须逐字节一致。 */
+static uint32_t nc_chacha20_key[8];
+static int nc_chacha20_key_ready = 0;
+
+static void nc_chacha20_derive_key(void)
+{
+    for (int i = 0; i < NC_STRDEC_NKEYS && i < 4; i++) {
+        nc_chacha20_key[i * 2]     = (uint32_t)(nc_key[i] & 0xFFFFFFFFu);
+        nc_chacha20_key[i * 2 + 1] = (uint32_t)(nc_key[i] >> 32);
+    }
+    nc_chacha20_key_ready = 1;
+}
+
+static uint64_t nc_chacha20_block_head(uint64_t blk)
+{
+    if (!nc_chacha20_key_ready) {
+        /* fail-closed：没有密钥就绝不产出密钥流。
+         * 返回值无关紧要（调用方 has_key() 已拦），这里只保证不越界读。 */
+        return 0;
+    }
+
+    uint32_t s[16];
+    s[0] = 0x61707865u;  /* "expa" */
+    s[1] = 0x3320646Eu;  /* "nd 3" */
+    s[2] = 0x79622D32u;  /* "2-by" */
+    s[3] = 0x6B206574u;  /* "te k" */
+    for (int i = 0; i < 8; i++) {
+        s[4 + i] = nc_chacha20_key[i];
+    }
+    s[12] = (uint32_t)blk;      /* counter */
+    s[13] = 0;                  /* nonce 全零（见调用处注释） */
+    s[14] = 0;
+    s[15] = 0;
+
+    uint32_t x[16];
+    for (int i = 0; i < 16; i++) {
+        x[i] = s[i];
+    }
+
+    /* 20 轮 = 10 次双轮（列轮 + 对角轮） */
+    for (int i = 0; i < 10; i++) {
+        NC_QR(x[0], x[4], x[8],  x[12]);
+        NC_QR(x[1], x[5], x[9],  x[13]);
+        NC_QR(x[2], x[6], x[10], x[14]);
+        NC_QR(x[3], x[7], x[11], x[15]);
+        NC_QR(x[0], x[5], x[10], x[15]);
+        NC_QR(x[1], x[6], x[11], x[12]);
+        NC_QR(x[2], x[7], x[8],  x[13]);
+        NC_QR(x[3], x[4], x[9],  x[14]);
+    }
+
+    /* 取 x[0] ^ s[0]（前 4 字节）与 x[1] ^ s[1]（后 4 字节），
+     * 小端拼成 uint64 —— 与 keyByte(i) 的低位在前约定一致。 */
+    const uint32_t lo = x[0] + s[0];
+    const uint32_t hi = x[1] + s[1];
+    return ((uint64_t)hi << 32) | (uint64_t)lo;
+}
+
+#endif /* NC_STRDEC_ALGO == CHACHA20 */
 
 /* 第 blk 个密钥流块（8 字节）。
  *
  * NKEYS=1：mix64(key[0] + blk*GAMMA)  ← 与现有实现完全一致
  * NKEYS=4：四个 mix64 异或合并
+ * ALGO=2：ChaCha20 第 blk 个 64 字节块的前 8 字节
  *
  * 为什么 4 个而不是"更多轮 mix64"：轮数叠加仍是可逆双射，攻击者照样
  * 一步反演（详见 nc_strdec.h 的安全边界）。异或合并则把未知数从 1 个
@@ -70,16 +185,30 @@ static inline uint64_t nc_mix64(uint64_t z)
  */
 static inline uint64_t nc_block_ks(uint64_t blk)
 {
+#if NC_STRDEC_ALGO == NC_STRDEC_ALGO_CHACHA20
+    /* ChaCha20 用 blk 当 counter、key 当 256 位密钥、nonce 全零。
+     *
+     * 为什么 nonce 可以全零：counter 本身就是全包唯一的（= 块号），
+     * 它已保证每条密文、每个位置都用不同的 (key, counter) 组合，
+     * ChaCha20 的安全性前提（同一 key 下 counter 不重复）已满足。
+     * 换独立随机 nonce 要多存 8~12 字节/条，而用户要求体积不涨。
+     *
+     * 取前 8 字节而非全部 64：上层按 8 字节粒度取密钥流
+     * （keyByte(i) = block_ks(i>>3) 的第 (i&7) 字节），契约不变，
+     * 因此解密主循环、offset 分配、密文格式全部零改动。 */
+    return nc_chacha20_block_head(blk);
+#else
     uint64_t w = nc_mix64(nc_key[0] + blk * nc_strdec_gamma[0]);
-#if NC_STRDEC_NKEYS > 1
+#  if NC_STRDEC_NKEYS > 1
     /* 每个 key 用不同的块偏移与步进，避免四个分量之间出现线性相关：
      * 若都用 blk 且步进相同，则 blk 递增时四个分量同步平移，
      * 异或结果的差分性质会退化。 */
     for (int t = 1; t < NC_STRDEC_NKEYS; t++) {
         w ^= nc_mix64(nc_key[t] + (blk + (uint64_t)t) * nc_strdec_gamma[t]);
     }
-#endif
+#  endif
     return w;
+#endif
 }
 
 void nc_strdec_set_key(const uint8_t *key)
@@ -98,6 +227,11 @@ void nc_strdec_set_key(const uint8_t *key)
         nc_key[t] = v;
     }
     nc_key_ready = 1;
+#if NC_STRDEC_ALGO == NC_STRDEC_ALGO_CHACHA20
+    /* ChaCha20 需要 8 个 uint32 形态。必须在 nc_key 填好之后派生 ——
+     * 顺序反了会拿全零密钥算出错误密钥流（构建期不报错，运行期全包乱码）。 */
+    nc_chacha20_derive_key();
+#endif
 }
 
 int nc_strdec_has_key(void)

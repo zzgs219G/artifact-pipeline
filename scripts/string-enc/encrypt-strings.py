@@ -617,14 +617,94 @@ def key_byte(seed: int, i: int) -> int:
     w = _mix64((seed + (i >> 3) * GAMMA) & MASK64)
     return (w >> ((i & 7) * 8)) & 0xFF
 
+
+# ── ChaCha20 密钥流(Python 侧参考实现;与 nc_strdec.c 逐字节一致) ──────
+# 为什么需要第二套算法(2026-11-09):
+#   splitmix64 + XOR 都是可逆的 —— 攻击者拿到任意一条明文就能反解出 seed,
+#   进而解开全包所有字符串。ChaCha20 的密钥流是 PRF 输出,不可逆:
+#   猜中一条只泄漏那一条。
+#
+# 与 C 侧的对应关系(改任一侧必须同步另一侧,否则全包乱码且构建期不报错):
+#   C:     nc_chacha20_block_head(blk)  取 64 字节块的前 8 字节
+#   Python: _chacha20_block_head(blk)   同上
+#   blk   = 全包虚拟密钥流的位置 >> 3   (与 splitmix64 的块号定义完全相同)
+#   nonce = 全零(blk 本身就是全包唯一的 counter,无需额外存 nonce → 体积零增长)
+#
+# ⚠️ 这些常量与轮函数直接照 RFC 8439 §2.1/§2.3 写,且由 RFC 官方测试向量
+#   (全零 key/nonce,counter=0/1)钉死,见 tests/test-cstrdec.sh 的 ChaCha20 组。
+#   不要"优化"成普通左移 —— 那会丢高位,自己跟自己对拍永远发现不了。
+
+_CHACHA_CONST = (0x61707865, 0x3320646E, 0x79622D32, 0x6B206574)
+
+
+def _rotl32(v: int, n: int) -> int:
+    return ((v << n) | (v >> (32 - n))) & 0xFFFFFFFF
+
+
+def _chacha20_block_head(seed: int, blk: int) -> int:
+    """ChaCha20 第 blk 块的前 8 字节(uint64,低位在前)。
+
+    seed 是 8 字节密钥材料:按 C 侧口径展开成 8 个 uint32 语义 —— C 侧
+    nc_key[0] 是"大端序读 8 字节",再按小端拆成两个 uint32
+    (lo = k & 0xFFFFFFFF, hi = k >> 32)。这里必须完全照做。
+    """
+    k = seed & MASK64
+    st = list(_CHACHA_CONST) + [
+        k & 0xFFFFFFFF, (k >> 32) & 0xFFFFFFFF,
+    ]
+    # 只用了 8 字节密钥材料 → 密钥区剩下的 6 个 uint32 补零。
+    # 与 C 侧一致：C 的 nc_chacha20_derive_key() 只填前 2 个 uint32，
+    # 其余保持静态零初始化。
+    st += [0] * 6
+    st += [0, 0, 0, 0]             # counter + nonce，下面再填 counter
+    st[12] = blk & 0xFFFFFFFF      # counter
+    st[13] = st[14] = st[15] = 0   # nonce 全零
+    x = st[:]
+    for _ in range(10):
+        for a, b, c, d in ((0, 4, 8, 12), (1, 5, 9, 13), (2, 6, 10, 14), (3, 7, 11, 15),
+                           (0, 5, 10, 15), (1, 6, 11, 12), (2, 7, 8, 13), (3, 4, 9, 14)):
+            x[a] = (x[a] + x[b]) & 0xFFFFFFFF
+            x[d] = _rotl32(x[d] ^ x[a], 16)
+            x[c] = (x[c] + x[d]) & 0xFFFFFFFF
+            x[b] = _rotl32(x[b] ^ x[c], 12)
+            x[a] = (x[a] + x[b]) & 0xFFFFFFFF
+            x[d] = _rotl32(x[d] ^ x[a], 8)
+            x[c] = (x[c] + x[d]) & 0xFFFFFFFF
+            x[b] = _rotl32(x[b] ^ x[c], 7)
+    lo = (x[0] + st[0]) & 0xFFFFFFFF
+    hi = (x[1] + st[1]) & 0xFFFFFFFF
+    return (hi << 32) | lo
+
+
+# 算法选择(构建期决定,与 C 侧 -DNC_STRDEC_ALGO 必须同源)
+ALGO_SPLITMIX = "splitmix64"
+ALGO_CHACHA20 = "chacha20"
+
+
+def key_byte_algo(seed: int, i: int, algo: str = ALGO_SPLITMIX) -> int:
+    """按算法取虚拟密钥流第 i 个字节。i 是【全包虚拟密钥流】的绝对下标。"""
+    if algo == ALGO_SPLITMIX:
+        return key_byte(seed, i)
+    if algo == ALGO_CHACHA20:
+        w = _chacha20_block_head(seed, i >> 3)
+        return (w >> ((i & 7) * 8)) & 0xFF
+    raise SystemExit(f"❌ 未知的密钥流算法: {algo!r}(只支持 {ALGO_SPLITMIX} / {ALGO_CHACHA20})")
+
 def read_seed_bytes() -> bytes:
     """新构建的种子:8 字节随机。"""
     return secrets.token_bytes(8)
 
-def encrypt_payload_v2(seed: int, offset: int, plain: bytes) -> str:
-    """v2 明文 → Base64( offset_be24 || cipher ),cipher[k] = plain[k] ^ key_byte(seed, offset+k)。"""
+def encrypt_payload_v2(seed: int, offset: int, plain: bytes,
+                       algo: str = ALGO_SPLITMIX) -> str:
+    """v2 明文 → Base64( offset_be24 || cipher ),cipher[k] = plain[k] ^ key_byte(offset+k)。
+
+    algo 决定密钥流来源(splitmix64 / chacha20),默认 splitmix64 保现状。
+    密文格式两种算法完全相同 —— offset 直接当 ChaCha20 的 counter,
+    所以体积零增长,且解密主循环无需区分算法。
+    """
     head = bytes(((offset >> 16) & 0xFF, (offset >> 8) & 0xFF, offset & 0xFF))
-    cipher = bytes(p ^ key_byte(seed, offset + k) for k, p in enumerate(plain))
+    cipher = bytes(p ^ key_byte_algo(seed, offset + k, algo)
+                   for k, p in enumerate(plain))
     return base64.b64encode(head + cipher).decode('ascii')
 
 def desc_to_dot(desc: str) -> str:
@@ -1724,7 +1804,8 @@ def write_stub(decompiled_dir: str, seed: bytes) -> str:
     return stub_path
 
 def process_file(path: str, cls_desc: str, includes, excludes,
-                 exclude_methods, seed: int, next_off: int):
+                 exclude_methods, seed: int, next_off: int,
+                 algo: str = ALGO_SPLITMIX):
     """就地加密一个 .smali 文件。返回 (改动字符串数, 新 next_off, field_backfills)。
 
     S2: next_off 是全包虚拟密钥流的下一个可用 offset;每条密文按需消耗
@@ -1820,7 +1901,7 @@ def process_file(path: str, cls_desc: str, includes, excludes,
                 'owner_cls': cls_desc,            # Lcom/x/Y; 形式
                 'field': fm.group('name'),
                 'type': fm.group('type'),
-                'payload': encrypt_payload_v2(seed, idx, fenc),
+                'payload': encrypt_payload_v2(seed, idx, fenc, algo),
             })
             idx += len(fenc)
             hits += 1
@@ -1874,7 +1955,7 @@ def process_file(path: str, cls_desc: str, includes, excludes,
             out.append(line)
             continue
 
-        payload = encrypt_payload_v2(seed, idx, enc)
+        payload = encrypt_payload_v2(seed, idx, enc, algo)
         jumbo = m.group('jumbo') or ''
         indent = m.group('indent')
         dst = m.group('dst')
@@ -2072,6 +2153,13 @@ def main():
                          "或 native（纯 C，算法在 libnc.so，dex 侧只有 native 声明）。"
                          "native 模式下 --emit-stub-filter / --emit-stub-dex "
                          "无意义（不存在 Java 内核可转译），会被显式拒绝。")
+    ap.add_argument('--algo', choices=(ALGO_SPLITMIX, ALGO_CHACHA20),
+                    default=ALGO_SPLITMIX,
+                    help="密钥流算法（仅对 --stub-impl native 有意义）："
+                         "splitmix64（默认，速度优先，可逆 —— 猜中一条明文可反推"
+                         "密钥解全包）或 chacha20（安全优先，不可逆 —— 猜中一条"
+                         "只泄漏那一条）。密文格式两者相同，体积零增长。"
+                         "⚠️ 必须与 C 侧 -DNC_STRDEC_ALGO 同源，否则全包乱码")
     ap.add_argument('--assume-stub-transpiled', action='store_true',
                     help='声明"本次 dex2c 会转译桩内核"（由 protect.sh 在'
                          '--dex2c-stub 联动时传入）。用于 --emit-stub-dex '
@@ -2241,7 +2329,8 @@ def main():
             skipped_stub += 1
             continue
         n, idx, backfills = process_file(path, cls_desc, includes, excludes,
-                                         exclude_methods, seed_int, idx)
+                                         exclude_methods, seed_int, idx,
+                                         args.algo)
         if n:
             total_str += n
             total_cls += 1

@@ -79,6 +79,34 @@ typedef struct JavaVM_ JavaVM;
 
 #define NC_STRDEC_KEYLEN (NC_STRDEC_NKEYS * 8)   /* 字节数：NKEYS 个 uint64 */
 
+/* ── 密钥流算法档位（构建期常量，必须与 encrypt-strings.py 侧一致）───────
+ *
+ * 与 NKEYS 一样是【编译期】常量，不是运行期开关：它决定密钥流怎么算，
+ * 构建期加密与运行期解密必须用同一档，否则全包乱码且构建期不报错。
+ *
+ *   1 = splitmix64（默认，历史实现）  block_ks(blk) = mix64(key + blk*γ)
+ *   4 = splitmix64 × 4 个密钥         XOR 合并四个分量（未知数 1→4）
+ *   2 = ChaCha20                      block_ks 取 64 字节块的前 8 字节
+ *
+ * 为什么 ChaCha20 是"安全"档而 splitmix64 是"速度"档：
+ *   splitmix64 与 XOR 都可逆 → 猜中任意一条明文即可反解种子 → 全包沦陷。
+ *   ChaCha20 的密钥流是 PRF 输出 → 猜中一条只泄漏那一条，解不出密钥。
+ *   两者体积完全相同（offset 直接当 nonce，不额外存 nonce）。
+ */
+#ifndef NC_STRDEC_ALGO
+#  define NC_STRDEC_ALGO 0   /* 0 = 沿用 NKEYS 决定（历史行为） */
+#endif
+#define NC_STRDEC_ALGO_SPLITMIX 0
+#define NC_STRDEC_ALGO_CHACHA20 2
+
+#if NC_STRDEC_ALGO != 0 && NC_STRDEC_ALGO != NC_STRDEC_ALGO_CHACHA20
+#  error "NC_STRDEC_ALGO 只支持 0（splitmix64，按 NKEYS 分档）或 2（ChaCha20）"
+#endif
+#if NC_STRDEC_ALGO == NC_STRDEC_ALGO_CHACHA20 && NC_STRDEC_NKEYS != 1
+#  error "ChaCha20 档只支持 NKEYS=1（256 位密钥直接当 ChaCha20 key，不做异或合并）"
+#endif
+
+
 /* splitmix64 终混合常量（与 Java/Python 同源，勿改） */
 #define NC_STRDEC_C1 0xBF58476D1CE4E5B9ULL
 #define NC_STRDEC_C2 0x94D049BB133111EBULL

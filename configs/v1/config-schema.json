@@ -97,6 +97,31 @@
           ]
         },
         {
+          "key": "algo",
+          "label": "密钥流算法",
+          "type": "radio",
+          "value_kind": "choice",
+          "default": "splitmix64",
+          "visible_when": {
+            "key": "stub_impl",
+            "equals": "c"
+          },
+          "options": [
+            {
+              "value": "splitmix64",
+              "label": "速度优先",
+              "desc": "splitmix64 密钥流：解密最快。但它是可逆的 —— 攻击者拿到任意一条明文就能反推出密钥，进而解开全部字符串。",
+              "arg_on": ""
+            },
+            {
+              "value": "chacha20",
+              "label": "安全优先",
+              "desc": "ChaCha20 密钥流：猜中一条明文只泄漏那一条，解不出密钥。代价是首次解密多算一些（走缓存后无差异）。",
+              "arg_on": "--stringenc-chacha20"
+            }
+          ]
+        },
+        {
           "key": "dex2c_stub",
           "label": "解密桩也抽进 so",
           "desc": "解密桩内核也编进 so，dex 里只剩声明。性能：运行期无损（解密结果进缓存，只算一次）；构建 +30~60s（解包/回编变 2 次）",
