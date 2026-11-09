@@ -465,66 +465,61 @@ CI 的 `setup-toolchain` action 会校验，源码形态会直接失败：
 ### 当前配置的实际形态
 
 ```
-schema: stringenc.stub_impl  ← type=checkbox, value_kind=flag
-        勾选 → --stringenc-native
-        不勾 → Java 桩（默认）
+schema: stringenc.stub_impl  ← type=select, value_kind=choice（2026-11-09 起）
+        default "java" → Java 桩
+        选 "c"         → --stringenc-native（纯 C 桩）
 ```
 
-**注意：`stub_impl` 和 `dex2c_stub` 是两个独立复选框，可以同时勾** ——
-那是非法组合，靠 CLI / `protect.sh` / 云端 `resolve-config` 三层 fail-fast 拦。
-**UI 层没拦。**
+**注意：`stub_impl`（下拉框）和 `dex2c_stub`（复选框）在 UI 上仍是两个独立控件，
+可以同时选** —— 那是非法组合，靠 CLI / `protect.sh` / 云端 `resolve-config`
+三层 fail-fast 拦。**UI 层没拦**（schema 没有表达"互斥"的能力，
+`required.unless` 只能表达"必填豁免"）。
 
 ### 下一步（按优先级）
 
-#### ① 把 Java/C 桩改成真单选（推荐先做）
+#### ① 把 Java/C 桩改成真单选 —— ✅ **已完成（2026-11-09）**
 
-> **2026-11-09 已裁决：用「下拉框」，不用「单选框」。** 判据与反例见
-> **`docs/配置schema.md` §4.2** —— 摘要：子项复选框被压到 20dp（行高 36dp 所迫），
-> 20dp 的圆（radio）与 20dp 的圆角方框（checkbox）并排时形状差异基本不存在，
-> 用户无法区分"这个框是单选还是多选"；下拉框用**折叠/展开的形态差异**把语义区分开。
+> **裁决：用「下拉框」，不用「单选框」。** 判据与反例见 `docs/配置schema.md` §4.2。
+> 摘要：子项复选框被压到 20dp（行高 36dp 所迫），20dp 的圆（radio）与 20dp 的
+> 圆角方框（checkbox）并排时形状差异基本不存在，用户无法区分"这个框是单选还是
+> 多选"；下拉框用**折叠/展开的形态差异**把语义区分开。
 > （例外：APP 顶层「加固方案」用 radio 是对的 —— 独立 SectionCard + 每项带 subtitle。）
 
-**现状**：两个复选框，能同时勾，靠报错兜底。
-**目标**：一个下拉框，只能选一个。
-
-**好消息：能力已经全在，只缺一处实现。**
+**落地内容**（4 个文件，jian_box 零改动）：
 
 ```
-✅ jian_box UI        ProtectConfigCard.kt:143 已分发 "select" → ChildSelect()
-                      （ExposedDropdownMenuBox + options + default 校验）
-                      ★ 且 jian_box 对本改动【零代码改动】：
-                        type=select 的 default 走 optString、状态存 String、
-                        buildProtectConfig 走 else 分支写字符串 —— 通路已完整
-✅ check-schema.py    type=="select" 时断言 default ∈ options 的分支已存在
-❌ resolve-config.py  没有 value_kind=="choice" 分支 ← 唯一缺口，约 25 行
-❌ config-schema.json 从没用过 select 类型
+configs/v1/config-schema.json         type=checkbox/flag → type=select/value_kind=choice
+                                      options: java(arg_on="") / c(--stringenc-native)
+scripts/actions/resolve-config.py     新增 value_kind=="choice" 分支 + 旧布尔快照兼容
+                                      + _dump_plan 显示 option 的 label 而非裸 value
+scripts/actions/check-schema.py       choice 结构断言 5 条（value 唯一 / 每项有 label 与
+                                      arg_on / 带 arg_on 的最多 1 个 / default ∈ options）
+scripts/actions/tests/                 T17a~T17g 七例（44 通过）
+scripts/trigger_build.py              写入值 True → "c"；读点同步改判 == "c"
 ```
 
-**要做的事：**
+**为什么 jian_box 零改动**：`type=select` 的通路在 APP 侧早已完整 ——
+`default` 走 `optString`、状态存 `String`、`buildProtectConfig` 走 else 分支写字符串、
+`:143` 已分发 `"select"` → `ChildSelect()`。**schema 从未用过 select，但代码是通的。**
 
-1. `configs/v1/config-schema.json`：`stringenc.stub_impl` 从
-   `type=checkbox` 改成 `type=select`，`value_kind` 从 `flag` 改成 `choice`，
-   加 `options: [{value,label,arg_on},...]`，`default: "java"`
-2. `scripts/actions/resolve-config.py`：加 `value_kind == "choice"` 分支
-   （读选中值 → 查 options → 追加对应 `arg_on`；值不在 options 里即 fail-fast；
-   `arg_on` 为空串时跳过 ARG_RE 校验）。**三条实现要点见 `配置schema.md` §3.4**
-3. `scripts/actions/tests/test-resolve-config.py`：补用例（含 T17c 那条
-   "字符串必须被拒"要改语义 —— 改完后字符串 "native" 不再是错值而是非法枚举值）
-4. `scripts/trigger_build.py`：`--stringenc-native` 的 config 写入改回枚举值
-   `"c"`（当前写 `True`，那是 `flag` 时代的形态）
+**旧快照兼容**（这条容易漏）：`stub_impl` 曾是 `value_kind=flag`，旧 App 会提交
+`true`/`false`。`resolve-config.py` 遇到布尔值映射到"恰好一个带 `arg_on` 的选项"
+（多于一个就 `die()`，不瞎猜），`check-schema.py` 用 `len(nd) <= 1` 静态保障这个前提。
+不写这 10 行的话，旧 App 用户提交 `true` 会被判"值必须是字符串"直接报错 ——
+**一个原本能跑的构建突然失败**。
 
-**⚠️ 改之前必须确认**：`jian_box` 的 `ProtectConfigSchema.kt:54` 里
-`Child.type` 注释写的是 `"text" | "select" | "checkbox"`，
-说明 select 是设计过的；但**从没有任何 schema 用过它**，可能存在未暴露的 bug。
-先在 `demo` 包上试一次再推。
-
-**⚠️ UI 层不拦互斥**：改成 select 后 `stub_impl` 与 `dex2c_stub` 在 UI 上仍是
-两个独立控件（一个下拉 + 一个复选框），**同时选仍然可选**。互斥继续靠
-`trigger_build.py` / `protect.sh` / `resolve-config` 三层 fail-fast 兜底。
-要真正在 UI 层拦住，需要 `ProtectConfigSchema.validate()` 支持跨字段规则 ——
-当前 schema 没有这个表达力（`required.unless` 只能表达"必填豁免"，不能表达"互斥"）。
+**⚠️ 仍未解决**：UI 层不拦互斥。`stub_impl`（下拉）与 `dex2c_stub`（复选框）
+在 UI 上仍是两个控件，**同时选仍然可选**。互斥靠 `trigger_build.py` /
+`protect.sh` / `resolve-config` 三层 fail-fast 兜底。要真正在 UI 层拦住，
+需要 `ProtectConfigSchema.validate()` 支持跨字段约束 —— schema 当前没有这个
+表达力（`required.unless` 只能表达"必填豁免"，不能表达"互斥"）。
+**这是"错了才发现"而非"不允许错"，如实记录为缺口。**
 
 #### ② 算法可选框（splitmix64 / ChaCha20）
+
+> **可以复用 ① 的 `choice` 机制**：`value_kind=choice` 已实现，
+> 只需在 `stringenc` 下新增一个子项 + 加 `NC_STRDEC_ALGO` 编译期常量。
+> 不用再动 `resolve-config.py` / `check-schema.py`。
 
 **动机不是速度**（实测方案② 只省 1.45ms，占 1%），而是**强度**：
 

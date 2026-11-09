@@ -211,6 +211,42 @@ for m in modules:
             argv_out.append(arg_value)
             continue
 
+        # 单选项（2026-11-09）：value_kind=choice → 从 options 里选一个，
+        # 追加该 option 自己的 arg_on。arg_on 允许为空串 = 默认路径不追加参数
+        # （「用哪种实现」由选中的 option 表达，不需要布尔）。
+        # 与 flag/arg_value 的区别：值是【枚举字符串】而非布尔，且不给的键
+        # 按 default 走（default 必须是某个 option 的 value，check-schema 已断言）。
+        if value_kind == "choice":
+            options = c.get("options") or []
+            if not options:
+                die(f"模块 {key}.{ckey} 的 value_kind=choice 但没有 options（schema 自相矛盾）")
+            value = cfg_node.get(ckey, c.get("default", ""))
+            # 旧 App 快照兼容（schema 还是 flag 形态时缓存的）：值为布尔。
+            # true → 唯一的"非默认选项"（带 arg_on 的那个）；false → default。
+            # 语义靠"恰好一个非默认选项"成立 —— 多于一即 fail-fast，不瞎猜。
+            # 历史同型：read_enabled() 对 leaf/parent 互转的双向兼容。
+            if isinstance(value, bool):
+                nondefault = [o for o in options if o.get("arg_on")]
+                if len(nondefault) != 1:
+                    die(f"模块 {key}.{ckey} 收到旧版布尔值 {value!r}，但 options 里"
+                        f"带 arg_on 的有 {len(nondefault)} 个，无法确定映射；请升级 App 后重试")
+                value = nondefault[0].get("value") if value else c.get("default", "")
+            if not isinstance(value, str):
+                die(f"模块 {key}.{ckey} 的值必须是字符串（某个 option 的 value），实际 {value!r}")
+            opt = next((o for o in options if o.get("value") == value), None)
+            if opt is None:
+                # 静默回退 default 等于"用户的选择被悄悄丢弃"，必须 fail-fast
+                die(f"模块 {key}.{ckey} 的值 {value!r} 不在 options 里: "
+                    f"{[o.get('value') for o in options]}")
+            arg_on = opt.get("arg_on", "")
+            if arg_on:      # 空串 = 默认选项，无需追加任何参数
+                if not ARG_RE.fullmatch(arg_on):
+                    die(f"模块 {key}.{ckey} 的 option {value!r} 的 arg_on 非法: "
+                        f"{arg_on!r}（须匹配 --xxx[-yyy]）")
+                if arg_on not in argv_out:      # 去重追加
+                    argv_out.append(arg_on)
+            continue
+
         # 保险丝 c：未知 value_kind → 报错退出
         if value_kind != "rules_file":
             die(f"模块 {key}.{ckey} 的 value_kind 未知: {value_kind!r}（两端需同步支持）")
@@ -304,6 +340,11 @@ def _dump_plan(cfg):
                 if ch.get("value_kind") in ("flag", "arg_value"):
                     cm = "✅" if cv else "⬜"
                     print(f"      {cm} {ch.get('label', ck)}")
+                elif ch.get("value_kind") == "choice":
+                    # 显示选中项的 label，不是裸 value（"c" 对人没意义，"纯 C 桩"才有）
+                    lab = next((o.get("label", o.get("value"))
+                                for o in ch.get("options", []) if o.get("value") == cv), cv)
+                    print(f"      · {ch.get('label', ck)}: {lab}")
                 else:
                     shown = str(cv) if cv else "(空=自动)"
                     print(f"      · {ch.get('label', ck)}: {shown}")

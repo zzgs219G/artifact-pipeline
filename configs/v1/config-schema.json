@@ -97,12 +97,25 @@
         },
         {
           "key": "stub_impl",
-          "label": "解密桩用纯 C 实现",
-          "desc": "算法与密钥流编进 libnc.so（.ncx 加密段），dex 侧只剩 native 声明。与「解密桩也抽进 so」互斥（后者靠 dex2c 转译 Java 内核）。性能：首次解密多算几条 mix64，走缓存后无差异",
-          "type": "checkbox",
-          "default": false,
-          "value_kind": "flag",
-          "arg_on": "--stringenc-native"
+          "label": "解密桩实现",
+          "desc": "与「解密桩也抽进 so」互斥，二选一。性能：首次解密多算几条 mix64，走缓存后无差异",
+          "type": "select",
+          "value_kind": "choice",
+          "default": "java",
+          "options": [
+            {
+              "value": "java",
+              "label": "Java 桩（默认）",
+              "desc": "解密算法写在 dex 里，密钥是 StrDec 类的字面量。可配「解密桩也抽进 so」交给 dex2c 转译内核。",
+              "arg_on": ""
+            },
+            {
+              "value": "c",
+              "label": "纯 C 桩",
+              "desc": "算法与密钥流编进 libnc.so 的 .ncx 加密段，dex 侧只剩 native 声明（无算法、无密钥）。脱壳也拿不到算法。",
+              "arg_on": "--stringenc-native"
+            }
+          ]
         }
       ]
     },

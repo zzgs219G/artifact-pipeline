@@ -235,14 +235,15 @@ def build_config(args) -> str:
                     "--stringenc-native 互斥。请改用逐个开关，例如：\n"
                     "    --sigcheck --dex2c --stringenc --stringenc-native "
                     "--antidiff --envcheck --packer")
-            # ⚠️ 值必须是【布尔 true】，不是字符串 "native"。
-            # schema 里 stub_impl 是 value_kind=flag（勾选即追加 arg_on），
-            # 而 resolve-config.py 对 flag 的口径是"值为布尔，true 才追加"。
-            # 首版传了 "native" → 云端 400：
-            #   "模块 stringenc.stub_impl 的值必须是布尔，实际 'native'"
-            # "用哪种实现"这件事由 arg_on 本身表达（--stringenc-native），
-            # schema 里不需要也不允许第三种取值。
-            cfg["stringenc"]["stub_impl"] = True
+            # schema 里 stub_impl 现在是 value_kind=choice（枚举字符串）。
+            # 写入值必须是某个 option 的 value，即 "c"（纯 C 桩）。
+            # 演进史（三段都踩过，别再踩回去）：
+            #   首版写 "native"      → flag 时代云端 400：「值必须是布尔，实际 'native'」
+            #   二版写 True（布尔）  → flag 时代正确；改 choice 后由 resolve-config
+            #                         的布尔兼容映射兜住，但那是给旧 App 快照用的，
+            #                         CLI 不该主动走兼容路径
+            #   三版写 "c"（枚举）   → 当前正确形态
+            cfg["stringenc"]["stub_impl"] = "c"
         elif args.dex2c_stub or args.all:
             cfg["stringenc"]["dex2c_stub"] = True
 
@@ -274,14 +275,10 @@ def describe_plan(cfg_json: str) -> str:
          bool(c.get("stringenc", {}).get("enabled")),
          ("规则: %s%s" % (
              c["stringenc"].get("rules_file", ""),
-             # ⚠️ 判 is True（布尔），不是 == "native"（字符串）。
-             # 2026-11-09 实测发现：build_config() 在 :245 写的是布尔 True
-             # （因为 schema 里 stub_impl 是 value_kind=flag），而这里原先判
-             # 字符串 "native" → 恒不成立 → 回执里永远看不到「解密桩=纯C」。
-             # 症状是静默的：构建结果正确，只有触发前的自查清单是错的。
-             # 历史：4a1ba9c 把写入值从 "native" 改成 True 时，漏改了这个读点。
+             # 判 "c"（choice 形态）。历史：flag 时代这里判 == "native"，
+             # 与写入值 True 不匹配导致回执恒不显示（4a1ba9c 漏改读点）。
              "，解密桩=纯C（算法进 libnc.so）"
-             if c["stringenc"].get("stub_impl") is True
+             if c["stringenc"].get("stub_impl") == "c"
              else ("，解密桩抽进 so" if c["stringenc"].get("dex2c_stub") else "")))
          if c.get("stringenc", {}).get("enabled") else ""),
         ("防对比混淆", bool(c.get("antidiff")), ""),
@@ -728,7 +725,7 @@ def main() -> int:
                    help="解密桩用【纯 C 实现】：算法编进 libnc.so，dex 侧只有 "
                         "native 声明（不含任何密钥/算法）。需同时开字符串加密；"
                         "与 --dex2c-stub / --all 互斥。对应 schema 的 "
-                        "stringenc.stub_impl=native。")
+                        "stringenc.stub_impl='c'。")
     r.add_argument("--dex2c-stub", action="store_true",
                    help="联动：把解密桩内核也抽进 libnc.so（需同时勾 dex2c + stringenc）。"
                         "勾选后走 LINK_STUB 路径 —— 桩先注入再转译，"

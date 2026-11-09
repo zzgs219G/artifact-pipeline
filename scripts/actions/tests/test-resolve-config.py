@@ -292,27 +292,50 @@ rc, args, files, err = run(cfg(antidiff={"enabled": "yes"}))
 check("T16e 旧 dict 形态 enabled 非布尔 → 报错退出",
       rc != 0 and "布尔" in err, f"rc={rc} err={err}")
 
-# ── T17: stringenc.stub_impl（纯 C 桩，2026-11-09）───────────────────
-# 为什么必须钉死"值只能是布尔"：
-#   云端首跑就是这么挂的 —— trigger_build.py 传了字符串 "native"，
-#   而 resolve-config 对 value_kind=flag 的口径是"值为布尔，true 才追加"，
-#   于是云端直接 400："值必须是布尔，实际 'native'"。
-#   "用哪种实现"由 arg_on 本身表达（--stringenc-native），不需要第三种取值。
+# ── T17: stringenc.stub_impl（单选项，2026-11-09 从 flag 改 choice）─────
+# 语义变更史：
+#   11-09 上午：flag（布尔）→ 云端首跑传 "native" 报 400，改成布尔 True。
+#   11-09 下午：改 choice（枚举字符串）。理由是 flag 形态下"两个复选框能同时勾"，
+#               互斥只靠报错兜底；choice 让"二选一"在数据结构层就成立。
+# 现在的口径：值是 options 里的某个 value；非枚举值必须 fail-fast，
+#             否则用户的选择会被静默丢弃（比报错更糟）。
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": "c"}))
+check("T17a stub_impl='c' → 吐出 --stringenc-native",
+      rc == 0 and "--stringenc-native" in args, f"rc={rc} args={args} err={err}")
+
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": "java"}))
+check("T17b stub_impl='java'（arg_on 空串）→ 不吐 --stringenc-native",
+      rc == 0 and "--stringenc-native" not in args, f"rc={rc} args={args} err={err}")
+
+# 键缺失 → 按 schema default("java")，不追加
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**"}))
+check("T17c stub_impl 缺失 → 按 default('java') 不吐 --stringenc-native",
+      rc == 0 and "--stringenc-native" not in args, f"rc={rc} args={args} err={err}")
+
+# 关键回归：非枚举字符串必须被拒（不能静默回退 default）
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": "native"}))
+check("T17d stub_impl='native'（不在 options 里）→ 必须报错",
+      rc != 0 and "options" in err, f"rc={rc} err={err}")
+
+# 非字符串非布尔（如整数）→ 报错
+rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
+                                          "stub_impl": 1}))
+check("T17e stub_impl=1（既非字符串也非布尔）→ 必须报错",
+      rc != 0 and "字符串" in err, f"rc={rc} err={err}")
+
+# 旧 App 快照兼容：flag 时代的布尔 true → 映射到唯一的非默认选项（带 arg_on 的那个）
 rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
                                           "stub_impl": True}))
-check("T17a stub_impl=true → 吐出 --stringenc-native",
+check("T17f 旧快照 stub_impl=true（布尔）→ 兼容映射到 'c'，吐 --stringenc-native",
       rc == 0 and "--stringenc-native" in args, f"rc={rc} args={args} err={err}")
 
 rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
                                           "stub_impl": False}))
-check("T17b stub_impl=false → 不吐 --stringenc-native",
-      rc == 0 and "--stringenc-native" not in args, f"rc={rc} args={args}")
-
-# 关键回归：字符串形态必须被拒（云端首跑就是这个形态）
-rc, args, files, err = run(cfg(stringenc={"enabled": True, "rules_file": "**",
-                                          "stub_impl": "native"}))
-check("T17c stub_impl='native'（字符串）→ 必须报错",
-      rc != 0 and "布尔" in err, f"rc={rc} err={err}")
+check("T17g 旧快照 stub_impl=false（布尔）→ 兼容映射到 default，不吐参数",
+      rc == 0 and "--stringenc-native" not in args, f"rc={rc} args={args} err={err}")
 
 print(f"\n结果: {passed} 通过, {failed} 失败")
 sys.exit(1 if failed else 0)

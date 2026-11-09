@@ -171,11 +171,9 @@ value_kind = 怎么执行      （resolve-config.py 唯一关心的）
 ⚠️ **`.txt` 文件名用的是「模块 key」，不是子项 key。** 两个模块的
 `rules_file` 互不覆盖靠这一点。
 
-### 3.4 `choice` —— 从 `options` 里选一个（**待实现**）
+### 3.4 `choice` —— 从 `options` 里选一个
 
-> 状态：**未实现**。`check-schema.py` 与 jian_box 的 UI 已支持 `type=select`，
-> 缺的是 `resolve-config.py` 的 `value_kind == "choice"` 分支（约 25 行）。
-> 实现前先读 §4.2 的设计判据。
+> 状态：**已实现**（2026-11-09）。首个使用者：`stringenc.stub_impl`。
 
 ```jsonc
 { "key": "stub_impl", "label": "解密桩实现", "type": "select",
@@ -192,14 +190,24 @@ value_kind = 怎么执行      （resolve-config.py 唯一关心的）
 | `"java"` | （无 —— `arg_on` 为空串，表示"默认路径无需追加"） |
 | 键缺失 | 按 `default`（`"java"`） |
 | 值不在 `options` 里 | **报错退出**（fail-fast，同保险丝 c 的口径） |
-| 非字符串 | 报错退出 |
+| 非字符串 | **报错退出** |
+| 旧快照的布尔 `true`/`false` | 映射到"唯一带 `arg_on` 的选项" / `default`（见下） |
 
-**实现要点**（照这三条做，别自由发挥）：
+**四条实现要点**（都已落地，改这块时别退回去）：
 
 1. 值必须是字符串，用 `cfg_node.get(ckey, c.get("default", ""))` 取
 2. 查 `options` 找匹配项，**找不到即 `die()`** —— 静默回退默认值等于"用户的选择被悄悄丢弃"
 3. `arg_on` 为空串时**跳过 ARG_RE 校验**（`ARG_RE.fullmatch("")` 会失败），
    非空时才校验并去重追加
+4. **旧快照布尔兼容**：`stub_impl` 曾是 `value_kind=flag`（值布尔），改 `choice` 后
+   旧 App 快照仍会提交 `true`/`false`。`resolve-config.py` 遇到 `isinstance(value, bool)`
+   时映射到**恰好一个**带 `arg_on` 的选项；带 `arg_on` 的选项多于一个就
+   `die()`（不瞎猜）。`check-schema.py` 用 `len(nd) <= 1` 在静态层保障这个前提。
+
+> 为什么值得为兼容写 10 行：不写的话，旧 App 用户提交 `stub_impl: true` 会被
+> 判成"值必须是字符串"直接报错，**一个原本能跑的构建突然失败**。这与
+> `read_enabled()` 对 `leaf`⇄`parent` 互转的双向兼容是同一类处理。
+> 但注意：CLI（`trigger_build.py`）**不该主动走兼容路径**，它写枚举值 `"c"`。
 
 ---
 
@@ -353,9 +361,8 @@ config 有、schema 没有 → **拒绝执行**。方向性不对称是刻意的
 | 缺口 | 说明 |
 |---|---|
 | `check-schema.py` 不校验子项 `type` | 拼错成 `"dropdown"` 会静默变成文本框（§4.1） |
-| `check-schema.py` 不校验 `value_kind` | 写错的 `value_kind` 到运行期才被保险丝 c 抓到 |
+| `check-schema.py` 不校验非 `select` 的 `value_kind` | 写错的 `value_kind` 到运行期才被保险丝 c 抓到（`choice` 的结构已校验，见 §3.4） |
 | UI 层无跨字段互斥 | `stub_impl` × `dex2c_stub` 靠 CLI / `protect.sh` / `resolve-config` 三层兜底 |
-| `choice` 未实现 | 见 §3.4 |
 | APP 读的是镜像不是本仓库 | 改 schema 后若镜像未同步，**APP 上看到的是旧 schema** |
 
 ---
