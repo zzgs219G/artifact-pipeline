@@ -9,6 +9,24 @@
  * 任何一方改动都必须让该测试重新变绿。
  */
 
+/* 构建期生成的配置头（protect.sh 写进 NDK 工程目录，不进 git）。
+ *
+ * ⚠️⚠️ 必须在 "nc_strdec.h" **之前** include（2026-11-09 真机闪退根因）：
+ *   头文件里有 `#ifndef NC_STRDEC_ALGO` 的兜底默认值（0=splitmix64）。
+ *   若先包含头文件，构建期注入的算法档就会被默认值挡住 → 加密用 A、
+ *   解密用 B → 每条字符串都解错，而且构建期零报错、运行期只是静默
+ *   降级成"返回密文"（nc_jni_fail）。
+ *   本文件与 nc_strdec_jni.c 都必须这样做 —— 两个 TU 各编一遍算法，
+ *   宏不同源 = 链接期也不报错、运行期行为诡异。
+ *
+ * 用 __has_include 而非无条件 include：宿主测试
+ * （tests/test-cstrdec.sh 的 host 程序）不生成 cfg.h。 */
+#if defined(__has_include)
+#  if __has_include("nc_strdec_cfg.h")
+#    include "nc_strdec_cfg.h"
+#  endif
+#endif
+
 #include "nc_strdec.h"
 
 #include <string.h>

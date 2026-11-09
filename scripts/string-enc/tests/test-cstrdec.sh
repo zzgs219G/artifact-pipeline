@@ -290,7 +290,41 @@ chk "未设密钥不得产明文" "$got" "ERR"
 got="$("$W/host1" dec <<< "$(printf '0f1e2d3c4b5a6978\n%s' "$_payload")")"
 chk "设密钥后同一 payload 可解" "$got" "73"
 
-# ── 6. JNI 绑定方式（2026-11-09 改短名绑定后）────────────────────
+# ── 5b. cfg.h 优先级：构建期注入的算法档必须能覆盖头文件默认值 ──────
+# 为什么必须有这条（2026-11-09 真机闪退根因）：
+#   nc_strdec.h 里有 `#ifndef NC_STRDEC_ALGO → define 0` 的兜底默认值。
+#   若 .c/.jni.c 先 include 头文件、后 include 构建期生成的 nc_strdec_cfg.h，
+#   那么 cfg.h 里的 `#ifndef` 守卫整段失效 —— 用户选 ChaCha20 加密，
+#   运行期仍按 splitmix64 解密，每条字符串都解错。
+#   而 nc_jni_fail() 会静默降级成"原样返回密文"，
+#   最终症状是业务代码拿密文当真实值用（实测：getDeclaredField(密文) → 闪退）。
+#
+# 宿主测试默认不生成 cfg.h，所以这个 bug 只有"造一个假 cfg.h 再编"才能抓到。
+# 断言两件事：① 两个 .c 都能在 cfg.h 存在时零警告编译；
+#             ② 预处理器实际取到的是 cfg.h 的值，不是头文件默认值。
+echo "══ 5b. cfg.h 必须能覆盖 nc_strdec.h 的默认档位 ══"
+mkdir -p "$W/cfgtest"
+cat > "$W/cfgtest/nc_strdec_cfg.h" <<'CFGEOF'
+/* 假的构建期配置头：故意用非默认值（ALGO=2 / NKEYS=1），
+ * 若被头文件的 #ifndef 挡住，取到的会是 0 —— 那就是 bug 复现。 */
+#ifndef NC_STRDEC_ALGO
+#  define NC_STRDEC_ALGO 2
+#endif
+#ifndef NC_STRDEC_NKEYS
+#  define NC_STRDEC_NKEYS 1
+#endif
+#define NC_STRDEC_KEY_BYTES { 0x0f,0x1e,0x2d,0x3c,0x4b,0x5a,0x69,0x78 }
+#define NC_STRDEC_STUB_CLASS "tw/qw/ny/la"
+CFGEOF
+for src in nc_strdec.c nc_strdec_jni.c; do
+  hdr="${src%.c}.h"
+  # 直接对源文件跑预处理器，取它实际看到的宏值
+  got=$("$CC" -E -dM -DNC_STRDEC_HOST_TEST -I"$W/cfgtest" -I"$CSRC" \
+        "$CSRC/$src" 2>/dev/null \
+        | awk '/^#define NC_STRDEC_ALGO /{a=$3} /^#define NC_STRDEC_NKEYS /{n=$3} END{print a"/"n}')
+  chk "$src 取到 cfg.h 的 ALGO/NKEYS（非默认 0）" "$got" "2/1"
+done
+
 echo "══ 6. JNI 绑定：必须是短名，不得回退到 RegisterNatives ══"
 # 为什么钉死：RegisterNatives 在"桩类 <clinit> 里 loadLibrary"这个场景下
 # 必然失败（类初始化未完成 → FindClass 失败），或即使注册成功，ART 也会在

@@ -30,16 +30,25 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "nc_strdec.h"
-
 /* 构建期生成的配置头（protect.sh 写进 NDK 工程目录，不进 git）。
- * 没有它 = 本次不是 native 桩组合，bootstrap 退化为只记录 JavaVM。 */
+ * 没有它 = 本次不是 native 桩组合，bootstrap 退化为只记录 JavaVM。
+ *
+ * ⚠️⚠️ 必须在 "nc_strdec.h" **之前** include（2026-11-09 真机闪退根因）：
+ *   nc_strdec.h 里有 `#ifndef NC_STRDEC_ALGO / NC_STRDEC_NKEYS` 的兜底默认值
+ *   （0 / 1）。若先包含 nc_strdec.h，这两个宏就被定义成默认值，于是 cfg.h
+ *   里同名宏的 `#ifndef` 守卫**整段失效** —— 构建期按用户选的算法加密、
+ *   运行期却用默认算法解密，每条都解错，且构建期零报错。
+ *   实测症状：`getDeclaredField(<密文>)` → NoSuchFieldException → 闪退，
+ *   因为 nc_jni_fail() 把解密失败静默降级成"原样返回密文"。
+ *   同理 NKEYS 也一直没生效过（默认值恰好等于生产值，所以历史上没暴露）。 */
 #if defined(__has_include)
 #  if __has_include("nc_strdec_cfg.h")
 #    include "nc_strdec_cfg.h"
 #    define NC_STRDEC_HAVE_CFG 1
 #  endif
 #endif
+
+#include "nc_strdec.h"
 
 /* ── L1 缓存 ──────────────────────────────────────────────────────────
  *
