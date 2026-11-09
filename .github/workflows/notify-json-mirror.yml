@@ -89,3 +89,43 @@ jobs:
             exit 1
           fi
           echo "::notice title=已通知镜像::$TARGET_REPO 将在 workflow 中拉取最新 schema"
+
+      # ── 产物侧断言（2026-11-10 新增）───────────────────────────────
+      # 为什么必须查产物，不能只看 HTTP 204：
+      #   2026-11-09 实测两次「HTTP 204 + 本 workflow 绿」但 json 仓**根本没建 run**
+      #   （09:48 与 10:27 两次；10:11 与 10:51 同路径又成功）。
+      #   即 204 只代表 GitHub 收下了请求，不代表 workflow 真的被触发。
+      #   这与 docs/AI接手文档.md §8.4「失败但继续 = 从来没生效」是同一类问题：
+      #   发送端全绿、产物没变、无人知晓。
+      #   所以这里回查 json 仓在本次推送之后有没有出现新的 repository_dispatch run，
+      #   没有就 fail——宁可红一次让人手动补，也不要静默漂移。
+      #
+      # 匹配方式：按 created_at >= 本 job 启动时间判断"新"。不用 run 数量差
+      # （并发/重试会让差值不可靠），也不按 client_payload.source_sha 匹配
+      # （json 仓的 workflow 没有把它回写到 run 上，查不到）。
+      - name: Verify mirror workflow actually started
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          TOKEN: ${{ secrets.JSON_REPO_DISPATCH_TOKEN }}
+          TARGET_REPO: "zzgs219G/json"
+          SINCE: ${{ github.event.head_commit.timestamp }}
+        run: |
+          set -o pipefail
+          echo "本次推送时间: $SINCE"
+          # 用 jq 而非内联 python：多行脚本在 YAML 块标量里极易缩进错位
+          # （首版就是这么写坏的，yaml 解析直接失败）。
+          for i in $(seq 1 12); do
+            sleep 10
+            n=$(curl -sS -H "Authorization: Bearer $TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/$TARGET_REPO/actions/runs?event=repository_dispatch&per_page=5" \
+                | python3 -c 'import json,os,sys;r=json.load(sys.stdin).get("workflow_runs",[]);s=os.environ["SINCE"][:19];print(sum(1 for x in r if x.get("created_at","")>=s))')
+            echo "  第 ${i} 次检查：$SINCE 之后 json 仓新增 ${n:-0} 个 repository_dispatch run"
+            if [ "${n:-0}" -gt 0 ]; then
+              echo "::notice title=镜像同步已触发::$TARGET_REPO 已建 run"
+              exit 0
+            fi
+          done
+          echo "::error title=镜像同步未生效::dispatch 返回 204，但 $TARGET_REPO 在 120s 内没有新建 run"
+          echo "手动补一次：gh workflow run apk-schema.yml --repo $TARGET_REPO"
+          exit 1
