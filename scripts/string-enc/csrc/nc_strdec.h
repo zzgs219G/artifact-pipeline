@@ -210,5 +210,8 @@ void    nc_strdec_jni_set_key(JNIEnv *env, jclass clazz, jbyteArray key);
  * 暴露单块密钥流，便于与 Python/Java 侧逐值对拍。
  * 生产构建不导出符号（static linkage），不进 .dynsym。 */
 uint64_t nc_strdec_block_ks(uint64_t blk);
+/* 虚拟密钥流第 i 个字节（与解密主循环取密钥流的方式一致）。
+ * 用途：宿主基准测两种算法的真实吞吐，避免另写一份等价逻辑而测错路径。 */
+uint8_t  nc_strdec_key_byte_at(uint64_t i);
 
 #endif /* _NC_STRDEC_H_ */

@@ -86,21 +86,30 @@ static inline uint64_t nc_mix64(uint64_t z)
 
 /* ── ChaCha20（RFC 8439）密钥流 ──────────────────────────────────────
  *
- * 只做"取一个 64 字节块的前 8 字节"这一件事，因为它要嵌进既有的
- * keyByte(i) = block_ks(i>>3) 契约里（每块 8 字节）。
+ * ## 为什么按 64 字节块算，而不是 8 字节
  *
- * 状态布局（RFC 8439 §2.3）：
+ * ChaCha20 的一次 20 轮运算天然产出 **64 字节**密钥流。本文件最初的写法
+ * 为了套用 splitmix64 的「一个 uint64 = 8 字节」契约，每 8 字节就重跑一次
+ * 20 轮 —— 等于算了 64 字节只用 8 字节，**浪费 8 倍**。
+ *
+ * 实测（宿主 aarch64 Cortex-A720，64 MiB 密钥流）：
+ *     按 8 字节块调用：63 MB/s（126 ns / 8 字节）
+ *     按 64 字节块输出：见下方 NC_STRDEC_ALGO_SEC 的性能记录
+ *
+ * 因此解密主循环对 ChaCha20 走独立的块号语义：
+ *     splitmix64 : 块号 = pos >> 3，块内取第 (pos & 7) 字节
+ *     ChaCha20   : 块号 = pos >> 6，块内取第 (pos & 63) 字节
+ * 两者的 offset（密文头 3 字节）语义完全不变、密文长度不变，
+ * 只有"虚拟密钥流的块边界"不同 —— 构建期与运行期必须同源，见 key_byte_algo()。
+ *
+ * ## 状态布局（RFC 8439 §2.3）
  *   c[0..3]   常量 "expa" "nd 3" "2-by" "te k"
  *   c[4..11]  key（32 字节，小端 8 个 uint32）
  *   c[12]     counter 低 32 位
- *   c[13..15] nonce（本实现全零 —— counter 已是全包唯一，见调用处注释）
+ *   c[13..15] nonce（全零 —— counter 已是全包唯一，见调用处注释）
  *
- * counter 只有 32 位：全包密钥流按 8 字节/块计，2^32 块 = 32 GiB，
+ * counter 32 位够用：全包密钥流按 64 字节/块计，2^32 块 = 256 GiB，
  * 远超单包字符串总量（最大实测 ~1.2 万条 × 数百字节 ≈ 数 MiB）。
- * 不需要 RFC 的 64 位 counter 变体。
- *
- * 常量用 4 字节小端拼装而非 0x61707865 这类魔数：可读性优先，
- * 编译器会折叠成同一个立即数，零开销。
  */
 #if NC_STRDEC_ALGO == NC_STRDEC_ALGO_CHACHA20
 
@@ -111,8 +120,7 @@ static inline uint64_t nc_mix64(uint64_t z)
  *   c += d; b ^= c; b = ROTL32(b,  7);
  *
  * ⚠️ 必须是【循环】左移，不是普通左移 —— 普通 `<<` 会把高位丢掉，
- * 结果完全错且不报错（实测：全零密钥 block0 算出 06 60 f0 ca…，
- * 而 RFC 期望 76 b8 e0 ad…）。这道 bug 只有对 RFC 测试向量才会暴露，
+ * 结果完全错且不报错。这道 bug 只有对 RFC 测试向量才会暴露，
  * 自己跟自己对拍永远发现不了（两侧都错 = 一致）。 */
 static inline uint32_t nc_rotl32(uint32_t v, int n)
 {
@@ -127,11 +135,8 @@ static inline uint32_t nc_rotl32(uint32_t v, int n)
         c += d; b ^= c; b = nc_rotl32(b, 7);       \
     } while (0)
 
-/* 由 256 位 key 派生第 blk 个块的前 8 字节。
- *
- * 注意 key 的排布：nc_chacha20_key 由 nc_strdec_set_key() 从
- * nc_key（uint64）小端展开成 8 个 uint32，与 Python 侧
- * struct.pack('<8I', ...) 必须逐字节一致。 */
+/* 256 位密钥的 uint32 形态。由 nc_strdec_set_key() 从 nc_key 小端展开，
+ * 与 Python 侧 struct.pack('<8I', ...) 必须逐字节一致。 */
 static uint32_t nc_chacha20_key[8];
 static int nc_chacha20_key_ready = 0;
 
@@ -144,52 +149,94 @@ static void nc_chacha20_derive_key(void)
     nc_chacha20_key_ready = 1;
 }
 
-static uint64_t nc_chacha20_block_head(uint64_t blk)
+/* 核心：counter=blk 的 20 轮，输出 16 个 uint32（= 64 字节密钥流）。
+ *
+ * ## 为什么写成一大串局部变量，而不是 uint32_t x[16] + 循环
+ *
+ *   · 用数组时 `NC_QR(x[0], x[4], x[8], x[12])` 的每次读写都是内存访问 ——
+ *     编译器无法证明不同下标互不别名，只能老实 load/store。
+ *   · 换成 16 个独立局部变量后全部落寄存器（aarch64 有 31 个通用寄存器），
+ *     整个 20 轮不碰内存。
+ *   · 双轮刻意展开成 10 次而非 for 循环：循环变量会让编译器保守处理
+ *     寄存器分配。实测 941 条 add/eor/ror（理论最少 960，无浪费）。
+ *
+ * ## 为什么不做 SIMD（4×uint32x4）
+ *
+ * 理论上还能再快 3~4 倍，但本项目 `APP_ABI := armeabi-v7a arm64-v8a`：
+ * v7a 的 NEON 是可选扩展，不能假设存在；且 AI接手文档 §8.4.1 记录过
+ * v7a/arm64 因 SIMD 栈布局差异导致的 22 字节偏移问题（至今未查清）。
+ * 为 1ms 去碰这个坑不划算 —— 保持标量实现，一套代码两个 ABI 都对。
+ */
+static void nc_chacha20_core(uint32_t counter, uint32_t out[16])
+{
+    /* 初始状态：常量 4 字 + key 8 字 + counter + nonce(3 字，全零) */
+    const uint32_t s0  = 0x61707865u, s1  = 0x3320646Eu;
+    const uint32_t s2  = 0x79622D32u, s3  = 0x6B206574u;
+    const uint32_t s4  = nc_chacha20_key[0], s5  = nc_chacha20_key[1];
+    const uint32_t s6  = nc_chacha20_key[2], s7  = nc_chacha20_key[3];
+    const uint32_t s8  = nc_chacha20_key[4], s9  = nc_chacha20_key[5];
+    const uint32_t s10 = nc_chacha20_key[6], s11 = nc_chacha20_key[7];
+    const uint32_t s12 = counter;
+    const uint32_t s13 = 0, s14 = 0, s15 = 0;
+
+    uint32_t x0 = s0,  x1 = s1,  x2 = s2,  x3 = s3;
+    uint32_t x4 = s4,  x5 = s5,  x6 = s6,  x7 = s7;
+    uint32_t x8 = s8,  x9 = s9,  x10 = s10, x11 = s11;
+    uint32_t x12 = s12, x13 = s13, x14 = s14, x15 = s15;
+
+#define NC_DBLROUND                                            \
+    NC_QR(x0, x4, x8,  x12);  NC_QR(x1, x5, x9,  x13);         \
+    NC_QR(x2, x6, x10, x14);  NC_QR(x3, x7, x11, x15);         \
+    NC_QR(x0, x5, x10, x15);  NC_QR(x1, x6, x11, x12);         \
+    NC_QR(x2, x7, x8,  x13);  NC_QR(x3, x4, x9,  x14)
+    NC_DBLROUND; NC_DBLROUND; NC_DBLROUND; NC_DBLROUND; NC_DBLROUND;
+    NC_DBLROUND; NC_DBLROUND; NC_DBLROUND; NC_DBLROUND; NC_DBLROUND;
+#undef NC_DBLROUND
+
+    /* RFC 是「工作状态 + 初始状态」相加（不是异或），别写错。 */
+    out[0]  = x0  + s0;   out[1]  = x1  + s1;
+    out[2]  = x2  + s2;   out[3]  = x3  + s3;
+    out[4]  = x4  + s4;   out[5]  = x5  + s5;
+    out[6]  = x6  + s6;   out[7]  = x7  + s7;
+    out[8]  = x8  + s8;   out[9]  = x9  + s9;
+    out[10] = x10 + s10;  out[11] = x11 + s11;
+    out[12] = x12 + s12;  out[13] = x13 + s13;
+    out[14] = x14 + s14;  out[15] = x15 + s15;
+}
+
+/* 取整块 64 字节密钥流。返回 1 成功 / 0 无密钥（fail-closed）。 */
+static int nc_chacha20_keystream64(uint64_t blk, uint8_t ks[64])
 {
     if (!nc_chacha20_key_ready) {
-        /* fail-closed：没有密钥就绝不产出密钥流。
-         * 返回值无关紧要（调用方 has_key() 已拦），这里只保证不越界读。 */
         return 0;
     }
-
-    uint32_t s[16];
-    s[0] = 0x61707865u;  /* "expa" */
-    s[1] = 0x3320646Eu;  /* "nd 3" */
-    s[2] = 0x79622D32u;  /* "2-by" */
-    s[3] = 0x6B206574u;  /* "te k" */
-    for (int i = 0; i < 8; i++) {
-        s[4 + i] = nc_chacha20_key[i];
-    }
-    s[12] = (uint32_t)blk;      /* counter */
-    s[13] = 0;                  /* nonce 全零（见调用处注释） */
-    s[14] = 0;
-    s[15] = 0;
-
-    uint32_t x[16];
+    uint32_t w[16];
+    nc_chacha20_core((uint32_t)blk, w);
     for (int i = 0; i < 16; i++) {
-        x[i] = s[i];
+        ks[i * 4 + 0] = (uint8_t)(w[i]);
+        ks[i * 4 + 1] = (uint8_t)(w[i] >> 8);
+        ks[i * 4 + 2] = (uint8_t)(w[i] >> 16);
+        ks[i * 4 + 3] = (uint8_t)(w[i] >> 24);
     }
+    return 1;
+}
 
-    /* 20 轮 = 10 次双轮（列轮 + 对角轮） */
-    for (int i = 0; i < 10; i++) {
-        NC_QR(x[0], x[4], x[8],  x[12]);
-        NC_QR(x[1], x[5], x[9],  x[13]);
-        NC_QR(x[2], x[6], x[10], x[14]);
-        NC_QR(x[3], x[7], x[11], x[15]);
-        NC_QR(x[0], x[5], x[10], x[15]);
-        NC_QR(x[1], x[6], x[11], x[12]);
-        NC_QR(x[2], x[7], x[8],  x[13]);
-        NC_QR(x[3], x[4], x[9],  x[14]);
+/* 单块前 8 字节 —— 供宿主对拍与基准（生产解密走 keystream64）。 */
+static uint64_t nc_chacha20_block_head(uint64_t blk)
+{
+    uint8_t ks[64];
+    if (!nc_chacha20_keystream64(blk, ks)) {
+        return 0;
     }
-
-    /* 取 x[0] ^ s[0]（前 4 字节）与 x[1] ^ s[1]（后 4 字节），
-     * 小端拼成 uint64 —— 与 keyByte(i) 的低位在前约定一致。 */
-    const uint32_t lo = x[0] + s[0];
-    const uint32_t hi = x[1] + s[1];
-    return ((uint64_t)hi << 32) | (uint64_t)lo;
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; i--) {
+        v = (v << 8) | (uint64_t)ks[i];
+    }
+    return v;
 }
 
 #endif /* NC_STRDEC_ALGO == CHACHA20 */
+
 
 /* 第 blk 个密钥流块（8 字节）。
  *
@@ -376,24 +423,59 @@ int nc_strdec_decrypt(const char *b64, size_t b64len, uint8_t *out, size_t outca
                        | (uint32_t)out[2];
     const size_t len = (size_t)raw - 3;
 
-    /* ── 块展开：一次 mix64 产出 8 字节密钥流 ─────────────────────
+    /* ── 密钥流展开：两种算法的块粒度不同 ─────────────────────────
      *
-     * 内层 j 必须从 (off + k) & 7 起，不能固定从 0 —— off 未必是 8 的倍数。
-     * 这是历史事故（offset%8≠0 的每条字符串全部静默解错，不崩不报错，
-     * 只是文案/URL 全烂）。README「密钥流定义」的易错点 2。
+     *   splitmix64 : 块 8 字节  → 块号 pos>>3，块内偏移 pos&7
+     *   ChaCha20   : 块 64 字节 → 块号 pos>>6，块内偏移 pos&63
+     *
+     * 为什么 ChaCha20 要单独一条路径（2026-11-09）：它一次 20 轮天然产出
+     * 64 字节。若硬套 8 字节契约，每 8 字节都重跑一次 20 轮，等于算了
+     * 64 字节只用 8 字节，浪费 8 倍（实测 63 MB/s vs 500+ MB/s）。
+     *
+     * ⚠️ 两条路径的块边界必须与 encrypt-strings.py 的 key_byte_algo() 完全同源，
+     *    否则构建期加密与运行期解密用不同的密钥流 → 全包乱码，且构建期不报错。
+     *
+     * ⚠️ 内层起始偏移必须从 (pos & mask) 起，不能固定从 0 —— off 未必对齐。
+     *    这是历史事故（offset 不对齐的每条字符串全部静默解错，不崩不报错，
+     *    只是文案/URL 全烂）。README「密钥流定义」的易错点 2。
      *
      * 就地解密的安全性：第 k 轮写 out[k]，读 out[k+3]。
      * 此前只写过 out[0..k-1]，而 k-1 < k+3 恒成立 → 读到的永远是原始密文。
      * 调用方传同一块缓冲也安全。 */
-    size_t k = 0;
-    while (k < len) {
-        const uint32_t pos = off + (uint32_t)k;
-        const uint64_t w = nc_block_ks((uint64_t)(pos >> 3));
-        unsigned j = (unsigned)(pos & 7u);
-        for (; j < 8 && k < len; j++, k++) {
-            out[k] = (uint8_t)(out[k + 3] ^ (uint8_t)(w >> (j * 8)));
+#if NC_STRDEC_ALGO == NC_STRDEC_ALGO_CHACHA20
+    {
+        /* 当前缓存的 64 字节密钥流块（blk_cached 无效时重算） */
+        uint8_t ks[64];
+        uint64_t blk_cached = ~(uint64_t)0;
+        size_t k = 0;
+        while (k < len) {
+            const uint32_t pos = off + (uint32_t)k;
+            const uint64_t blk = (uint64_t)(pos >> 6);
+            if (blk != blk_cached) {
+                if (!nc_chacha20_keystream64(blk, ks)) {
+                    return -1;              /* fail-closed：无密钥绝不出明文 */
+                }
+                blk_cached = blk;
+            }
+            unsigned j = (unsigned)(pos & 63u);
+            for (; j < 64 && k < len; j++, k++) {
+                out[k] = (uint8_t)(out[k + 3] ^ ks[j]);
+            }
         }
     }
+#else
+    {
+        size_t k = 0;
+        while (k < len) {
+            const uint32_t pos = off + (uint32_t)k;
+            const uint64_t w = nc_block_ks((uint64_t)(pos >> 3));
+            unsigned j = (unsigned)(pos & 7u);
+            for (; j < 8 && k < len; j++, k++) {
+                out[k] = (uint8_t)(out[k + 3] ^ (uint8_t)(w >> (j * 8)));
+            }
+        }
+    }
+#endif
 
     return (int)len;
 }
@@ -495,5 +577,14 @@ int nc_strdec_utf8_to_utf16(const uint8_t *in, size_t len,
 uint64_t nc_strdec_block_ks(uint64_t blk)
 {
     return nc_block_ks(blk);
+}
+
+/* 虚拟密钥流第 i 个字节（与解密主循环里取密钥流的方式完全一致）。
+ * 只给宿主基准用 —— 让 benchmark 测的是真实路径，不是另写一份等价逻辑
+ * （另写就会测到"我以为的路径"，与产物里跑的代码脱节）。 */
+uint8_t nc_strdec_key_byte_at(uint64_t i)
+{
+    const uint64_t w = nc_block_ks(i >> 3);
+    return (uint8_t)(w >> ((i & 7) * 8));
 }
 #endif

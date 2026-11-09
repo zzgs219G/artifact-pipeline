@@ -641,20 +641,19 @@ def _rotl32(v: int, n: int) -> int:
     return ((v << n) | (v >> (32 - n))) & 0xFFFFFFFF
 
 
-def _chacha20_block_head(seed: int, blk: int) -> int:
-    """ChaCha20 第 blk 块的前 8 字节(uint64,低位在前)。
+def _chacha20_block_full(seed: int, blk: int) -> list:
+    """ChaCha20 第 blk 块的完整 64 字节密钥流（16 个 uint32）。
 
-    seed 是 8 字节密钥材料:按 C 侧口径展开成 8 个 uint32 语义 —— C 侧
-    nc_key[0] 是"大端序读 8 字节",再按小端拆成两个 uint32
-    (lo = k & 0xFFFFFFFF, hi = k >> 32)。这里必须完全照做。
+    与 C 侧 nc_chacha20_core() 逐值等价。**这才是正确用法** —— 一次 20 轮
+    产出 64 字节。旧版只取前 8 字节、每 8 字节重跑一次 20 轮，浪费 8 倍。
+
+    seed 是 8 字节密钥材料：按 C 侧口径展开 —— nc_key[0] 是"大端序读 8 字节"，
+    再按小端拆成两个 uint32（lo = k & 0xFFFFFFFF, hi = k >> 32）。
     """
     k = seed & MASK64
-    st = list(_CHACHA_CONST) + [
-        k & 0xFFFFFFFF, (k >> 32) & 0xFFFFFFFF,
-    ]
-    # 只用了 8 字节密钥材料 → 密钥区剩下的 6 个 uint32 补零。
-    # 与 C 侧一致：C 的 nc_chacha20_derive_key() 只填前 2 个 uint32，
-    # 其余保持静态零初始化。
+    st = list(_CHACHA_CONST) + [k & 0xFFFFFFFF, (k >> 32) & 0xFFFFFFFF]
+    # 只用了 8 字节密钥材料 → 密钥区剩下 6 个 uint32 补零
+    # （C 侧 nc_chacha20_derive_key() 只填前 2 个，其余静态零初始化）
     st += [0] * 6
     st += [0, 0, 0, 0]             # counter + nonce，下面再填 counter
     st[12] = blk & 0xFFFFFFFF      # counter
@@ -671,9 +670,18 @@ def _chacha20_block_head(seed: int, blk: int) -> int:
             x[d] = _rotl32(x[d] ^ x[a], 8)
             x[c] = (x[c] + x[d]) & 0xFFFFFFFF
             x[b] = _rotl32(x[b] ^ x[c], 7)
-    lo = (x[0] + st[0]) & 0xFFFFFFFF
-    hi = (x[1] + st[1]) & 0xFFFFFFFF
-    return (hi << 32) | lo
+    # RFC 是「工作状态 + 初始状态」相加（不是异或）
+    return [(x[i] + st[i]) & 0xFFFFFFFF for i in range(16)]
+
+
+def _chacha20_block_head(seed: int, blk: int) -> int:
+    """ChaCha20 第 blk 块的前 8 字节（uint64，低位在前）。
+
+    仅供与 C 侧 nc_chacha20_block_head() 对拍 / 基准使用。
+    生产加密路径走 _chacha20_byte()，它用整块 64 字节。
+    """
+    w = _chacha20_block_full(seed, blk)
+    return (w[1] << 32) | w[0]
 
 
 # 算法选择(构建期决定,与 C 侧 -DNC_STRDEC_ALGO 必须同源)
@@ -682,13 +690,29 @@ ALGO_CHACHA20 = "chacha20"
 
 
 def key_byte_algo(seed: int, i: int, algo: str = ALGO_SPLITMIX) -> int:
-    """按算法取虚拟密钥流第 i 个字节。i 是【全包虚拟密钥流】的绝对下标。"""
+    """按算法取虚拟密钥流第 i 个字节。i 是【全包虚拟密钥流】的绝对下标。
+
+    ⚠️ 两种算法的【块粒度不同】，块号必须与 C 侧完全同源：
+        splitmix64 : 8 字节块  → blk = i >> 3，块内取 (i & 7)
+        ChaCha20   : 64 字节块 → blk = i >> 6，块内取 (i & 63)
+    若这里与 nc_strdec.c 不一致，构建期加密与运行期解密会用不同密钥流，
+    结果是全包乱码，而且构建期完全不报错。
+    """
     if algo == ALGO_SPLITMIX:
         return key_byte(seed, i)
     if algo == ALGO_CHACHA20:
-        w = _chacha20_block_head(seed, i >> 3)
-        return (w >> ((i & 7) * 8)) & 0xFF
+        return _chacha20_byte(seed, i)
     raise SystemExit(f"❌ 未知的密钥流算法: {algo!r}(只支持 {ALGO_SPLITMIX} / {ALGO_CHACHA20})")
+
+
+def _chacha20_byte(seed: int, i: int) -> int:
+    """ChaCha20 虚拟密钥流第 i 个字节（64 字节块粒度）。
+
+    块号 = i >> 6，块内偏移 = i & 63 —— 与 nc_strdec.c 的
+    nc_chacha20_keystream64() + 解密主循环必须逐字节同源。
+    """
+    w = _chacha20_block_full(seed, i >> 6)
+    return (w[(i & 63) >> 2] >> (((i & 3)) * 8)) & 0xFF
 
 def read_seed_bytes() -> bytes:
     """新构建的种子:8 字节随机。"""
