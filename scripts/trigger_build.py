@@ -137,6 +137,10 @@ def build_config(args) -> str:
       测试场景要的是"改完代码尽快知道有没有坏"，不是出厂强度。
       需要出厂强度时显式加 --packer / --antidiff 或 --all。
     """
+    # --stringenc-chacha20 隐含 --stringenc-native（没有纯 C 桩就没有算法可选）
+    if args.stringenc_chacha20:
+        args.stringenc_native = True
+        args.stringenc = True
     any_switch = any([args.sigcheck, args.dex2c, args.stringenc,
                       args.antidiff, args.envcheck, args.packer])
     if args.all:
@@ -244,6 +248,11 @@ def build_config(args) -> str:
             #                         CLI 不该主动走兼容路径
             #   三版写 "c"（枚举）   → 当前正确形态
             cfg["stringenc"]["stub_impl"] = "c"
+            # 密钥流算法（2026-11-09）。只在纯 C 桩下有意义 ——
+            # Java 桩的算法在 dex 里，换算法要重做整条 d8→baksmali 链路。
+            # 不传 = schema default("splitmix64")，与历史行为一致。
+            if args.stringenc_chacha20:
+                cfg["stringenc"]["algo"] = "chacha20"
         elif args.dex2c_stub or args.all:
             cfg["stringenc"]["dex2c_stub"] = True
 
@@ -726,6 +735,12 @@ def main() -> int:
                         "native 声明（不含任何密钥/算法）。需同时开字符串加密；"
                         "与 --dex2c-stub / --all 互斥。对应 schema 的 "
                         "stringenc.stub_impl='c'。")
+    r.add_argument("--stringenc-chacha20", action="store_true",
+                   help="纯 C 桩的密钥流算法换成 ChaCha20（默认 splitmix64）。"
+                        "splitmix64 可逆 —— 猜中任意一条明文可反解密钥解全包；"
+                        "ChaCha20 不可逆，猜中一条只泄漏那一条。密文格式两者相同、"
+                        "体积零增长。隐含 --stringenc-native。对应 schema 的 "
+                        "stringenc.algo='chacha20'。")
     r.add_argument("--dex2c-stub", action="store_true",
                    help="联动：把解密桩内核也抽进 libnc.so（需同时勾 dex2c + stringenc）。"
                         "勾选后走 LINK_STUB 路径 —— 桩先注入再转译，"
