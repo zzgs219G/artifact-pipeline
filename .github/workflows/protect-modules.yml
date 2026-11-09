@@ -657,15 +657,18 @@ jobs:
         id: toolchain
         uses: ./.github/actions/setup-toolchain
         with:
-          # ⚠️ 临时改成 r29 做兼容性实验（2026-11-09）：
-          #   tools/nox.zip 的 VERSION=v0.9.11-obf，它是走 Amice bundle 的
-          #   NDK r29（clang 21）编出来的，而本 job 默认用 r27d（clang 18）
-          #   链接它 —— 违反 nox 自己 make-zip-lib.sh 第 20 行的
-          #   「.a 与 NDK/编译器版本绑定，不能混链」。
-          #   实测：r27d 链接能跑；本地 r29 编译+链接反而 SIGILL。
-          #   这里换成 r29 验证「纯 r29 链路是否可用」。
-          #   **实验完必须改回 r27d。**
-          ndk-version: r29
+          # r27d 是默认值。2026-11-09 做过一次 r29 兼容性实验，结论：
+          #   云端 r29 产物同样能跑（真机验证，业务页全对，进程稳定 32 分钟）。
+          #   所以 r29 不是问题 —— 问题只在本地 Termux 环境（见下）。
+          # 为什么仍用 r27d：
+          #   · runner 预装 27.3.13750724，零下载（r29 要下 783MB，+约 40s）
+          #   · tools/nox.zip 的 libnox.a 虽然是 r29(Amice bundle) 编的，
+          #     但与 r27d 链接实测可用（跨版本混链未出问题）
+          # 若要复现 r29：把下面改成 r29 即可（setup-ndk 映射表已支持）。
+          #
+          # ⚠️ 本地 Termux 用 r29 编出的 so 装机必 SIGILL（连纯 sigcheck 都崩），
+          #    原因未查明。**本地装机测试的结论不可采信**，验证一律走云端。
+          ndk-version: r27d
           nox-source: 'false'
 
       # ── Amice bundle（仅当 protect_config 勾选 obfuscate 时）────────────
