@@ -1035,12 +1035,34 @@ ndk_write_mk "$WORK/project/jni" nc "$GUARD_LIB_DIR" "$_OBF_SPEC"   # mk 模板�
 if [[ $WANT_TRANSPILE -eq 1 ]]; then
   echo "[mark] 段标记：dex2c 转译产物 → .ncx"
 
-  # 先数一下源码里到底有多少 JNI 函数头（用于判定"静默失防"）
-  JNI_HDRS=$(grep -rlE 'JNIEXPORT[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+JNICALL' \
-             "$WORK/project/jni" --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null | wc -l)
+  # 判据：dex2c 产物里【实际存在】的 JNI 函数定义数（用于"静默失防"守卫）。
+  #
+  # ⚠️ 2026-11-10 修（这是本仓库最严重的一次假绿）：
+  #   旧实现数的是 `JNIEXPORT ... JNICALL`，但 protect.sh:467 一直传
+  #   `--dynamic-register` → writer.py:106 产出的形态是
+  #       void Java_com_xxx_MainActivity_onCreate(JNIEnv *env, ...)
+  #   【没有】JNIEXPORT / JNICALL。于是：
+  #     · so_section_mark.py 的 dex2c-jni 规则命中 0   → 一个都没标
+  #     · 本守卫 JNI_HDRS 也是 0 → `0 > 0` 为假 → 直接放行
+  #   「规则」与「守卫」共用同一个失效正则，一起失效，所以两边都安静。
+  #
+  #   实测后果（protected_unsigned_sign.apk / arm64）：
+  #     .ncx  7,908 B（只有 sigcheck/stringenc 的几个小函数）
+  #     .text 250,156 B（含 jni.onCreate 4,072 B / jni.k 16,492 B，熵 6.179 = 明文）
+  #     → dex2c 抽走的业务逻辑【全部】留在明文段，零加密。
+  #
+  #   现在按【两种形态都数】判定：静态注册数 JNIEXPORT，动态注册数 Java_ 定义。
+  JNI_STATIC=$(grep -rhoE 'JNIEXPORT[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+JNICALL' \
+               "$WORK/project/jni" --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null | wc -l)
+  JNI_DYNAMIC=$(grep -rhoE '^[[:space:]]*(jboolean|jbyte|jshort|jchar|jint|jlong|jfloat|jdouble|jstring|jobject|jarray|jclass|jthrowable|void|jsize)[[:space:]]+\**[[:space:]]*Java_[A-Za-z0-9_]+[[:space:]]*\(' \
+                "$WORK/project/jni" --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null | wc -l)
+  JNI_HDRS=$((JNI_STATIC + JNI_DYNAMIC))
 
+  # 两条规则都挂上：静态注册 + 动态注册。
+  # 只挂其中一条会在换注册方式时静默失防（本次事故就是这么来的）。
   python3 "$GUARD_SRC/so_section_mark.py" "$WORK/project/jni" \
     --rule dex2c-jni \
+    --rule dynamic-register-jni \
     --exclude nc_guard_jni.c \
     --exclude-func ncVerify \
     --exclude-func heartbeat \
@@ -1062,12 +1084,24 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
            --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null \
            | awk -F: '{s+=$2} END {print s+0}')
   if [[ $JNI_HDRS -gt 0 && $MARKED -eq 0 ]]; then
-    echo "❌ 检出 $JNI_HDRS 个含 JNIEXPORT 的源文件，但段标记命中 0" >&2
-    echo "   → dex2c 的 writer.py 可能改了函数头格式，规则已脱节" >&2
-    echo "   → 修 nox 仓库的 so_section_mark.py dex2c-jni 规则，不许静默放行" >&2
+    echo "❌ 检出 $JNI_HDRS 个 JNI 函数定义（静态 $JNI_STATIC / 动态 $JNI_DYNAMIC），但段标记命中 0" >&2
+    echo "   → dex2c 的 writer.py 的函数头形态变了，两条规则都已脱节" >&2
+    echo "   → 修 nox 仓库的 so_section_mark.py（dex2c-jni / dynamic-register-jni），" >&2
+    echo "     不许静默放行：那等于 dex2c 抽走的业务逻辑全部以明文留在 .text" >&2
     exit 1
   fi
-  echo "[mark] 完成：$MARKED 处 .ncx 标记（含探针与转译函数）"
+  # 配对断言：检出的定义数必须与标记数【对得上】。
+  # 只查"MARKED==0"不够 —— 3187 个方法里标上 3 个也能通过，实质仍是失防。
+  # 允许少量差额（部分函数带 noinline/已有 attribute 等），但不得低于 90%。
+  if [[ $JNI_HDRS -gt 0 ]]; then
+    _need=$(( JNI_HDRS * 9 / 10 ))
+    if [[ $MARKED -lt $_need ]]; then
+      echo "❌ 段标记覆盖不足：检出 $JNI_HDRS 个 JNI 定义，只标上 $MARKED 个（要求 ≥ $_need）" >&2
+      echo "   → 多数 dex2c 产物仍在明文 .text，攻击者 objdump 即可读" >&2
+      exit 1
+    fi
+  fi
+  echo "[mark] 完成：$MARKED 处 .ncx 标记 / $JNI_HDRS 个 JNI 定义（含探针与转译函数）"
 
 fi
 
