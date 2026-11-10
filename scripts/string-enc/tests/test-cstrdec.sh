@@ -425,7 +425,7 @@ for _cand in \
     "${ANDROID_NDK_HOME:-}/sysroot/usr/include" \
     "${ANDROID_NDK_ROOT:-}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
     "$HOME/android-ndk-r29-aarch64/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
-    "$PREFIX/include" \
+    "${PREFIX:-}/include" \
     /usr/include ; do
   if [ -n "$_cand" ] && [ -f "$_cand/jni.h" ]; then _JNI_INC="$_cand"; break; fi
 done
