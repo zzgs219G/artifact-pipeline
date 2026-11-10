@@ -310,7 +310,7 @@ def describe_plan(cfg_json: str) -> str:
         # （动态注册的 JNINativeMethod 表取函数地址 → Amice 静默跳过）。
         ("指令级VMP",
          bool(c.get("vmp")),
-         "自动关动态注册（静态短名）；.ncx 体积约 10-20 倍"),
+         "保护 sigcheck/stringenc 的小函数；dex2c 产物实测寄存器超限打不了"),
     ]
 
     out = []

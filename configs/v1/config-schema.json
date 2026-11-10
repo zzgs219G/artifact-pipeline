@@ -67,8 +67,8 @@
     },
     {
       "key": "vmp",
-      "label": "指令级 VMP 虚拟化",
-      "desc": "把 dex2c 抽出的业务方法编译成自定义 VM 字节码，由内置解释器执行。这是唯一能挡住「动态 dump」（Frida 直接读内存）的手段——锁箱只在磁盘上是密文，App 启动解锁后内存里就是明文 ARM64。体积：.ncx 段约涨 10-20 倍（4 个方法实测 25KB → 预计 300KB+）。强制：会自动关闭 dex2c 的动态注册（动态注册的 JNINativeMethod 表取了函数地址，Amice 会静默跳过 VMP）。",
+      "label": "函数虚拟化（VMP）",
+      "desc": "把函数体编译成自定义 VM 字节码，由内置解释器执行 —— 解锁后内存里不是明文 ARM64。保护对象：签名校验（sig_verify 等 4 个）+ 字符串加密的 5 个算法函数（Base64/密钥流/UTF-8）。⚠️ dex2c 抽出的业务方法【保护不了】：实测 4/4 因寄存器预算被跳过（Amice 的 VM 只有 32 个虚拟寄存器，而 dex2c 把 Dalvik 每个局部变量映射成一个 C 变量，Dalvik 最多 255 个局部变量，天生超限）。体积：实测 .so 约 +674KB（Amice 的 VM profile 与 runtime 会编进来）。",
       "type": "leaf",
       "default": false,
       "arg": "--vmp"
