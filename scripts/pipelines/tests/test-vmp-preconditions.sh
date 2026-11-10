@@ -222,10 +222,27 @@ if grep -q -- '--vmp)' "$ROOT/scripts/pipelines/protect.sh"; then
 else
   bad "T11a protect.sh 没有 --vmp 分支"
 fi
-if grep -A4 -- '--vmp)' "$ROOT/scripts/pipelines/protect.sh" | grep -q 'WANT_DEX2C_STATIC_REG=1'; then
-  ok "T11b --vmp 自动联动 --dex2c-static-register"
+# T11b：dex2c 产物【必须不】打 VMP 注解
+# 实测（真构建 RUST_LOG=amice=debug）：4 个业务方法 4/4 因寄存器预算
+# 被跳过（values=27 vregs=32 free=0），留着注解只会让 .so 白涨 674KB
+# 而 .ncx 一个字节不变。所以必须确认 annotate 没被加回 dex2c 标记路径。
+if grep -A3 'so_section_mark.py" "\$WORK/project/jni"' "$ROOT/scripts/pipelines/protect.sh" | grep -q 'annotate'; then
+  bad "T11b dex2c 标记路径又加了 annotate —— 实测 100% 被跳过，纯亏体积"
 else
-  bad "T11b --vmp 没有联动静态注册（漏了会让 VMP 静默失效）"
+  ok "T11b dex2c 产物不打 VMP 注解（实测 4/4 寄存器超限）"
+fi
+
+# T11e：sigcheck 必须能被 VMP——SIG_SEC_MARKED 在 NC_AMICE_VMP 下含 annotate
+if grep -q 'NC_AMICE_VMP' "$ROOT/scripts/guard/src/sig_check.c"; then
+  ok "T11e sig_check.c 的 SIG_SEC_MARKED 受 NC_AMICE_VMP 控制"
+else
+  bad "T11e sig_check.c 缺 NC_AMICE_VMP 分支 —— sigcheck 无法上 VMP"
+fi
+# T11f：lib-ndk.sh 必须在 obf_spec 含 vmp 时定义该宏
+if grep -q -- '-DNC_AMICE_VMP' "$ROOT/scripts/lib/lib-ndk.sh"; then
+  ok "T11f lib-ndk.sh 在 vmp 规格下注入 -DNC_AMICE_VMP"
+else
+  bad "T11f lib-ndk.sh 未注入 -DNC_AMICE_VMP —— sigcheck 的 annotate 永远不生效"
 fi
 
 # T11c AMICE_VM_VIRTUALIZE 必须 export
@@ -267,10 +284,11 @@ else
 fi
 
 # T13 --vmp + 保留动态注册 必须 fail-fast
+# T13：历史参数仍在（兼容旧脚本），但不再与 --vmp 互斥
 if grep -q 'vmp-keep-dynamic-register' "$ROOT/scripts/pipelines/protect.sh"; then
-  ok "T13 有 --vmp-keep-dynamic-register 且与 --vmp 互斥（fail-fast）"
+  ok "T13 --vmp-keep-dynamic-register 保留兼容"
 else
-  bad "T13 缺互斥检查：--vmp + 动态注册会白跑一遍构建"
+  bad "T13 历史参数被删 —— 旧调用方会报 unknown option"
 fi
 
 echo ""

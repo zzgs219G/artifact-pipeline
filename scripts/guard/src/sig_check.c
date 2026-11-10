@@ -174,7 +174,32 @@ static void siglog(const char *prio, const char *fmt, ...) {
  * 775 行【之前】——宏必须先于使用点定义。故上移，两处共用同一份。#if 条件
  * 不变，行为与原先完全一致。 */
 #if defined(NC_GUARD_SECTIONED) && !defined(SIGCHECK_HOST_TEST)
-#  define SIG_SEC_MARKED __attribute__((section(NC_SEC_CODE), retain, used, noinline))
+/* ⚠️ 2026-11-11：去掉 retain / used，改为只靠 section + noinline。
+ *
+ * 原因：clang 会把 `used` / `retain` 变成 IR 的 @llvm.used 表，
+ * 表里存的是 `ptr @func` —— 即函数地址引用。而 Amice 的 VMP
+ * （vm_virtualize/mod.rs:1067 has_unsupported_function_uses）
+ * 只豁免「直接调用」和「@llvm.global.annotations」，
+ * @llvm.used 会被判 non-call address use → 该函数 VMP 静默跳过。
+ *
+ * 实测（本地 check-vmp-eligibility.py + 真构建 RUST_LOG=amice=debug）：
+ *   带 used/retain 时，sig_check.c 的 4 个标段函数全部因 @llvm.used 被跳过。
+ *
+ * 安全性：section 归属本身已防死代码删除（段被锁箱器引用，
+ * --gc-sections 不会回收有 section 属性的符号），noinline 防内联，
+ * 所以去掉 used/retain 不影响"函数被保留"这个原始目的。 */
+#  if defined(NC_AMICE_VMP)
+/* --vmp 开启时同时请求 VMP 虚拟化。
+ * ⚠️ 必须由定义宏控制而不是无条件加：没装 amice 插件时
+ *    annotate 是无害的未知属性，但会多一个 llvm.global.annotations 表，
+ *    让"到底开没开 VMP"无法从产物推断。
+ * ⚠️ 注解里不写 vm_profile_path —— 那会多一个字符串常量引用；
+ *    profile 由环境变量 AMICE_VM_PROFILE_PATH 提供。 */
+#    define SIG_SEC_MARKED \
+       __attribute__((section(NC_SEC_CODE), noinline, annotate("+vm_virtualize")))
+#  else
+#    define SIG_SEC_MARKED __attribute__((section(NC_SEC_CODE), noinline))
+#  endif
 #else
 #  define SIG_SEC_MARKED
 #endif

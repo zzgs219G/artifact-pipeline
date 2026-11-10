@@ -196,11 +196,13 @@ while [[ $# -gt 0 ]]; do
     --obfuscate) WANT_OBFUSCATE=1; shift ;;
     --dex2c-static-register) WANT_DEX2C_STATIC_REG=1; shift ;;
     --vmp) WANT_VMP=1; shift
-           # VMP 依赖静态注册（见 WANT_VMP 处注释）。
-           # 自动联动而不是让用户记得两个都勾：漏一个的后果是
-           # "构建成功但 VMP 静默跳过"，正是最该避免的假绿。
-           WANT_DEX2C_STATIC_REG=1 ;;
-    --vmp-keep-dynamic-register) WANT_VMP=1; shift ;;   # 显式保留动态注册（VMP 会跳过，仅供调试）
+           # ⚠️ 2026-11-11 调整：不再自动联动 --dex2c-static-register。
+           #   原因：dex2c 产物已确认 100% 被 Amice 跳过（寄存器预算），
+           #   不给它打注解了。而静态注册的代价是业务方法名进 .dynsym，
+           #   既然不再需要它的"让路"效果，就不该无谓付出这个代价。
+           #   --vmp 现在保护的是 sigcheck / stringenc 自己的小函数。
+           ;;
+    --vmp-keep-dynamic-register) WANT_VMP=1; shift ;;   # 历史参数，保留兼容（现等价于 --vmp）
     --obfuscate-mba) WANT_OBFUSCATE=1; OBF_MBA=1; shift ;;
     --obfuscate-flatten) WANT_OBFUSCATE=1; OBF_FLATTEN=1; shift ;;
     *)          log_err "未知参数: $1"; usage ;;
@@ -1222,18 +1224,32 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   #      → ART 找不到符号。静态注册形态自带 extern "C"，天然满足。
   #   ③ amice 插件必须真的加载（-fpass-plugin）→ 由 --vmp 负责
   #   ④ 函数得有独立符号（noinline），否则被内联掉就无处虚拟化
+  #
+  # ⚠️⚠️ 2026-11-11 实测结论：dex2c 产物【不再打 VMP 注解】。
+  #
+  #   真构建（RUST_LOG=amice=debug）拿到 4 个业务方法的跳过原因，
+  #   全是结构性的、改配置解决不了的：
+  #     attachBaseContext : register pressure  values=27 vregs=32 free=0
+  #     k                 : register pressure  values=27 vregs=32 free=0
+  #     onCreate          : register pressure  values=27 vregs=32 free=0
+  #     onConfigurationChanged : non-null pointer constants cannot be materialized
+  #
+  #   根因：Amice 的 VM 只有 x0..x31 共 32 个虚拟寄存器，而 dex2c 生成的
+  #   函数把 Dalvik 的每个局部变量映射成一个 C 变量（Dalvik 最多 255 个
+  #   局部变量），寄存器需求天生超限。nox 当初的 ncg_stub_recover 也是
+  #   这个坑（values=22 就超），靠「拆函数」才过 —— 但 dex2c 产物是引擎
+  #   生成的一整个方法，没法为了 VMP 去拆。
+  #
+  #   留着注解的代价：实测 .so 从 527KB 涨到 1.2MB（Amice 把 profile 和
+  #   VM runtime 全编进去了），而 .ncx 一个字节没变、没有函数被虚拟化 ——
+  #   纯亏 674KB。所以这里不再打。
+  #
+  #   要保护 dex2c 产物得换路子（PVM2 在 Dalvik 层虚拟化 / VMPacker 做
+  #   二进制级 VMP / 或干脆只做 flatten）。--vmp 现在的实际作用是保护
+  #   sigcheck 与 stringenc 自己的小函数（它们的寄存器需求小得多）。
   _MARK_EXTRA=()
   if [[ $WANT_VMP -eq 1 ]]; then
-    if [[ $WANT_DEX2C_STATIC_REG -eq 1 ]]; then
-      _MARK_EXTRA=(--annotate '+vm_virtualize')
-      echo "[mark] VMP: 业务方法打 +vm_virtualize（静态注册 + 无 used/retain）"
-    else
-      echo "❌ --vmp 需要静态注册，但检测到 --vmp-keep-dynamic-register" >&2
-      echo "   动态注册的 JNINativeMethod 表取了函数地址 → Amice 必然静默跳过" >&2
-      echo "   这个组合只会白跑一遍构建。去掉 --vmp-keep-dynamic-register，" >&2
-      echo "   或去掉 --vmp（二选一，不要两个都要）。" >&2
-      exit 1
-    fi
+    echo "[mark] VMP: dex2c 产物【不】打注解（实测 4/4 因寄存器预算被跳过，见 protect.sh 注释）"
   fi
   python3 "$GUARD_SRC/so_section_mark.py" "$WORK/project/jni" \
     --rule dex2c-jni \
@@ -1322,9 +1338,22 @@ fi
 #   nc_strdec_set_key      只在 <clinit> 调一次
 if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
   echo "[mark] 段标记：纯 C 解密桩【算法层】→ .ncx"
+  # ── VMP（2026-11-11）：--vmp 时同时打 +vm_virtualize ──────────────
+  # 这 5 个函数是 stringenc 的全部算法（Base64/密钥流/UTF-8），
+  # 都不取地址、寄存器需求小，是最可能真正被虚拟化的目标
+  # （对照：dex2c 产物因寄存器超限 100% 被跳过）。
+  #
+  # ⚠️ 走 so_section_mark 的 --annotate 而不是手写 attribute：
+  #    它会自动去掉 used/retain（那两个会产生 @llvm.used → Amice 跳过）。
+  _CSTUB_ANN=()
+  if [[ $WANT_VMP -eq 1 ]]; then
+    _CSTUB_ANN=(--annotate '+vm_virtualize')
+    echo "[mark] VMP: 纯 C 桩算法层同步打 +vm_virtualize"
+  fi
   python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec.c" \
     --pattern '^[ \t]*((?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_strdec_decrypt|nc_strdec_b64_decode|nc_strdec_utf8_to_utf16|nc_block_ks|nc_mix64)[ \t]*\()' \
     --section .ncx \
+    "${_CSTUB_ANN[@]+"${_CSTUB_ANN[@]}"}" \
     -v 2>&1 | sed 's/^/  [mark] /' || {
     echo "❌ 纯 C 解密桩段标记失败 —— 算法将以明文留在 .text" >&2
     exit 1

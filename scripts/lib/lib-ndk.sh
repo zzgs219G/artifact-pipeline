@@ -70,14 +70,33 @@ EOF
       return 1
     }
     _obf_flags="$_obf_flags -fpass-plugin=$AMICE_PLUGIN"
+    # ── VMP 宏（2026-11-11）────────────────────────────────────────
+    # NC_AMICE_VMP 让 sig_check.c 的 SIG_SEC_MARKED 展开成
+    #   __attribute__((section(".ncx"), noinline, annotate("+vm_virtualize")))
+    #
+    # 为什么需要这个宏而不是无条件加 annotate：
+    #   · 没装插件时 annotate 是无害的未知属性，但会平白多一张
+    #     llvm.global.annotations 表，让"到底开没开 VMP"无法从产物推断；
+    #   · 更要紧的是：加了 annotate 后 clang【不再内联】这些 static 函数
+    #     （annotate 视为有副作用）。实测：不定义该宏时 sig_check.c 的
+    #     find_apk_path / extract_cert_der / derive_expected 三个函数
+    #     被 -Oz 内联进 sig_verify → 它们在 .ncx 里【根本不存在独立函数】，
+    #     也就无从 VMP。定义后 4 个函数全部保留。
+    #     这一点此前一直被忽略：以为"标了 SIG_SEC_MARKED 就是 4 个函数"，
+    #     实测只有 sig_verify 一个。
+    if [[ "$obf_spec" == *vmp* ]]; then
+      _obf_flags="$_obf_flags -DNC_AMICE_VMP"
+    fi
     # AMICE_* 是运行时环境变量（编译期被插件读取），不是 CFLAGS。
     # 但 ndk-build 的子进程能继承，所以写成 APP_CFLAGS 里的注释说明来源，
     # 真正的开关由 protect.sh 在调用 ndk_build 时 export。
     cat >> "$jni/Application.mk" <<OBFEOF
 
-# ── Amice 混淆（规格: $obf_spec）─────────────────────────────────
+# ── Amice 混淆/VMP（规格: $obf_spec）─────────────────────────────
 # NC_AMICE_ANNOTATE 让 nc_guard_boot.c 的 NC_OBF 展开成
 #   __attribute__((noinline, annotate("+mba")))
+# NC_AMICE_VMP      让 sig_check.c 的 SIG_SEC_MARKED 追加
+#   annotate("+vm_virtualize")（同时阻止 -Oz 把 static 函数内联掉）
 # -fpass-plugin 加载插件本体（需 LD_LIBRARY_PATH 指向 amice/llvm-lib）
 APP_CFLAGS  += $_obf_flags
 APP_CPPFLAGS += $_obf_flags
