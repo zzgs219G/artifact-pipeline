@@ -408,6 +408,38 @@ else
   bad "protect.sh 未在纯 C 桩路径写 stub_seed.txt（联动不会生效）"
 fi
 
+# 7a2. jni 层必须能真实编译（宿主测试只编 nc_strdec.c，编不到这一层）
+#      实测踩过：精简注释时误删了 NC_SHELL_SO_HINT 的 #define，
+#      宿主 344 项全绿但 NDK 编译直接报 undeclared identifier。
+#      这条用真实 cfg.h 造两种形态（包壳/未包壳）各编一次。
+if command -v "$CC" >/dev/null 2>&1; then
+  mkdir -p "$W/jnic"
+  for _mode in pack nopack; do
+    {
+      echo '#ifndef _NC_STRDEC_CFG_H_'
+      echo '#define _NC_STRDEC_CFG_H_'
+      echo '#define NC_STRDEC_STUB_CLASS "tw/qw/ny/la"'
+      echo '#ifndef NC_STRDEC_NKEYS'
+      echo '#  define NC_STRDEC_NKEYS 1'
+      echo '#endif'
+      echo '#ifndef NC_STRDEC_ALGO'
+      echo '#  define NC_STRDEC_ALGO 2'
+      echo '#endif'
+      [ "$_mode" = nopack ] && echo '#define NC_STRDEC_KEY_BYTES { 1,2,3,4,5,6,7,8 }'
+      echo '#endif'
+    } > "$W/jnic/nc_strdec_cfg.h"
+    if "$CC" -c -O2 -std=c99 -Wall -Wextra -Werror -fPIC \
+         -I"$W/jnic" -I"$CSRC" "$CSRC/nc_strdec_jni.c" \
+         -o "$W/jnic/$_mode.o" 2>"$W/jnic/$_mode.log"; then
+      ok; echo "   ✅ nc_strdec_jni.c 真实编译（$_mode 形态）"
+    else
+      bad "nc_strdec_jni.c 编译失败（$_mode 形态）：$(head -2 "$W/jnic/$_mode.log" | tr '\n' ' ')"
+    fi
+  done
+else
+  echo "   ⚠ 跳过：无 C 编译器"
+fi
+
 # 7d1. 构建期契约：包了壳就必须【不写】编译期常量
 #      理由：常量与壳两条密钥来源若同时存在，去掉壳 so 会回退到常量 →
 #      照样能解 → 「必须带着壳」失效。所以 protect.sh 必须按 WANT_PACKER

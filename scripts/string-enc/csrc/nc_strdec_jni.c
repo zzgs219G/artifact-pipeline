@@ -1,30 +1,16 @@
 /* nc_strdec_jni.c — 纯 C 解密桩的 JNI 边界（2026-11-09）
  *
- * 职责边界（刻意切分）：
- *   nc_strdec.c       纯算法（Base64 / 密钥流 / UTF-8→UTF-16），零 JNI 依赖
- *   本文件            只做 JNI 类型转换 + 缓存 + 异常处置
+ * 分层：nc_strdec.c 是纯算法（零 JNI，宿主可单测）；本文件只做
+ * JNI 类型转换 + 缓存 + 异常处置。
  *
- * 为什么切开：宿主测试要能编 nc_strdec.c 而不需要 JVM；
- *   将来若把桩搬进 dpt 壳 so，也只需重写这一层。
- *
- * ── 三条硬约束（每条都对应一个真实事故类型）───────────────────────
- *
- * ① 失败必须【原样返回传入的 payload 对象】，不抛异常、不崩、不缓存
- *    现有 Java 桩的语义是 try{return dn()}catch{return payload}。
- *    改成 native 后 dex 侧没有 try/catch，兜底责任全在本文件。
- *    返回原对象（而不是 NewString 一个新串）也保证了"失败时
- *    业务拿到的就是密文本身"这个可观察行为不变。
- *
- * ② 绝不能带着 pending exception 继续调 JNI
- *    中途中止时若有异常挂起，后续所有 JNI 调用都未定义。
- *    故退出路径统一走 nc_jni_fail()：先 ExceptionCheck/Clear，再返回兜底值。
- *
- * ③ so 未加载 / 密钥未设置 → 也是"原样返回"而不是崩
- *    但这两件事在正常产物里不该发生：so 由桩类的 <clinit> 加载
- *    （见 encrypt-strings.py 的 _inject_loadlib_into_stub_clinit），
- *    密钥由 <clinit> 经 setKey 注入。真发生了说明构建期缺步骤，
- *    此时返回密文（App 不崩但字符串是密文）比闪退更容易定位。
+ * 三条硬约束（每条对应一类真实事故）：
+ * ① 失败必须【原样返回 payload 对象】不抛不崩不缓存 —— Java 桩原本靠
+ *    try/catch 兜底，native 侧没有，兜底责任全在这里。
+ * ② 绝不能带 pending exception 继续调 JNI —— 退出统一走 nc_jni_fail()
+ *    （先 ExceptionCheck/Clear 再返回兜底值）。
+ * ③ 无密钥 / so 未加载也是"原样返回" —— 见 nc_ensure_key()。
  */
+
 
 #include <jni.h>
 #include <stdlib.h>
@@ -52,41 +38,21 @@
 
 #include "nc_strdec.h"
 
-/* ── 联动的前提：NKEYS 必须是 1（2026-11-10）────────────────────────────
- *
- * 从壳取种子的路径只实现了 NKEYS=1（8 字节种子恰好等于一把 key）。
- * NKEYS=4 需要把 8 字节种子扩展成 32 字节，而构建期 Python 侧没有对应的
- * 扩展逻辑（那边 seed 就是单个 uint64，见 encrypt-strings.py 的 key_byte）。
- *
- * 与其让两侧静默不一致（症状是全包乱码、构建期零报错），不如在编译期
- * 直接拒绝 —— 构建失败比运行期解不出来好查得多。
- * 将来要支持 NKEYS>1 的联动，必须【两侧同时】实现同一套扩展并加对拍。
- *
- * ⚠️ 断言必须放在这里（cfg.h 与 nc_strdec.h 都 include 之后）：
- *    放在 nc_strdec.h 之前会读到它的兜底默认值 1，断言永真（形同虚设）。 */
+/* 从壳取种子的路径只实现 NKEYS=1（8 字节种子 = 一把 key）。NKEYS=4 需要
+ * 把种子扩成 32 字节，而 Python 侧没有对应逻辑（那边 seed 就是单个 uint64）。
+ * 宁可编译期拒绝，也不要两侧静默不一致（症状是全包乱码、构建期零报错）。
+ * ⚠️ 断言必须放在 cfg.h 与 nc_strdec.h **都 include 之后** —— 放前面会读到
+ *    头文件的兜底默认值 1，断言永真。 */
 #if NC_STRDEC_NKEYS != 1
 #  error "纯 C 桩从壳取种子只支持 NKEYS=1（见本文件的联动断言说明）"
 #endif
 
-/* ── L1 缓存 ──────────────────────────────────────────────────────────
- *
- * 为什么必须有：现有 Java 桩有 ConcurrentHashMap 缓存（StrDec.java 的
- * CACHE）。搬到 C 之后若不缓存，每次调用都要重算 Base64 + 密钥流 + 分配
- * String；而实测某些位点单次启动会被执行 ~20 次（Compose 重组），
- * 累计开销比"换算法"那一档大一个数量级。
- *
- * 为什么用 global ref：JNI 局部引用只在当前调用栈有效，缓存必须跨调用，
- * 只能用 NewGlobalRef。
- *
- * 上限：与 Java 桩同值 30000。racy 检查（并发略超无害）。
- * 内存：每条 ~(对象头 + 全局引用表项)，30000 条量级是几 MB，
- * 与 Java 侧 CHM 的占用同数量级，不构成新问题。
- *
- * ⚠️ 已知边界（与 Java 版一致）：
- *   · 进程生命周期内不释放 —— 与 Java 侧 CHM 语义等同（进程死即空）
- *   · key = 密文 jstring 内容，查表要 GetStringUTFChars（有分配），
- *     所以"命中"不是零成本，但比重算便宜约 5~10 倍（实测见 README）
- */
+/* ── L1 缓存（对应 Java 桩的 ConcurrentHashMap）─────────────────────
+ * 不缓存则每次重算 Base64 + 密钥流 + 分配 String；实测某些位点单次启动
+ * 被执行 ~20 次（Compose 重组），累计开销比"换算法"那一档大一个数量级。
+ * 用 global ref（局部引用跨不了调用栈）。上限 30000，racy 检查
+ * （并发略超无害），进程生命周期内不释放 —— 与 Java 侧 CHM 语义等同。
+ * 命中也要 GetStringUTFChars 查表，不是零成本，但比重算便宜 5~10 倍。 */
 #define NC_CACHE_CAP 30000
 
 /* 极简开放寻址哈希表。不用链表：插入后不删除，探测序列恒有效。 */
@@ -225,64 +191,13 @@ static void nc_cache_put(JNIEnv *env, jstring payload, jstring val)
 /* 前置声明：定义在本文件后部（bootstrap 附近），decrypt 里要调。 */
 static void nc_ensure_key(void);
 
-/* ── 在"壳 so"里查一个导出符号（2026-11-10，纯 C 桩联动）───────────────
- *
- * ## 为什么需要这个函数（而不是一行 dlsym）
- *
- * Android 的 System.load / System.loadLibrary 走
- * `android_dlopen_ext(path, RTLD_NOW, ...)`，**不带 RTLD_GLOBAL**。
- * 宿主对照实验（2026-11-10）：
- *     dlopen("./lib.so", RTLD_NOW|RTLD_LOCAL)   → dlsym(RTLD_DEFAULT,…) = NULL
- *     dlopen("./lib.so", RTLD_NOW|RTLD_GLOBAL)  → dlsym(RTLD_DEFAULT,…) 命中
- * 所以 libnc.so 无法用 RTLD_DEFAULT 直接搜到壳 so 的符号。
- *
- * 正确做法：先拿到壳 so 的 handle，再对该 handle dlsym。
- * 但 libnc.so 不知道壳 so 的绝对路径（它在 <dataDir>/dpt-libs/<abi>/，
- * dataDir 与 abi 名只在 Java 层可知）。
- *
- * 因此遍历【已加载 so 表】（dl_iterate_phdr），按文件名匹配壳 so，
- * 再用 dlopen(RTLD_NOLOAD) 取回 handle：
- *   · RTLD_NOLOAD = 不真的加载，只返回已有映射的 handle（引用计数 +1）
- *   · 拿到后必须 dlclose 归还，否则会泄漏引用计数
- *
- * 实测验证过这条路径（宿主 aarch64）：
- *   模拟先 dlopen 壳 → dl_iterate_phdr 匹配到 → RTLD_NOLOAD 取 handle
- *   → dlsym 取到符号 → 调用返回正确种子。
- *
- * ## 匹配方式为什么用 strstr 而不是精确路径比较
- *
- * 壳 so 的实际文件名由 dpt 构建时的 SO_NAME 决定（当前是 libxixin.so，
- * 但那是可配置的）。这里匹配 "libxixin.so" 这个后缀；若将来改名，
- * 只改下面的 SO_HINT 一处。
- *
- * ⚠️ 若一个进程里同时存在多个版本的壳 so（几乎不可能），
- *    strstr 会取第一个匹配 —— 那不构成安全问题（都是同一包的产物）。
- *
- * ## 开销
- *
- * 只在 nc_ensure_key() 里调用一次（CAS 幂等）。遍历数量 = 进程已加载
- * so 数（启动初期几十个），每条只做一次 strstr，可忽略。
- */
-/* ── 纯 C 桩 ↔ 壳 so 联动（2026-11-10）───────────────────────────────
- *
- * 📖 **完整契约见 `docs/模块联动关系.md` 联动⑧ + §1.0 参数总表。**
- *    本处只重复三条最容易改错的：
- *
- *    ① 种子（stub_seed）由壳 so 的 ncg_strkey() 提供，符号名是【固定字符串】
- *       "ncg_strkey"（不随机化）。壳侧必须 `extern "C"` —— 否则被 C++ mangling
- *       成 _Z10ncg_strkeyv，dlsym 永远找不到，且不会有任何报错
- *       （实测于 dpt-shell v1.6.0，功能正常但联动静默失效）。
- *
- *    ② 包壳时 cfg.h 【不定义】NC_STRDEC_KEY_BYTES（见 protect.sh 的
- *       WANT_PACKER 分支）。所以下面 ② 的回退分支在包壳包里编不进去 ——
- *       这正是「去掉壳 so 就解不开」的实现方式，不是缺陷。
- *
- *    ③ 字节序：种子 uint64 → 8 字节必须按【大端】拆
- *       （(seed >> ((7-b)*8))），与 protect.sh 生成常量的方式、
- *       nc_strdec_set_key 的读法三方一致。写小端 = 两侧不同源 = 全包乱码。
- */
-#define NC_SHELL_SO_HINT "libxixin.so"
-
+/* 在壳 so 里查导出符号。为什么不是一行 dlsym(RTLD_DEFAULT)：
+ * Android 的 System.load 走 android_dlopen_ext(RTLD_NOW)【不带 RTLD_GLOBAL】，
+ * 宿主实测 RTLD_LOCAL 时 dlsym(RTLD_DEFAULT) 返回 NULL。故须先拿 handle：
+ * dl_iterate_phdr 按名字找到 → dlopen(RTLD_NOLOAD) 取已有映射（不重复加载）
+ * → dlsym → dlclose 归还引用计数。
+ * libnc.so 不知道壳 so 的绝对路径（dataDir/abi 只在 Java 层可知），只能遍历。
+ * 开销：只在 nc_ensure_key() 首次调用跑一次，几十个 so 各做一次 strstr。 */
 typedef struct {
     const char *want;
     void *handle;
@@ -303,6 +218,13 @@ static int nc_phdr_cb(struct dl_phdr_info *info, size_t size, void *data)
     ctx->handle = dlopen(info->dlpi_name, RTLD_NOW | RTLD_NOLOAD);
     return 1;                           /* 非 0 = 停止遍历 */
 }
+
+/* 纯 C 桩 ↔ 壳 so 联动（2026-11-10）。完整契约见
+ * docs/模块联动关系.md 联动⑧ + §1.0。三个易错点：
+ * ① 壳侧必须 extern "C"，否则 mangling 成 _Z10ncg_strkeyv，dlsym 静默失败
+ * ② 包壳时 cfg.h 不定义 NC_STRDEC_KEY_BYTES（回退分支编不进去 = 设计）
+ * ③ 种子按大端拆字节，与 protect.sh 生成常量、set_key 读法三方一致 */
+#define NC_SHELL_SO_HINT "libxixin.so"
 
 /* 在壳 so 里查符号。找到返回地址（handle 已归还），找不到返回 NULL。 */
 static void *nc_find_shell_symbol(const char *name)
@@ -493,50 +415,26 @@ void nc_strdec_jni_set_key(JNIEnv *env, jclass clazz, jbyteArray key)
  * 包名 + 随机方法名，不含业务语义；且这是 JNI 短名绑定的固有代价
  * （dex2c 产物同样如此）。
  *
- * 密钥也不经过 Java：它编译进 so（nc_strdec_cfg.h 的 NC_STRDEC_KEY_BYTES），
- * 由 nc_ensure_key() 在首次解密时惰性装载。原因同上 ——
- * 任何"Java 调 native setKey"的方案都躲不过上面的时序问题。
+ * 密钥也不经过 Java（任何"Java 调 native setKey"都躲不过上面的时序问题），
+ * 来源见 nc_ensure_key()：包壳时从壳 so 取，未包壳时用编译期常量。
  */
 
-/* ── JNI_OnLoad 归属：本文件【从不】提供 JNI_OnLoad ─────────────────
+/* ── 统一引导入口（由持有 JNI_OnLoad 的一方调用）────────────────────
  *
- * 一个 so 只能有一个 JNI_OnLoad，而 libnc.so 里已有三方竞争者：
- *   ① Dex2C.cpp        （勾了 --dex2c 时提供）
- *   ② nc_link_jni.c    （勾了 --sigcheck 且无 dex2c 时提供）
- *   ③ 本模块           （--stringenc-native）
+ * 本文件【从不】提供 JNI_OnLoad：一个 so 只能有一个，而 libnc.so 里已有
+ * 三方竞争者（Dex2C.cpp / nc_link_jni.c / 本模块）。各自提供会导致
+ * `ld.lld: duplicate symbol: JNI_OnLoad`（2026-11-05 CI 实证）。
+ * 故只导出 nc_strdec_register_natives()，由已有的那个 OnLoad 调用。
  *
- * 若每方各自提供，任意组合都会 `ld.lld: error: duplicate symbol: JNI_OnLoad`
- * （2026-11-05 CI run 42030806689 实证）。
- *
- * 故本模块只导出 nc_strdec_register_natives()，由【已有的那个】JNI_OnLoad
- * 调用 —— 与 nc_link_jni.c 的既有做法完全一致（见其头部注释）。
- * 顺序见 protect.sh 的注入段：无论哪一方持有 OnLoad，都会调到这里。
- */
-/* ── 统一引导入口（供各持有 JNI_OnLoad 的一方调用）──────────────────
- *
- * 做两件事：记录 JavaVM + 注册 ncDec/ncSetKey 到本次随机生成的桩类。
- * 桩类名来自构建期生成的 nc_strdec_cfg.h（protect.sh 写，不进 git）。
- *
- * 为什么桩类名必须构建期注入：桩名每包随机（防固定签名），
- * 而 RegisterNatives 需要真实类名 —— 写死会让随机化失效。
- *
- * 返回 0 = 成功。失败时调用方不一定要返回 JNI_ERR：
- * 桩注册不上会导致解密走 fail-closed（返回密文），不会崩，
- * 但会表现为"所有字符串都是密文" —— 比闪退更难查，故建议 fail-fast。
+ * 职责：记录 JavaVM + 注册 JNI 方法到构建期随机生成的桩类（名字来自 cfg.h，
+ * 写死会让每包随机化失效）。失败建议 fail-fast —— 症状是"所有字符串都是
+ * 密文"，比闪退难查。
  */
 
-/* ── 确保密钥已设置（幂等，线程安全）──────────────────────────────
- *
- * 为什么需要"惰性"而不是只在 bootstrap 里设：
- *   纯 --stringenc-native 组合【没有 JNI_OnLoad】（不需要它 —— 短名绑定
- *   由 ART 首次调用时 dlsym 完成），所以 bootstrap 永远不会被调。
- *   第一版把 set_key 放在 bootstrap 里 → 密钥永远是空 → 每次解密都
- *   fail-closed 返回密文 → App 侧表现为"SQL 变成密文、Room 找不到表"
- *   （真机实测，日志里只有静默的 fail 计数）。
- *
- * 幂等性：用 CAS 保证只设一次。并发首调时多个线程都会走到这里，
- * nc_strdec_set_key 只是逐字节写全局数组，重复写同值无害 ——
- * 但仍用 CAS 避免"写一半被读到"的窗口。
+/* ── 确保密钥已设置（幂等，CAS 保证只设一次）────────────────────────
+ * 必须惰性设而不能只靠 bootstrap：纯 --stringenc-native 组合没有
+ * JNI_OnLoad，bootstrap 永不执行 → 密钥永远为空 → 全部静默 fail-closed
+ * （真机症状：SQL 变密文、Room 报 no table with name <密文>）。
  */
 static void nc_ensure_key(void)
 {
@@ -550,77 +448,32 @@ static void nc_ensure_key(void)
         return;                         /* 别的线程已经在设/已设好 */
     }
 
-    /* ── 密钥来源优先级（2026-11-10，纯 C 桩与壳的联动）─────────────────
+    /* 密钥来源（2026-11-10 联动）：① 壳 so 的 ncg_strkey() → ② 编译期常量。
      *
-     * ① 优先从【壳 so】取种子（运行期 dlsym）
-     * ② 取不到才回退到编译期常量
+     * ① 优先：常量躺在 libnc.so 里能被反编译读出来，那样「脱壳后丢掉壳 so
+     *    仍能解」，「必须带着壳」就不成立。
+     * ② 回退：只在【没包壳】时编得进来（protect.sh 按 WANT_PACKER 决定是否
+     *    定义 NC_STRDEC_KEY_BYTES）。包壳时无此宏 → 取不到种子就等于
+     *    「壳被去掉了」→ has_key()=0 → 全部 fail-closed，正是期望行为。
      *
-     * 为什么要有 ①：编译期常量的密钥在 libnc.so 里躺着（static const 数组），
-     * 反编译就能读出来，于是「脱壳后丢掉壳 so 仍然能解」—— 用户要的
-     * 「必须带着壳运行」这条联动不成立。
-     *
-     * 为什么保留 ②：不是为了兼容旧包（旧包的 cfg.h 已编进 so，改不了），
-     * 而是为了【没有壳的场景不崩】：单勾 stringenc-native、不勾 packer 时
-     * 根本没有壳 so，此时必须能用常量密钥正常工作。
-     *
-     * ⚠️ 关键：这两个分支必须产出【同一把密钥】。因为密文是构建期用
-     *    「本轮种子」加密的，而那个种子同时写进了：
-     *      · cfg.h 的 NC_STRDEC_KEY_BYTES（→ 分支 ② 用它）
-     *      · dpt 的 shell config stub_seed（→ 分支 ① 用它）
-     *    两处同源（都是 protect.sh 的 $WORK/stub_seed.txt），所以拿到哪个
-     *    都算出同一把密钥。这条同源关系由 protect.sh 保证，见该脚本
-     *    「纯 C 桩复用构建期桩名」那段。
-     *
-     * ⚠️ 失败不缓存：done 在 CAS 时已置 1，若这里什么都没设成就【没有】
-     *    密钥，此后所有解密都 fail-closed。所以下面必须保证至少走通一条：
-     *    壳取不到 → 用常量；常量也没有（非 native 组合）→ 保持无密钥。 */
+     * 两分支必须产出同一把密钥：密文由「本轮种子」加密，而该种子同时写进
+     * cfg.h 常量与 dpt 的 stub_seed，同源于 protect.sh 的 stub_seed.txt。 */
     int got = 0;
 
-    /* ① 从壳 so 取（只有在包了壳的组合下才会成功） */
+    /* ① 壳 so */
     {
-        /* ⚠️ 为什么不是直接 dlsym(RTLD_DEFAULT, "ncg_strkey")：
-         *   实测（2026-11-10）Android 的 System.load / loadLibrary 走
-         *   android_dlopen_ext(RTLD_NOW)，**不带 RTLD_GLOBAL**。
-         *   宿主对照实验：dlopen(RTLD_LOCAL) 后 dlsym(RTLD_DEFAULT) 返回 NULL，
-         *   改 RTLD_GLOBAL 才能找到。
-         *   所以必须【先拿到壳 so 的句柄，再对该句柄 dlsym】。
-         *
-         * 拿句柄的办法：dl_iterate_phdr 遍历已加载的 so，按名字匹配，
-         * 再用 dlopen(RTLD_NOLOAD) 取回句柄（NOLOAD = 不重复加载，
-         * 只把已有映射的 handle 给我们，引用计数 +1；用完 dlclose 归还）。
-         *
-         * 为什么不自己拼路径 dlopen("…/dpt-libs/<abi>/libxixin.so")：
-         *   需要 dataDir 与 abi 名，libnc.so 两者都不知道（它们只在 Java 层）。
-         *   遍历已加载表则由运行时提供准确路径，零猜谜。
-         *
-         * 开销：只在首次解密时执行一次（nc_ensure_key 有 CAS 幂等）。
-         * 遍历数量 = 进程已加载 so 数（启动初期几十个），可忽略。 */
         typedef uint64_t (*ncg_strkey_fn)(void);
         uint64_t seed = 0;
         void *sym = nc_find_shell_symbol("ncg_strkey");
         if (sym != NULL) {
             seed = ((ncg_strkey_fn) sym)();
         }
-        /* seed == 0 表示「壳在，但没开联动」（dpt 的 stub_seed 默认值 0），
-         * 此时不能拿它当密钥 —— 0 会算出一把可预测的密钥，比没有更糟。 */
+        /* seed==0 = 壳在但未开联动（dpt 默认值）。不能拿它当密钥：
+         * 0 会算出一把可预测的密钥，比没有更糟。 */
         if (seed != 0) {
-            /* 把 uint64 种子按【大端序】拆成字节，与构建期
-             * NC_STRDEC_KEY_BYTES 的生成方式逐字节一致。
-             *
-             * 为什么必须是大端：nc_strdec_set_key() 就是按大端序读的
-             * （见其注释「与 Java 的 0x…L 字面量、Python 的
-             *  int.from_bytes(..,'big') 三方一致」）。这里若用小端，
-             * 两边密钥不同源 → 全包静默乱码，且构建期零报错。
-             *
-             * 已实测核对（宿主 Python 脚本）：
-             *   seed_hex "0011223344556677"
-             *   → protect.sh 生成的常量字节 = 00 11 22 33 44 55 66 77
-             *   → set_key 读回 nc_key[0] = 0x0011223344556677
-             *   → 与 Python 的 int.from_bytes(seed,'big') 完全一致
-             * 本函数用 (seed >> ((7-b)*8)) 拆出的字节与之逐字节相同。
-             *
-             * NKEYS>1 时余下分量：当前编译期断言只允许 NKEYS=1
-             * （见本文件顶部的联动断言），所以这里的占位分支实际不会执行。 */
+            /* 按【大端】拆字节，与 protect.sh 生成常量、set_key 的读法三方一致。
+             * 写成小端 = 两侧不同源 = 全包静默乱码且构建期零报错。
+             * NKEYS>1 的占位分支实际不会执行（顶部有 NKEYS==1 编译期断言）。 */
             uint8_t k[NC_STRDEC_KEYLEN];
             for (int i = 0; i < NC_STRDEC_KEYLEN; i++) {
                 int b = i % 8;
@@ -636,24 +489,14 @@ static void nc_ensure_key(void)
     }
 
 #if defined(NC_STRDEC_HAVE_CFG) && defined(NC_STRDEC_KEY_BYTES)
-    /* ② 回退：编译期常量
-     *
-     * ⚠️ 只在【没包壳】时才有这个宏（见 protect.sh 生成 cfg.h 的分支）：
-     *    包了壳 → 故意不定义 NC_STRDEC_KEY_BYTES → 走下面的 #else
-     *    → 此时若 ① 也没拿到种子，就【没有任何密钥】→
-     *      nc_strdec_has_key() 为 0 → 所有解密 fail-closed（原地返回密文）
-     *    → 业务崩/乱码。这正是「去掉壳 so 就跑不了」的实现方式。
-     */
+    /* ② 回退：编译期常量（仅未包壳时存在此宏） */
     if (!got) {
         static const uint8_t k[NC_STRDEC_KEYLEN] = NC_STRDEC_KEY_BYTES;
         nc_strdec_set_key(k);
     }
 #else
-    /* 两种到达这里的情况，行为相同（无密钥 → fail-closed）：
-     *   a) 本包加了壳，protect.sh 故意没定义 NC_STRDEC_KEY_BYTES
-     *      → 期望 ① 从壳取；若取不到就是"壳被去掉了"，应当解不开
-     *   b) 非 native 桩组合误编进了本单元 → 本来就没有密钥
-     * 两者都不该 panic，让上层 fail-closed 即可（nc_jni_fail 原样返回密文）。 */
+    /* 走到这里 = 包壳且 ① 没拿到种子（或非 native 组合）。
+     * 行为相同：无密钥 → fail-closed。不 panic，让上层原样返回密文。 */
     (void) got;
 #endif
 }
