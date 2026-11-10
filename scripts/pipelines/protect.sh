@@ -1092,16 +1092,26 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   fi
   # 配对断言：检出的定义数必须与标记数【对得上】。
   # 只查"MARKED==0"不够 —— 3187 个方法里标上 3 个也能通过，实质仍是失防。
-  # 允许少量差额（部分函数带 noinline/已有 attribute 等），但不得低于 90%。
-  if [[ $JNI_HDRS -gt 0 ]]; then
-    _need=$(( JNI_HDRS * 9 / 10 ))
-    if [[ $MARKED -lt $_need ]]; then
-      echo "❌ 段标记覆盖不足：检出 $JNI_HDRS 个 JNI 定义，只标上 $MARKED 个（要求 ≥ $_need）" >&2
-      echo "   → 多数 dex2c 产物仍在明文 .text，攻击者 objdump 即可读" >&2
-      exit 1
-    fi
+  #
+  # ⚠️ 2026-11-10 修正分母：必须扣掉【被 --exclude-func 显式排除】的函数。
+  #   首版把 JNI_OnLoad 算进分母 → CI 报「检出 8 个，只标上 6 个（要求 ≥7）」
+  #   而实际是 100% 覆盖。JNI_OnLoad 是 unlock 的调用方，锁进 .ncx 会
+  #   "解锁前执行密文" → 死锁，它【必须】留在明文 .text。
+  #   把故意不标的算作漏标，等于把守卫变成误报源 —— 这正是本文件
+  #   反复记的那条教训（守卫本身是对的，判据写错就成噪音源）。
+  _EXCLUDED=$(grep -rhoE '(JNI_OnLoad|ncVerify|heartbeat|selftest)[[:space:]]*\(' \
+              "$WORK/project/jni" --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null \
+              | sort -u | wc -l)
+  _EXPECT=$(( JNI_HDRS - _EXCLUDED ))
+  [[ $_EXPECT -lt 0 ]] && _EXPECT=0
+  if [[ $_EXPECT -gt 0 && $MARKED -lt $_EXPECT ]]; then
+    echo "❌ 段标记覆盖不足：应标 $_EXPECT 个（检出 $JNI_HDRS，显式排除 $_EXCLUDED），" >&2
+    echo "   实际只标上 $MARKED 个" >&2
+    echo "   → 有 dex2c 产物仍在明文 .text，攻击者 objdump 即可读" >&2
+    echo "   → 若排除名单（JNI_OnLoad/ncVerify/heartbeat/selftest）与实际不符，先修名单" >&2
+    exit 1
   fi
-  echo "[mark] 完成：$MARKED 处 .ncx 标记 / $JNI_HDRS 个 JNI 定义（含探针与转译函数）"
+  echo "[mark] 完成：$MARKED 处 .ncx 标记 / 应标 $_EXPECT 个（检出 $JNI_HDRS，排除 $_EXCLUDED）"
 
 fi
 

@@ -412,7 +412,24 @@ fi
 #      实测踩过：精简注释时误删了 NC_SHELL_SO_HINT 的 #define，
 #      宿主 344 项全绿但 NDK 编译直接报 undeclared identifier。
 #      这条用真实 cfg.h 造两种形态（包壳/未包壳）各编一次。
-if command -v "$CC" >/dev/null 2>&1; then
+#
+#      ⚠️ 2026-11-10 修：本项需要真正的 <jni.h>（属 NDK/SDK，不在系统
+#      include 路径）。首版没做探测 —— 在装有 NDK 的机器上通过，在 CI
+#      的干净 runner 上直接 2 项红（'jni.h' file not found），而这与
+#      被测代码无关，纯属环境缺失造成的噪音。红 CI 会让人逐渐无视红色，
+#      所以这里按「有没有 jni.h」明确分流：找到就编，找不到就打印
+#      skip 原因（不是静默通过 —— 输出里有 ⚠ 行，日志可查）。
+_JNI_INC=""
+for _cand in \
+    "${ANDROID_NDK_HOME:-}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
+    "${ANDROID_NDK_HOME:-}/sysroot/usr/include" \
+    "${ANDROID_NDK_ROOT:-}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
+    "$HOME/android-ndk-r29-aarch64/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
+    "$PREFIX/include" \
+    /usr/include ; do
+  if [ -n "$_cand" ] && [ -f "$_cand/jni.h" ]; then _JNI_INC="$_cand"; break; fi
+done
+if command -v "$CC" >/dev/null 2>&1 && [ -n "$_JNI_INC" ]; then
   mkdir -p "$W/jnic"
   for _mode in pack nopack; do
     {
@@ -429,15 +446,18 @@ if command -v "$CC" >/dev/null 2>&1; then
       echo '#endif'
     } > "$W/jnic/nc_strdec_cfg.h"
     if "$CC" -c -O2 -std=c99 -Wall -Wextra -Werror -fPIC \
-         -I"$W/jnic" -I"$CSRC" "$CSRC/nc_strdec_jni.c" \
+         -I"$W/jnic" -I"$CSRC" -I"$_JNI_INC" "$CSRC/nc_strdec_jni.c" \
          -o "$W/jnic/$_mode.o" 2>"$W/jnic/$_mode.log"; then
-      ok; echo "   ✅ nc_strdec_jni.c 真实编译（$_mode 形态）"
+      ok; echo "   ✅ nc_strdec_jni.c 真实编译（$_mode 形态，jni.h=$_JNI_INC）"
     else
       bad "nc_strdec_jni.c 编译失败（$_mode 形态）：$(head -2 "$W/jnic/$_mode.log" | tr '\n' ' ')"
     fi
   done
-else
+elif ! command -v "$CC" >/dev/null 2>&1; then
   echo "   ⚠ 跳过：无 C 编译器"
+else
+  echo "   ⚠ 跳过：找不到 jni.h（本项需 NDK；设 ANDROID_NDK_HOME 可启用）"
+  echo "     —— 这不是通过，只是本次环境不具备条件；改 nc_strdec_jni.c 后请本地跑一遍"
 fi
 
 # 7d1. 构建期契约：包了壳就必须【不写】编译期常量
