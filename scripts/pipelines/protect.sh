@@ -1345,10 +1345,27 @@ if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
   #
   # ⚠️ 走 so_section_mark 的 --annotate 而不是手写 attribute：
   #    它会自动去掉 used/retain（那两个会产生 @llvm.used → Amice 跳过）。
+  # ═══ VMP 范围实验开关（2026-11-11）═══════════════════════════════
+  # NC_VMP_CSTUB=0（默认）→ 不给 stringenc 算法层打 VMP 注解
+  # NC_VMP_CSTUB=1         → 打（旧行为，实测真机栈溢出）
+  #
+  # 为什么默认关：真机实测（sigcheck+dex2c+stringenc+vmp，两个 algo 档
+  # 都试过）应用启动页 SIGSEGV/SEGV_ACCERR，栈溢出：
+  #   guard page 0x...e000-0x...f000 权限 ---
+  #   崩溃 sp 恰在 guard page 上边界（再压 16B 即越界）
+  #   x29 与 sp 相差整整 1.01MB
+  # 而同一份代码只 VMP sigcheck（derive_expected）则完全正常。
+  #
+  # 注意：这不是"stringenc 不能 VMP"的普适结论 —— nox 自己的解密链
+  # 14 个函数全上 VMP 且真机可用。差别在字节码规模：这里 5 个函数
+  # 含 Base64/UTF-8/密钥流，字节码远长于 nox 那些 19~31 条指令的小函数。
+  # 根因待查（dispatcher 内 61 处 bl 回自身，疑似递归分派）。
   _CSTUB_ANN=()
-  if [[ $WANT_VMP -eq 1 ]]; then
+  if [[ $WANT_VMP -eq 1 && "${NC_VMP_CSTUB:-0}" == "1" ]]; then
     _CSTUB_ANN=(--annotate '+vm_virtualize')
-    echo "[mark] VMP: 纯 C 桩算法层同步打 +vm_virtualize"
+    echo "[mark] VMP: 纯 C 桩算法层同步打 +vm_virtualize（实验开关已开）"
+  elif [[ $WANT_VMP -eq 1 ]]; then
+    echo "[mark] VMP: 纯 C 桩算法层【不】打注解（NC_VMP_CSTUB=0，实测真机栈溢出）"
   fi
   python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec.c" \
     --pattern '^[ \t]*((?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_strdec_decrypt|nc_strdec_b64_decode|nc_strdec_utf8_to_utf16|nc_block_ks|nc_mix64)[ \t]*\()' \
