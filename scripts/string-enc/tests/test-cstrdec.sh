@@ -408,6 +408,25 @@ else
   bad "protect.sh 未在纯 C 桩路径写 stub_seed.txt（联动不会生效）"
 fi
 
+# 7d2. 跨仓库契约：壳侧必须用 extern "C" 导出 ncg_strkey
+#      实测踩过（dpt-shell v1.6.0-strkey）：dpt.cpp 是 C++ 文件，
+#      不加 extern "C" 时符号被 mangling 成 _Z10ncg_strkeyv，
+#      而本侧 dlsym 找的是字面量 "ncg_strkey" → 永远找不到 →
+#      静默回退到编译期常量 → 功能正常但联动失效（最难发现的一类失败）。
+#      这里在【源码层】钉：dpt-shell 的 dpt.cpp 里 ncg_strkey 定义前
+#      必须有 extern "C"。跨仓库路径可能不存在（只 clone 本仓库时），
+#      此时跳过而不判红。
+DPT_CPP="$(cd "$ROOT/.." 2>/dev/null && pwd)/dpt-shell/shell/src/main/cpp/dpt.cpp"
+if [[ -f "$DPT_CPP" ]]; then
+  if grep -B2 'uint64_t ncg_strkey(void)' "$DPT_CPP" | grep -q 'extern "C"'; then
+    ok; echo "   ✅ 壳侧 ncg_strkey 有 extern \"C\"（防 C++ mangling）"
+  else
+    bad "壳侧 ncg_strkey 缺 extern \"C\" —— 会被 mangling 成 _Z10ncg_strkeyv，dlsym 找不到"
+  fi
+else
+  echo "   ⚠ 跳过：未找到 $DPT_CPP（只 clone 本仓库时正常）"
+fi
+
 # 7e. 端到端：造一个假壳 so，验证取到的字节与常量一致
 if command -v "$CC" >/dev/null 2>&1; then
   mkdir -p "$W/link"
