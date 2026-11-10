@@ -408,6 +408,37 @@ else
   bad "protect.sh 未在纯 C 桩路径写 stub_seed.txt（联动不会生效）"
 fi
 
+# 7d1. 构建期契约：包了壳就必须【不写】编译期常量
+#      理由：常量与壳两条密钥来源若同时存在，去掉壳 so 会回退到常量 →
+#      照样能解 → 「必须带着壳」失效。所以 protect.sh 必须按 WANT_PACKER
+#      分支生成 cfg.h：包壳时只写注释、不 define NC_STRDEC_KEY_BYTES。
+# 判定方式：提取 cfg.h 生成处「包壳分支」（protect.sh 第 961 行起）的代码块，
+# 确认里面【没有】在 shell 层写 NC_STRDEC_KEY_BYTES。
+#
+# 为什么不能只 grep 关键词"是否出现"：那样把分支条件改成恒假也照样绿。
+# 为什么不能按 `if [[ $WANT_PACKER -eq 1 ]]` 搜第一处：文件里有 5 处同名判断，
+# 第一处是 emit-stub-dex 的（protect.sh:343），与 cfg.h 无关 —— 首版就是这么
+# 写错的，注入故障没反应，第二次才发现。
+# 定位锚点：cfg.h 的第一次写（`cat > ... nc_strdec_cfg.h`）之后最近的那个分支。
+_cfg_line="$(grep -n 'cat > "$_cstub_dst/nc_strdec_cfg.h"' "$ROOT/scripts/pipelines/protect.sh" | head -1 | cut -d: -f1)"
+if [[ -z "$_cfg_line" ]]; then
+  bad "protect.sh 里找不到 cfg.h 生成点"
+else
+  # 只取「then … else」之间（包壳分支的真身），不含 else 分支 ——
+  # else 里本来就该有常量（没包壳的场景）。
+  _packer_branch="$(awk -v s="$_cfg_line" '
+      NR>=s && /if \[\[ \$WANT_PACKER -eq 1 \]\]; then/ {f=1; next}
+      f && /^else$/ {exit}
+      f {print}' "$ROOT/scripts/pipelines/protect.sh")"
+  if [[ -z "$_packer_branch" ]]; then
+    bad "cfg.h 生成点之后找不到「按 WANT_PACKER 分支」的代码块"
+  elif printf '%s' "$_packer_branch" | grep -q 'NC_STRDEC_KEY_BYTES'; then
+    bad "包壳分支里定义了 NC_STRDEC_KEY_BYTES —— 去掉壳 so 会回退到常量，联动失效"
+  else
+    ok; echo "   ✅ 包壳分支不编密钥常量（去掉壳 so 才会真的解不开）"
+  fi
+fi
+
 # 7d2. 跨仓库契约：壳侧必须用 extern "C" 导出 ncg_strkey
 #      实测踩过（dpt-shell v1.6.0-strkey）：dpt.cpp 是 C++ 文件，
 #      不加 extern "C" 时符号被 mangling 成 _Z10ncg_strkeyv，

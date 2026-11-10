@@ -618,12 +618,24 @@ static void nc_ensure_key(void)
     }
 
 #if defined(NC_STRDEC_HAVE_CFG) && defined(NC_STRDEC_KEY_BYTES)
-    /* ② 回退：编译期常量（未包壳，或壳里没开联动） */
+    /* ② 回退：编译期常量
+     *
+     * ⚠️ 只在【没包壳】时才有这个宏（见 protect.sh 生成 cfg.h 的分支）：
+     *    包了壳 → 故意不定义 NC_STRDEC_KEY_BYTES → 走下面的 #else
+     *    → 此时若 ① 也没拿到种子，就【没有任何密钥】→
+     *      nc_strdec_has_key() 为 0 → 所有解密 fail-closed（原地返回密文）
+     *    → 业务崩/乱码。这正是「去掉壳 so 就跑不了」的实现方式。
+     */
     if (!got) {
         static const uint8_t k[NC_STRDEC_KEYLEN] = NC_STRDEC_KEY_BYTES;
         nc_strdec_set_key(k);
     }
 #else
+    /* 两种到达这里的情况，行为相同（无密钥 → fail-closed）：
+     *   a) 本包加了壳，protect.sh 故意没定义 NC_STRDEC_KEY_BYTES
+     *      → 期望 ① 从壳取；若取不到就是"壳被去掉了"，应当解不开
+     *   b) 非 native 桩组合误编进了本单元 → 本来就没有密钥
+     * 两者都不该 panic，让上层 fail-closed 即可（nc_jni_fail 原样返回密文）。 */
     (void) got;
 #endif
 }

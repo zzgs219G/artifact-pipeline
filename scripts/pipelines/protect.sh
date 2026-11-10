@@ -938,12 +938,43 @@ print(native_stub.NC_STRDEC_NKEYS)
 /* 密钥本体（$_nk 个 uint64，大端字节序），由 bootstrap 直接 set_key。
  * 为什么不经过 dex：见 native_stub.py 里 <clinit> 的说明 —— native 方法
  * 在类链接阶段解析，那时 so 尚未加载 → NoSuchMethodError（真机实测）。
- * 改为编译进 so 后，密钥不出现在 dex 的任何位置（本需求的核心）。 */
+ * 改为编译进 so 后，密钥不出现在 dex 的任何位置（本需求的核心）。
+ *
+ * ── 包了壳时【故意不定义】（2026-11-10 用户裁决）──────────────────
+ *
+ * 纯 C 桩的密钥有两个来源（见 nc_strdec_jni.c 的 nc_ensure_key）：
+ *   ① 运行期从壳 so 的 ncg_strkey() 取
+ *   ② 编译期常量（本宏）兜底
+ *
+ * 若两者都编进产物，则「去掉壳 so」→ ① 失败 → 退到 ② → **照样能解**，
+ * 「必须带着壳运行」这条联动等于白做。
+ *
+ * 所以：**包了壳就不编常量**。此时去掉壳 so 会让密钥只剩空值 →
+ * nc_strdec_has_key() 为 0 → 解密 fail-closed → 字符串原地返回密文 →
+ * 业务崩或满屏乱码。这才是"去不掉壳"。
+ *
+ * 没包壳时仍然编常量（否则单勾 stringenc-native 完全无法工作）。
+ */
+EOF
+
+# 按是否包壳决定要不要写密钥常量（2026-11-10）
+if [[ $WANT_PACKER -eq 1 ]]; then
+  cat >> "$_cstub_dst/nc_strdec_cfg.h" <<'EOF'
+/* 本包【已加壳】：密钥只从壳 so 的 ncg_strkey() 运行期取，
+ * 不提供编译期常量 —— 否则去掉壳仍能解密，联动失效。
+ * 详见 nc_strdec_jni.c 的 nc_ensure_key()。 */
+EOF
+else
+  cat >> "$_cstub_dst/nc_strdec_cfg.h" <<EOF
 #define NC_STRDEC_KEY_BYTES { $([ "$_nk" = "1" ] && echo "" )$(python3 -c "
 import sys
 k='$_cstub_seed_hex'
 print(', '.join('0x%s' % k[i:i+2] for i in range(0, len(k), 2)))
 ") }
+EOF
+fi
+
+cat >> "$_cstub_dst/nc_strdec_cfg.h" <<'EOF'
 
 #endif
 EOF
