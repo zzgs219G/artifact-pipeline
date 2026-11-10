@@ -263,6 +263,24 @@ static void nc_ensure_key(void);
  * 只在 nc_ensure_key() 里调用一次（CAS 幂等）。遍历数量 = 进程已加载
  * so 数（启动初期几十个），每条只做一次 strstr，可忽略。
  */
+/* ── 纯 C 桩 ↔ 壳 so 联动（2026-11-10）───────────────────────────────
+ *
+ * 📖 **完整契约见 `docs/模块联动关系.md` 联动⑧ + §1.0 参数总表。**
+ *    本处只重复三条最容易改错的：
+ *
+ *    ① 种子（stub_seed）由壳 so 的 ncg_strkey() 提供，符号名是【固定字符串】
+ *       "ncg_strkey"（不随机化）。壳侧必须 `extern "C"` —— 否则被 C++ mangling
+ *       成 _Z10ncg_strkeyv，dlsym 永远找不到，且不会有任何报错
+ *       （实测于 dpt-shell v1.6.0，功能正常但联动静默失效）。
+ *
+ *    ② 包壳时 cfg.h 【不定义】NC_STRDEC_KEY_BYTES（见 protect.sh 的
+ *       WANT_PACKER 分支）。所以下面 ② 的回退分支在包壳包里编不进去 ——
+ *       这正是「去掉壳 so 就解不开」的实现方式，不是缺陷。
+ *
+ *    ③ 字节序：种子 uint64 → 8 字节必须按【大端】拆
+ *       （(seed >> ((7-b)*8))），与 protect.sh 生成常量的方式、
+ *       nc_strdec_set_key 的读法三方一致。写小端 = 两侧不同源 = 全包乱码。
+ */
 #define NC_SHELL_SO_HINT "libxixin.so"
 
 typedef struct {
