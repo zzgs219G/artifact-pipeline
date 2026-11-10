@@ -914,6 +914,22 @@ if [[ $WANT_VMP -eq 1 ]]; then
   resolve_amice_bundle "--vmp（指令级虚拟化）"
   export AMICE_MBA=false
   export AMICE_FLATTEN=false
+  # ⚠️⚠️ 2026-11-11 修（VMP 空转的真因）：必须设 AMICE_VM_VIRTUALIZE=true。
+  #
+  #   函数注解（annotate("+vm_virtualize")）只是【函数级覆盖】，
+  #   它不能把一个【没启用的 pass】拉起来运行。文档原话
+  #   （PassOrder_zh_CN.md）："AMICE_PASS_ORDER 是更外层的 Pass 允许列表：
+  #   没有列入的 Pass 不会因为函数注解而重新运行。"
+  #   而 AMICE_VM_VIRTUALIZE 默认 false —— 不设它，pass 根本不装，
+  #   annotate 写得再对也没人读。
+  #
+  #   首版只抄了 nox 的 AMICE_VM_PROFILE_PATH 却漏了这个开关，
+  #   实测产物：.ncx 只涨 36 字节（annotate 进了 llvm.global.annotations
+  #   表，多了个字符串），函数体一条指令都没虚拟化 —— 典型的静默空转。
+  #   对照 nox 的 make-zip-lib.sh:163 是
+  #       AMICE_VM_VIRTUALIZE=true AMICE_VM_PROFILE_PATH="$prof" "$CC" ...
+  #   两个变量必须成对出现。
+  export AMICE_VM_VIRTUALIZE=true
   # VM profile：默认用包内自带的 nox-vmp-func（函数级隔离：每函数独立
   # 分派运行时 + 独立 handler 副本）。内置 amice-simple-vmp 是 module 级
   # 共享，攻击者逆一套 VM 语义就能读全部受保护函数。
@@ -931,6 +947,18 @@ if [[ $WANT_VMP -eq 1 ]]; then
     log_info "   ⚠️ 包内缺 vmp-profile-func/manifest.toml —— 强度降级但功能正常"
   fi
   log_info "VMP 用 NDK: $AMICE_NDK_HOME（bundle 自带，与插件配套）"
+  # ── RUST_LOG（2026-11-11）──────────────────────────────────────────
+  # 必须开：Amice 的 VMP 遇到不满足条件的函数是【静默跳过】——
+  # 只有 RUST_LOG=amice=debug 才会打出
+  #     skip function "xxx": function has non-call address uses
+  # 这类日志。没有它，构建全绿而 VMP 一个函数都没生效，且无从判断。
+  # 这与 nox 的 make-zip-lib.sh:72 同一行配置、同一理由。
+  #
+  # ⚠️ 不设的话，本参数最核心的失败模式（静默跳过）完全不可观测 ——
+  #    那正是 AGENTS.md §3.3 反复记的教训：防护"连续三个月零生效"而
+  #    无人发现，因为日志里只有"失败但继续"。
+  export RUST_LOG="${RUST_LOG:-amice=debug}"
+  log_info "RUST_LOG=amice=debug（用于捕获 VMP 的 skip function 日志）"
 fi
 
 # ── 纯 C 解密桩的源码（2026-11-09）────────────────────────────────

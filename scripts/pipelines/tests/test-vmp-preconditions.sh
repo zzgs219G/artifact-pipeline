@@ -228,6 +228,33 @@ else
   bad "T11b --vmp 没有联动静态注册（漏了会让 VMP 静默失效）"
 fi
 
+# T11c AMICE_VM_VIRTUALIZE 必须 export
+# ⚠️ 这是 2026-11-11 实测踩出来的：只设 profile 不设这个开关 = pass 不装，
+#    annotate 写了也没人读，产物只多 36 字节（一个 global.annotations 表）。
+#    文档原文："没有列入的 Pass 不会因为函数注解而重新运行"。
+if grep -qE '^[[:space:]]*export AMICE_VM_VIRTUALIZE=true' "$ROOT/scripts/pipelines/protect.sh"; then
+  ok "T11c AMICE_VM_VIRTUALIZE=true 已 export（否则 VMP 静默空转）"
+else
+  bad "T11c 缺 AMICE_VM_VIRTUALIZE=true —— annotate 不会被任何 pass 读取"
+fi
+# T11d profile 与开关必须成对（只在 vmp 分支里，不能散落在别处）
+if python3 - "$ROOT/scripts/pipelines/protect.sh" <<'PY'
+import sys,re
+s=open(sys.argv[1]).read()
+i=s.find('if [[ $WANT_VMP -eq 1 ]]; then')
+if i<0: sys.exit(1)
+seg=s[i:s.find('\nfi',i)]
+# 只认行首的 export 语句，不认注释里的说明文字
+has_sw = re.search(r'^[ \t]*export AMICE_VM_VIRTUALIZE=true', seg, re.M) is not None
+has_pf = re.search(r'^[ \t]*export AMICE_VM_PROFILE_PATH', seg, re.M) is not None
+sys.exit(0 if (has_sw and has_pf) else 1)
+PY
+then
+  ok "T11d 开关与 profile 同处 vmp 分支（成对出现）"
+else
+  bad "T11d 开关与 profile 不在同一分支 —— 后续改动容易漏掉一个"
+fi
+
 # T12 schema + resolver
 if python3 -c "
 import json,sys
