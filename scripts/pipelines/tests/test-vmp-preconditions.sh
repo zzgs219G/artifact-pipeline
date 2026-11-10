@@ -118,7 +118,7 @@ for c in "${ANDROID_NDK_HOME:-}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/us
 done
 
 if [ -z "$JNI_INC" ]; then
-  skip "找不到 jni.h（NDK/SDK 才有），T3~T9 跳过；设 ANDROID_NDK_HOME 可启用"
+  skip "找不到 jni.h（NDK/SDK 才有），T3~T7 跳过；设 ANDROID_NDK_HOME 可启用"
 else
   # T3 能编译
   if "$CC" -c -O2 -fPIC -I"$JNI_INC" "$SRC" -o "$W/t.o" 2>"$W/cc.log"; then
@@ -154,40 +154,64 @@ else
       bad "T7 IR 里函数未归属 .ncx"
     fi
   else
-    bad "T3/4/5/6/7 生成 IR 失败"
+    bad "T4/5/6/7 生成 IR 失败"
   fi
+fi
 
-  # T8 预检：静态注册形态应通过
-  if python3 "$ELIG" "$SRC" Java_com_demo_MainActivity_onCreate__Landroid_os_Bundle_2 \
-       > "$W/e1.log" 2>&1; then
-    ok "T8 静态注册形态预检通过（可虚拟化）"
-  else
-    bad "T8 静态注册形态预检失败：$(grep -m1 '✗' "$W/e1.log")"
-  fi
+# ── T8~T10：check-vmp-eligibility.py 的判据验证 ────────────────────
+# ⚠️ 2026-11-11 修：这三项【不依赖 jni.h】，必须放在上面的分支【外面】。
+#   首版把 T8 放在分支里且传含 `#include <jni.h>` 的 SRC，而预检脚本的
+#   emit_ir 只加 `-I <源文件目录>`，不带 NDK/SDK include 路径 →
+#   clang 找不到 jni.h → 预检失败。
+#   实测（CI run 42850364518）：T3~T7 全过而 T8 红 —— 因为 T3 的 clang
+#   是【本脚本】调的（带 -I "$JNI_INC"），T8 的 clang 是【预检脚本】调的
+#   （不带）。两处环境不一致就会出这种"看起来同源其实不同命"的假红。
+#   改用自造类型后，三项在 CI 干净环境下也能跑，且与 T3~T7 互补
+#   （T3~T7 验属性形态，T8~T10 验预检脚本的判据正确性）。
+cat > "$W/static_ok.c" <<'EOF'
+typedef struct JNIEnv_ JNIEnv;
+typedef struct _jobject* jobject;
+#define JNIEXPORT __attribute__((visibility("default")))
+#define JNICALL
+__attribute__((noinline, section(".ncx"), annotate("+vm_virtualize")))
+JNIEXPORT void JNICALL
+Java_com_demo_MainActivity_onCreate(JNIEnv *env, jobject thiz, jobject p1)
+{
+    int acc = 0;
+    for (int i = 0; i < 24; i++) acc += i * 3;
+    (void)acc; (void)env; (void)thiz; (void)p1;
+}
+EOF
+if python3 "$ELIG" "$W/static_ok.c" Java_com_demo_MainActivity_onCreate \
+     > "$W/e1.log" 2>&1; then
+  ok "T8 静态注册形态预检通过（可虚拟化）"
+else
+  bad "T8 静态注册形态预检失败：$(grep -m1 '✗' "$W/e1.log" || head -2 "$W/e1.log" | tr '\n' ' ')"
+fi
 
-  # T9 反向：动态注册形态（有 JNINativeMethod 表）必须被判不合格
-  cat > "$W/dyn.c" <<'EOF'
-#include <jni.h>
+# T9 反向：动态注册形态（有 JNINativeMethod 表）必须被判不合格
+cat > "$W/dyn.c" <<'EOF'
+typedef struct JNIEnv_ JNIEnv;
+typedef struct _jobject* jobject;
 void Java_com_demo_X_f(JNIEnv *e, jobject t) { (void)e; (void)t; }
 typedef struct { const char* n; const char* s; void* f; } NM;
 extern void Java_com_demo_X_f(JNIEnv*, jobject);
 NM tbl[] = { {"f", "()V", (void *)Java_com_demo_X_f} };
 EOF
-  if python3 "$ELIG" "$W/dyn.c" Java_com_demo_X_f > "$W/e2.log" 2>&1; then
-    bad "T9 反向验证失败：动态注册（取地址）竟被判为可虚拟化 —— 预检有盲区"
-  else
-    ok "T9 反向验证：动态注册形态被判不合格（JNINativeMethod 表 = 取地址）"
-  fi
+if python3 "$ELIG" "$W/dyn.c" Java_com_demo_X_f > "$W/e2.log" 2>&1; then
+  bad "T9 反向验证失败：动态注册（取地址）竟被判为可虚拟化 —— 预检有盲区"
+else
+  ok "T9 反向验证：动态注册形态被判不合格（JNINativeMethod 表 = 取地址）"
+fi
 
-  # T10 反向：used/retain 形态必须被判不合格（@llvm.used）
-  sed 's/noinline, section(".ncx"), annotate("+vm_virtualize")/noinline, section(".ncx"), used, retain/' \
-      "$SRC" > "$W/used.cpp"
-  if python3 "$ELIG" "$W/used.cpp" Java_com_demo_MainActivity_onCreate__Landroid_os_Bundle_2 \
-       > "$W/e3.log" 2>&1; then
-    bad "T10 反向验证失败：used/retain 形态竟被判合格 —— @llvm.used 检查失效"
-  else
-    ok "T10 反向验证：used/retain 形态被判不合格（@llvm.used）"
-  fi
+# T10 反向：used/retain 形态必须被判不合格（@llvm.used）
+sed 's/noinline, section(".ncx"), annotate("+vm_virtualize")/noinline, section(".ncx"), used, retain/' \
+    "$W/static_ok.c" > "$W/used.c"
+if python3 "$ELIG" "$W/used.c" Java_com_demo_MainActivity_onCreate \
+     > "$W/e3.log" 2>&1; then
+  bad "T10 反向验证失败：used/retain 形态竟被判合格 —— @llvm.used 检查失效"
+else
+  ok "T10 反向验证：used/retain 形态被判不合格（@llvm.used）"
 fi
 
 echo ""

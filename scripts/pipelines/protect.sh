@@ -1163,10 +1163,18 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   #     → dex2c 抽走的业务逻辑【全部】留在明文段，零加密。
   #
   #   现在按【两种形态都数】判定：静态注册数 JNIEXPORT，动态注册数 Java_ 定义。
+  #
+  # ⚠️ 2026-11-11 修：两条 grep 必须带 `|| true`。
+  #   本脚本开了 `set -euo pipefail`，而 grep 无匹配时退出码是 1 ——
+  #   pipefail 让整条管道返回 1 → set -e 直接终止 protect.sh。
+  #   实测（CI run 42851661903）：纯 C 桩 + VMP 组合下 jni 目录里没有
+  #   动态注册形态的文件 → JNI_DYNAMIC 那条 grep 无匹配 → rc=1 行号 1169
+  #   → 整个构建失败。这是"统计数字"的语句，无匹配本就是合法结果（0）。
   JNI_STATIC=$(grep -rhoE 'JNIEXPORT[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+JNICALL' \
-               "$WORK/project/jni" --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null | wc -l)
+               "$WORK/project/jni" --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null | wc -l || true)
   JNI_DYNAMIC=$(grep -rhoE '^[[:space:]]*(jboolean|jbyte|jshort|jchar|jint|jlong|jfloat|jdouble|jstring|jobject|jarray|jclass|jthrowable|void|jsize)[[:space:]]+\**[[:space:]]*Java_[A-Za-z0-9_]+[[:space:]]*\(' \
-                "$WORK/project/jni" --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null | wc -l)
+                "$WORK/project/jni" --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null | wc -l || true)
+  JNI_STATIC=${JNI_STATIC:-0}; JNI_DYNAMIC=${JNI_DYNAMIC:-0}
   JNI_HDRS=$((JNI_STATIC + JNI_DYNAMIC))
 
   # 两条规则都挂上：静态注册 + 动态注册。
@@ -1241,7 +1249,8 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   #   反复记的那条教训（守卫本身是对的，判据写错就成噪音源）。
   _EXCLUDED=$(grep -rhoE '(JNI_OnLoad|ncVerify|heartbeat|selftest)[[:space:]]*\(' \
               "$WORK/project/jni" --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null \
-              | sort -u | wc -l)
+              | sort -u | wc -l || true)
+  _EXCLUDED=${_EXCLUDED:-0}
   _EXPECT=$(( JNI_HDRS - _EXCLUDED ))
   [[ $_EXPECT -lt 0 ]] && _EXPECT=0
   if [[ $_EXPECT -gt 0 && $MARKED -lt $_EXPECT ]]; then
