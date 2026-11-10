@@ -53,6 +53,13 @@ Java 桩：SEED = JniBridge.gseed()      → 密钥来自壳 so，去掉壳就�
 
 > 全部**平级并列**在同一父目录下。依赖方向**单向**：本仓库消费三个工具上游的
 > 分发包（zip），工具上游都不认识本仓库。
+>
+> 🔴 **2026-11-10 补**：另有 `防御仓库/` 一个目录，里面是 7 个**只读参考**的
+> 开源防御项目（Polaris / Tigress / o-mvll / VMPacker / XopProtector /
+> sentry / amice）。**不要改它们**，用途是对照技术强度。评估结论：
+> 虚拟化方面我们（nox 的 Amice VMP）已到 Tigress VM-1 级（superoperators +
+> handler 拆分都启用了）；真正缺的是 **MIR 层反反编译**（Polaris 的
+> dirty-bytes / function-splitting）与**检测评分化**（sentry 的加权三态）。
 
 | 仓库 | 改什么 | 与本文档的关系 |
 |---|---|---|
@@ -85,7 +92,7 @@ Java 桩：SEED = JniBridge.gseed()      → 密钥来自壳 so，去掉壳就�
    cp dist/nox-<版本>.zip ../artifact-pipeline/tools/nox.zip
    rm -rf ../artifact-pipeline/tools/nox      # ← 不删会静默用旧版
    ```
-4. **两个 tag 陷阱**：nox 现有 **22 个 tag，最新是 `v0.9.11-obf`**（`v0.4.2` 仍然不存在）；
+4. **两个 tag 陷阱**：tag 总数与最新值一直在涨，**别抄具体值**（取数：`cd ../nox && git tag --list --sort=-v:refname | head -3`）。`v0.4.2` 始终不存在；
    CI clone nox 用的是 `ref: main`，不是 tag。详见 `上游仓库-nox.md` §8。
 
 ---
@@ -465,8 +472,9 @@ CI 的 `setup-toolchain` action 会校验，源码形态会直接失败：
 
 ⚠️ **不要凭 `tools/nox.zip` 里的 `VERSION` 去写 CI 的 `ref`**——
 那是包版本（形如 `2026.11.02-final`），不是 git tag。nox 仓库的 tag
-共 22 个（`v0.1.0` … `v0.9.11-obf`），当年凭 "v0.4.2" 猜 tag 导致 checkout 直接失败。
-⚠️ 但"最新 tag 是 v0.4.0"这个说法 2026-11-09 已过期——现在最新是 `v0.9.11-obf`。
+当年凭 "v0.4.2" 猜 tag 导致 checkout 直接失败。要写就写取数命令，别抄具体 tag 名。
+⚠️ **打 tag 时注意**：nox 的 `release.yml` 只在 tag 名含 `-obf` 时启用 Amice/VMP；
+不带 `-obf` 出的是普通编译版 —— 验证 VMP 改动时必须带，否则等于没测。
 
 ---
 
@@ -482,6 +490,8 @@ CI 的 `setup-toolchain` action 会校验，源码形态会直接失败：
 | **纯 C 解密桩**（`--stringenc-native`） | ✅ 云端 r27d / r29 产物均真机跑通 |
 | 算法与密钥离开 dex | ✅ dex 内 `GAMMA/keyByte/mix64/nc_strdec` 命中 **0 处** |
 | 算法进 `.ncx` 锁箱段 | ✅ arm64 0x1e70，`objdump` 看到的是密文 |
+| **纯 C 桩密钥改为运行期从壳取**（2026-11-10） | ✅ 产物验证：`libnc.so` 无种子常量、依赖 `dl_iterate_phdr`/`dlsym`；壳 so 导出 `T ncg_strkey` |
+| **包壳时不编密钥常量**（同上） | ✅ 去掉壳 so → 无密钥 → fail-closed。这才是「去不掉壳」的实现方式 |
 | 密钥编译进 so | ✅ `nc_strdec_cfg.h` 的 `NC_STRDEC_KEY_BYTES`，dex 零密钥 |
 | JNI 短名绑定（不进 `.dynsym`） | ✅ 只导出 `Java_<随机包名>_<随机方法名>` |
 | 三套测试进 CI | ✅ 291 + 184 + 13 项 |
@@ -605,6 +615,21 @@ ChaCha20 块粒度 8 字节 → 64 字节：加速 7.6~8.3×（理论值精确 8
 | 删 Java 桩 | `--dex2c-stub` 联动只能走它；且是所有现有用户的默认路径 |
 | 给 `nc_strdec.c` 加计算量来"提升强度" | 加轮数不解决可逆性，白慢 |
 | 在 `stub_impl` 上再加一个 flag | 那是单选语义，加 flag 只会更乱 |
+| **跨 so 的 dlsym 契约只验一侧** | 符号名必须两侧用同一份字面量核对。壳侧漏 `extern "C"` → mangling 成 `_Z10ncg_strkeyv` → dlsym 静默失败，全程没有任何报错（v1.6.0 实测） |
+| **改宿主测试覆盖不到的文件后只跑宿主测试** | `nc_strdec_jni.c`（JNI 层）宿主编不到。2026-11-10 精简注释时误删一个 `#define`，346 项宿主测试全绿、NDK 编译直接炸。**改到这类文件必须补一次真实编译** |
+| **「包壳时也留编译期常量」** | 常量与壳两条密钥来源同时存在 → 去掉壳 so 会回退到常量 → 照样能解 → 「去不掉壳」失效。`protect.sh` 按 `WANT_PACKER` 分支就是为了这个 |
+| 抄具体 tag 名/版本号/断言数进文档 | 这些一直在涨，没有任何机制保证文档跟着变。一律给取数命令 |
+
+### 跨仓库速查（2026-11-10）
+
+联动已达 8 条、跨 3 个仓库，**要查「某参数谁传给谁」，直接看**：
+
+```
+docs/模块联动关系.md  §1.0 跨仓库参数总表
+```
+
+11 行，每行：参数 / 谁生成 / 谁消费 / 存在哪 / 丢失会怎样。
+按数据实际流向排序，不按模块排序。表后还列了「最容易误解的三处」。
 
 ## 10. 一句话交接
 
