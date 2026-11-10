@@ -1425,6 +1425,27 @@ if [[ $WANT_STRINGENC -eq 1 ]]; then
     fi
     log_info "纯 C 桩复用构建期桩名: $_cstub_spec"
     log_info "密钥流算法: $_algo_name"
+    # ── 纯 C 桩 ↔ 壳 联动（2026-11-10）──────────────────────────────
+    # 把本轮种子写进 stub_seed.txt，供 packer.sh 传给 dpt --stub-seed，
+    # 最终落进壳的 shell config；运行期 libnc.so 用 dlsym("ncg_strkey")
+    # 从壳取回它当密钥材料。
+    #
+    # 为什么必须写：不写的话 dpt 的 stub_seed 保持默认 0，壳里的
+    # ncg_strkey() 返回 0，libnc.so 侧判定「壳在但没开联动」→ 回退到
+    # 编译期常量。表面能跑，但「去掉壳 so 就解不开」这条联动不成立。
+    #
+    # ⚠️ 与 Java 桩路径的区别：
+    #   Java 桩  ：种子经 JniBridge.gseed() 给桩的 <clinit>，桩在 dex 里
+    #   纯 C 桩  ：种子经 dlsym 给 nc_strdec.c，桩在 so 里 —— 不经 Java
+    #   两条路用的是【同一个】stub_seed.txt 与同一条 dpt --stub-seed 通道，
+    #   所以下面写文件的格式必须与 Java 桩路径完全一致（16 位 hex，无换行污染）。
+    #
+    # ⚠️ 只在勾了 packer 时才写：没有壳就没有 ncg_strkey，写了也没人读，
+    #    而且会让 packer 之外的分支误以为"联动已启用"。
+    if [[ $WANT_PACKER -eq 1 ]]; then
+      printf '%s\n' "${_cstub_seed_hex,,}" > "$WORK/stub_seed.txt"
+      log_info "纯 C 桩种子将写入壳 config（供 ncg_strkey 返回）: $_cstub_seed_hex"
+    fi
     python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
       "$WORK/decompiled" "$STRING_RULES" "${STRING_ENC_ARGS[@]}" \
       --apk "$STEP5_APK" \

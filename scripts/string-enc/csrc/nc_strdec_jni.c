@@ -29,6 +29,8 @@
 #include <jni.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dlfcn.h>   /* dlsym/dlopen：从壳 so 取字符串密钥种子（2026-11-10 联动） */
+#include <link.h>    /* dl_iterate_phdr：遍历已加载 so 找壳 so 的 handle */
 
 /* 构建期生成的配置头（protect.sh 写进 NDK 工程目录，不进 git）。
  * 没有它 = 本次不是 native 桩组合，bootstrap 退化为只记录 JavaVM。
@@ -49,6 +51,22 @@
 #endif
 
 #include "nc_strdec.h"
+
+/* ── 联动的前提：NKEYS 必须是 1（2026-11-10）────────────────────────────
+ *
+ * 从壳取种子的路径只实现了 NKEYS=1（8 字节种子恰好等于一把 key）。
+ * NKEYS=4 需要把 8 字节种子扩展成 32 字节，而构建期 Python 侧没有对应的
+ * 扩展逻辑（那边 seed 就是单个 uint64，见 encrypt-strings.py 的 key_byte）。
+ *
+ * 与其让两侧静默不一致（症状是全包乱码、构建期零报错），不如在编译期
+ * 直接拒绝 —— 构建失败比运行期解不出来好查得多。
+ * 将来要支持 NKEYS>1 的联动，必须【两侧同时】实现同一套扩展并加对拍。
+ *
+ * ⚠️ 断言必须放在这里（cfg.h 与 nc_strdec.h 都 include 之后）：
+ *    放在 nc_strdec.h 之前会读到它的兜底默认值 1，断言永真（形同虚设）。 */
+#if NC_STRDEC_NKEYS != 1
+#  error "纯 C 桩从壳取种子只支持 NKEYS=1（见本文件的联动断言说明）"
+#endif
 
 /* ── L1 缓存 ──────────────────────────────────────────────────────────
  *
@@ -206,6 +224,87 @@ static void nc_cache_put(JNIEnv *env, jstring payload, jstring val)
 
 /* 前置声明：定义在本文件后部（bootstrap 附近），decrypt 里要调。 */
 static void nc_ensure_key(void);
+
+/* ── 在"壳 so"里查一个导出符号（2026-11-10，纯 C 桩联动）───────────────
+ *
+ * ## 为什么需要这个函数（而不是一行 dlsym）
+ *
+ * Android 的 System.load / System.loadLibrary 走
+ * `android_dlopen_ext(path, RTLD_NOW, ...)`，**不带 RTLD_GLOBAL**。
+ * 宿主对照实验（2026-11-10）：
+ *     dlopen("./lib.so", RTLD_NOW|RTLD_LOCAL)   → dlsym(RTLD_DEFAULT,…) = NULL
+ *     dlopen("./lib.so", RTLD_NOW|RTLD_GLOBAL)  → dlsym(RTLD_DEFAULT,…) 命中
+ * 所以 libnc.so 无法用 RTLD_DEFAULT 直接搜到壳 so 的符号。
+ *
+ * 正确做法：先拿到壳 so 的 handle，再对该 handle dlsym。
+ * 但 libnc.so 不知道壳 so 的绝对路径（它在 <dataDir>/dpt-libs/<abi>/，
+ * dataDir 与 abi 名只在 Java 层可知）。
+ *
+ * 因此遍历【已加载 so 表】（dl_iterate_phdr），按文件名匹配壳 so，
+ * 再用 dlopen(RTLD_NOLOAD) 取回 handle：
+ *   · RTLD_NOLOAD = 不真的加载，只返回已有映射的 handle（引用计数 +1）
+ *   · 拿到后必须 dlclose 归还，否则会泄漏引用计数
+ *
+ * 实测验证过这条路径（宿主 aarch64）：
+ *   模拟先 dlopen 壳 → dl_iterate_phdr 匹配到 → RTLD_NOLOAD 取 handle
+ *   → dlsym 取到符号 → 调用返回正确种子。
+ *
+ * ## 匹配方式为什么用 strstr 而不是精确路径比较
+ *
+ * 壳 so 的实际文件名由 dpt 构建时的 SO_NAME 决定（当前是 libxixin.so，
+ * 但那是可配置的）。这里匹配 "libxixin.so" 这个后缀；若将来改名，
+ * 只改下面的 SO_HINT 一处。
+ *
+ * ⚠️ 若一个进程里同时存在多个版本的壳 so（几乎不可能），
+ *    strstr 会取第一个匹配 —— 那不构成安全问题（都是同一包的产物）。
+ *
+ * ## 开销
+ *
+ * 只在 nc_ensure_key() 里调用一次（CAS 幂等）。遍历数量 = 进程已加载
+ * so 数（启动初期几十个），每条只做一次 strstr，可忽略。
+ */
+#define NC_SHELL_SO_HINT "libxixin.so"
+
+typedef struct {
+    const char *want;
+    void *handle;
+} nc_phdr_ctx;
+
+static int nc_phdr_cb(struct dl_phdr_info *info, size_t size, void *data)
+{
+    (void) size;
+    nc_phdr_ctx *ctx = (nc_phdr_ctx *) data;
+    if (info->dlpi_name == NULL || info->dlpi_name[0] == '\0') {
+        return 0;                       /* 主程序本身，无路径名，跳过 */
+    }
+    if (strstr(info->dlpi_name, ctx->want) == NULL) {
+        return 0;
+    }
+    /* RTLD_NOLOAD：只取已有映射的 handle，不重复加载。
+     * 加 RTLD_NOW 让符号解析立即完成（失败会返回 NULL，好过延迟爆炸）。 */
+    ctx->handle = dlopen(info->dlpi_name, RTLD_NOW | RTLD_NOLOAD);
+    return 1;                           /* 非 0 = 停止遍历 */
+}
+
+/* 在壳 so 里查符号。找到返回地址（handle 已归还），找不到返回 NULL。 */
+static void *nc_find_shell_symbol(const char *name)
+{
+    nc_phdr_ctx ctx;
+    ctx.want = NC_SHELL_SO_HINT;
+    ctx.handle = NULL;
+
+    dl_iterate_phdr(nc_phdr_cb, &ctx);
+    if (ctx.handle == NULL) {
+        /* 没包壳（只勾 stringenc-native、不勾 packer），或壳还没加载。
+         * 调用方会回退到编译期常量 —— 这是允许的降级，不是错误。 */
+        return NULL;
+    }
+
+    void *sym = dlsym(ctx.handle, name);
+    dlclose(ctx.handle);                /* 归还 NOLOAD 增加的引用计数 */
+    return sym;
+}
+
 
 /* ── JNI 入口 ────────────────────────────────────────────────────────
  *
@@ -432,10 +531,99 @@ static void nc_ensure_key(void)
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return;                         /* 别的线程已经在设/已设好 */
     }
-#if defined(NC_STRDEC_HAVE_CFG) && defined(NC_STRDEC_KEY_BYTES)
+
+    /* ── 密钥来源优先级（2026-11-10，纯 C 桩与壳的联动）─────────────────
+     *
+     * ① 优先从【壳 so】取种子（运行期 dlsym）
+     * ② 取不到才回退到编译期常量
+     *
+     * 为什么要有 ①：编译期常量的密钥在 libnc.so 里躺着（static const 数组），
+     * 反编译就能读出来，于是「脱壳后丢掉壳 so 仍然能解」—— 用户要的
+     * 「必须带着壳运行」这条联动不成立。
+     *
+     * 为什么保留 ②：不是为了兼容旧包（旧包的 cfg.h 已编进 so，改不了），
+     * 而是为了【没有壳的场景不崩】：单勾 stringenc-native、不勾 packer 时
+     * 根本没有壳 so，此时必须能用常量密钥正常工作。
+     *
+     * ⚠️ 关键：这两个分支必须产出【同一把密钥】。因为密文是构建期用
+     *    「本轮种子」加密的，而那个种子同时写进了：
+     *      · cfg.h 的 NC_STRDEC_KEY_BYTES（→ 分支 ② 用它）
+     *      · dpt 的 shell config stub_seed（→ 分支 ① 用它）
+     *    两处同源（都是 protect.sh 的 $WORK/stub_seed.txt），所以拿到哪个
+     *    都算出同一把密钥。这条同源关系由 protect.sh 保证，见该脚本
+     *    「纯 C 桩复用构建期桩名」那段。
+     *
+     * ⚠️ 失败不缓存：done 在 CAS 时已置 1，若这里什么都没设成就【没有】
+     *    密钥，此后所有解密都 fail-closed。所以下面必须保证至少走通一条：
+     *    壳取不到 → 用常量；常量也没有（非 native 组合）→ 保持无密钥。 */
+    int got = 0;
+
+    /* ① 从壳 so 取（只有在包了壳的组合下才会成功） */
     {
+        /* ⚠️ 为什么不是直接 dlsym(RTLD_DEFAULT, "ncg_strkey")：
+         *   实测（2026-11-10）Android 的 System.load / loadLibrary 走
+         *   android_dlopen_ext(RTLD_NOW)，**不带 RTLD_GLOBAL**。
+         *   宿主对照实验：dlopen(RTLD_LOCAL) 后 dlsym(RTLD_DEFAULT) 返回 NULL，
+         *   改 RTLD_GLOBAL 才能找到。
+         *   所以必须【先拿到壳 so 的句柄，再对该句柄 dlsym】。
+         *
+         * 拿句柄的办法：dl_iterate_phdr 遍历已加载的 so，按名字匹配，
+         * 再用 dlopen(RTLD_NOLOAD) 取回句柄（NOLOAD = 不重复加载，
+         * 只把已有映射的 handle 给我们，引用计数 +1；用完 dlclose 归还）。
+         *
+         * 为什么不自己拼路径 dlopen("…/dpt-libs/<abi>/libxixin.so")：
+         *   需要 dataDir 与 abi 名，libnc.so 两者都不知道（它们只在 Java 层）。
+         *   遍历已加载表则由运行时提供准确路径，零猜谜。
+         *
+         * 开销：只在首次解密时执行一次（nc_ensure_key 有 CAS 幂等）。
+         * 遍历数量 = 进程已加载 so 数（启动初期几十个），可忽略。 */
+        typedef uint64_t (*ncg_strkey_fn)(void);
+        uint64_t seed = 0;
+        void *sym = nc_find_shell_symbol("ncg_strkey");
+        if (sym != NULL) {
+            seed = ((ncg_strkey_fn) sym)();
+        }
+        /* seed == 0 表示「壳在，但没开联动」（dpt 的 stub_seed 默认值 0），
+         * 此时不能拿它当密钥 —— 0 会算出一把可预测的密钥，比没有更糟。 */
+        if (seed != 0) {
+            /* 把 uint64 种子按【大端序】拆成字节，与构建期
+             * NC_STRDEC_KEY_BYTES 的生成方式逐字节一致。
+             *
+             * 为什么必须是大端：nc_strdec_set_key() 就是按大端序读的
+             * （见其注释「与 Java 的 0x…L 字面量、Python 的
+             *  int.from_bytes(..,'big') 三方一致」）。这里若用小端，
+             * 两边密钥不同源 → 全包静默乱码，且构建期零报错。
+             *
+             * 已实测核对（宿主 Python 脚本）：
+             *   seed_hex "0011223344556677"
+             *   → protect.sh 生成的常量字节 = 00 11 22 33 44 55 66 77
+             *   → set_key 读回 nc_key[0] = 0x0011223344556677
+             *   → 与 Python 的 int.from_bytes(seed,'big') 完全一致
+             * 本函数用 (seed >> ((7-b)*8)) 拆出的字节与之逐字节相同。
+             *
+             * NKEYS>1 时余下分量：当前编译期断言只允许 NKEYS=1
+             * （见本文件顶部的联动断言），所以这里的占位分支实际不会执行。 */
+            uint8_t k[NC_STRDEC_KEYLEN];
+            for (int i = 0; i < NC_STRDEC_KEYLEN; i++) {
+                int b = i % 8;
+                k[i] = (uint8_t) ((seed >> ((7 - b) * 8)) & 0xFF);
+                if (i >= 8) {
+                    k[i] ^= (uint8_t) (i / 8);
+                }
+            }
+            nc_strdec_set_key(k);
+            memset(k, 0, sizeof(k));
+            got = 1;
+        }
+    }
+
+#if defined(NC_STRDEC_HAVE_CFG) && defined(NC_STRDEC_KEY_BYTES)
+    /* ② 回退：编译期常量（未包壳，或壳里没开联动） */
+    if (!got) {
         static const uint8_t k[NC_STRDEC_KEYLEN] = NC_STRDEC_KEY_BYTES;
         nc_strdec_set_key(k);
     }
+#else
+    (void) got;
 #endif
 }

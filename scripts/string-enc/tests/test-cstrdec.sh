@@ -358,6 +358,109 @@ else
   echo "   ✅ 密钥不经 dex（无 ncSetKey 调用）"
 fi
 
+# ── 7. 纯 C 桩 ↔ 壳 so 联动（2026-11-10）────────────────────────────
+# 目标：证明 nc_strdec 能从"壳 so"取到种子，且取到的密钥与构建期常量
+#       逐字节相同（否则构建期加密 / 运行期解密不同源 → 全包乱码）。
+#
+# 为什么必须在宿主上验：真机验证要整套 APK 流程，而这个契约的核心只有
+# 三件事——① 能找到壳 so 的 handle ② 能取到 ncg_strkey ③ 拆出的字节
+# 与常量一致。三件都能在宿主上闭环，且改坏时能立刻定位。
+echo "══ 7. 纯 C 桩 ↔ 壳 so 联动（ncg_strkey）══"
+
+# 7a. 源码契约：nc_strdec_jni.c 必须用 dl_iterate_phdr 而不是裸 dlsym(RTLD_DEFAULT)
+#     原因：Android 的 System.load 走 android_dlopen_ext(RTLD_NOW)，不带
+#     RTLD_GLOBAL，所以 dlsym(RTLD_DEFAULT) 搜不到壳 so 的符号。
+#     宿主实测：dlopen(RTLD_LOCAL) 后 RTLD_DEFAULT 返回 NULL。
+if grep -q 'dl_iterate_phdr' "$CSRC/nc_strdec_jni.c"; then
+  ok; echo "   ✅ 用 dl_iterate_phdr 找壳 so 的 handle"
+else
+  bad "nc_strdec_jni.c 未用 dl_iterate_phdr（裸 dlsym(RTLD_DEFAULT) 在 Android 上找不到壳符号）"
+fi
+if grep -q 'RTLD_NOLOAD' "$CSRC/nc_strdec_jni.c"; then
+  ok; echo "   ✅ 用 RTLD_NOLOAD 取已有 handle（不重复加载）"
+else
+  bad "未用 RTLD_NOLOAD（会二次加载壳 so）"
+fi
+if grep -q 'dlclose' "$CSRC/nc_strdec_jni.c"; then
+  ok; echo "   ✅ 取完符号后 dlclose 归还引用计数"
+else
+  bad "未 dlclose（NOLOAD 的引用计数泄漏）"
+fi
+# 7b. 回退链必须存在：取不到壳 → 用编译期常量
+if grep -q 'NC_STRDEC_KEY_BYTES' "$CSRC/nc_strdec_jni.c"; then
+  ok; echo "   ✅ 保留编译期常量回退（未包壳的组合作业正常）"
+else
+  bad "删掉了编译期常量回退 —— 单勾 stringenc-native 时会完全没有密钥"
+fi
+# 7c. NKEYS 断言必须在 cfg.h/nc_strdec.h 之后（否则读到默认值 1，永真）
+if grep -q 'NC_STRDEC_NKEYS != 1' "$CSRC/nc_strdec_jni.c"; then
+  ok; echo "   ✅ 有 NKEYS=1 编译期断言"
+else
+  bad "缺少 NKEYS=1 断言（NKEYS>1 时联动会静默解错）"
+fi
+# 7d. protect.sh 必须在纯 C 桩 + packer 时写 stub_seed.txt
+#     （不写 → dpt 的 stub_seed 保持 0 → ncg_strkey 返回 0 → 回退常量 → 联动失效）
+if grep -A3 '_cstub_seed_hex,,.*stub_seed.txt\|stub_seed.txt.*_cstub_seed_hex' \
+     "$ROOT/scripts/pipelines/protect.sh" >/dev/null 2>&1 || \
+   grep -q '纯 C 桩种子将写入壳 config' "$ROOT/scripts/pipelines/protect.sh"; then
+  ok; echo "   ✅ protect.sh 在纯 C 桩路径写 stub_seed.txt"
+else
+  bad "protect.sh 未在纯 C 桩路径写 stub_seed.txt（联动不会生效）"
+fi
+
+# 7e. 端到端：造一个假壳 so，验证取到的字节与常量一致
+if command -v "$CC" >/dev/null 2>&1; then
+  mkdir -p "$W/link"
+  cat > "$W/link/fakeshell.c" <<'FSEOF'
+#include <stdint.h>
+__attribute__((used, visibility("default")))
+uint64_t ncg_strkey(void){ return 0x0011223344556677ULL; }
+FSEOF
+  cat > "$W/link/verify.c" <<'VEOF'
+#define _GNU_SOURCE
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <dlfcn.h>
+#include <link.h>
+typedef struct { const char *want; void *handle; } ctx_t;
+static int cb(struct dl_phdr_info *i, size_t s, void *d){
+    (void)s; ctx_t *c=(ctx_t*)d;
+    if(!i->dlpi_name || !i->dlpi_name[0]) return 0;
+    if(!strstr(i->dlpi_name, c->want)) return 0;
+    c->handle = dlopen(i->dlpi_name, RTLD_NOW|RTLD_NOLOAD);
+    return 1;
+}
+int main(void){
+    ctx_t c={"libxixin.so",NULL};
+    dl_iterate_phdr(cb,&c);
+    if(!c.handle){ printf("NOSHELL\n"); return 2; }
+    typedef uint64_t(*fn)(void);
+    fn f=(fn)dlsym(c.handle,"ncg_strkey");
+    dlclose(c.handle);
+    if(!f){ printf("NOSYM\n"); return 3; }
+    uint64_t seed=f();
+    /* 与 nc_strdec_jni.c 完全同式的拆字节 */
+    for(int i=0;i<8;i++) printf("%02x",(unsigned)((seed>>((7-(i%8))*8))&0xFF));
+    printf("\n");
+    return 0;
+}
+VEOF
+  if "$CC" -shared -fPIC -o "$W/link/libxixin.so" "$W/link/fakeshell.c" 2>/dev/null && \
+     "$CC" -O2 -o "$W/link/verify" "$W/link/verify.c" -ldl 2>/dev/null; then
+    # ⚠️ 用 $( ) 而不是 $(( ))：后者是【算术展开】，会把输出当表达式求值
+    #    （首版写成 $(( )) → 输出 "0011223344556677" 被当十进制数算，
+    #      "NOSHELL" 直接报错 → 两条断言静默消失，测试却显示全绿）。
+    got="$( cd "$W/link" && LD_PRELOAD=./libxixin.so ./verify 2>/dev/null )"
+    chk "有壳 so 时取出的密钥字节" "$got" "0011223344556677"
+    # 无壳：应报 NOSHELL（调用方据此回退常量）
+    got2="$( cd "$W/link" && ./verify 2>/dev/null )"
+    chk "无壳 so 时正确报 NOSHELL（触发常量回退）" "$got2" "NOSHELL"
+  else
+    bad "联动端到端用例编译失败"
+  fi
+fi
+
 echo
 echo "────────────────────────────────────────"
 if [[ $FAIL -eq 0 ]]; then
