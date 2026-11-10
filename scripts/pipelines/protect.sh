@@ -117,6 +117,43 @@ WANT_CHACHA20=0
 WANT_OBFUSCATE=0
 OBF_MBA=0
 OBF_FLATTEN=0
+# --dex2c-static-register（2026-11-10）：dex2c 的业务方法改用【静态短名】注册。
+#
+# 为什么需要这个开关：
+#   `--dynamic-register` 会生成 `JNINativeMethod` 表，表里存
+#   `(void *)Java_xxx` —— 即【取了业务函数的地址】。而 Amice 的 VMP
+#   在 vm_virtualize/mod.rs:1067 的 has_unsupported_function_uses 里规定：
+#   除「直接调用」和「@llvm.global.annotations」外，任何函数地址引用都
+#   判为 non-call address use → 【静默跳过】该函数（构建照绿，日志无提示）。
+#   实测 IR：@tbl = global [1 x %struct] [{ ptr @.str, ptr @.str.1,
+#                                        ptr @Java_..._onCreate }]
+#   → 4 个 dex2c 业务方法（25.8KB）全部无法上 VMP。
+#
+#   关掉动态注册后 writer.py:111 生成 `extern "C" JNIEXPORT ... JNICALL
+#   Java_xxx(...)`，IR 里只剩一条 define，没有地址引用 → 可虚拟化。
+#   实测：check-vmp-eligibility.py 通过。
+#
+# 代价（如实）：
+#   JNIEXPORT 自带 visibility("default")，对 -fvisibility=hidden 免疫 →
+#   业务方法名进 .dynsym（`nm -D` 可见）。但实测这些名字本来就从
+#   .rodata 的 "onCreate"/"attachBaseContext" 字符串可反推，藏名字
+#   只挡 grep 不挡定位 —— 用「藏名字」换「25.8KB 业务逻辑可 VMP」是划算的。
+#
+# 风险：动态注册有真机实证（见下方 dcc.py 调用处的大段注释），静态短名
+#   注册在这条链上【没有】行过真机。开了这个开关必须真机验一遍启动不崩。
+WANT_DEX2C_STATIC_REG=0
+# --vmp（2026-11-10）：指令级虚拟化，只作用于 .ncx 里被 annotate 的业务函数。
+#
+# 为什么要它（与 --obfuscate 的分工）：
+#   --obfuscate 实测在本项目里几乎是空的 —— NC_OBF 宏没有任何函数在用
+#   （三个解密链函数都搬去 VMP 文件了），消费方的 8 个 .c 也是零 annotate，
+#   所以只剩全局 MBA 在起作用（算术重写，化简就回来了）。强度很低。
+#   --vmp 是函数级强保护：函数体编译成自定义 VM 字节码，解锁后内存里不是
+#   明文 ARM64 → 挡住动态 dump（这是 .ncx 锁箱挡不住的那一类）。
+#
+# 依赖：必须配 --dex2c-static-register（动态注册的 JNINativeMethod 表取了
+#   函数地址，Amice 会静默跳过，见该变量处注释）。
+WANT_VMP=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sigcheck) WANT_SIGCHECK=1; shift ;;
@@ -157,6 +194,13 @@ while [[ $# -gt 0 ]]; do
     # Amice 混淆（2026-11-05）。子复选框隐含父模块开启（与 --packer-smaller 同惯例）。
     # 值为空时由 lib-ndk.sh 按"父模块开、子项默认"取默认组合（MBA on / flatten off）。
     --obfuscate) WANT_OBFUSCATE=1; shift ;;
+    --dex2c-static-register) WANT_DEX2C_STATIC_REG=1; shift ;;
+    --vmp) WANT_VMP=1; shift
+           # VMP 依赖静态注册（见 WANT_VMP 处注释）。
+           # 自动联动而不是让用户记得两个都勾：漏一个的后果是
+           # "构建成功但 VMP 静默跳过"，正是最该避免的假绿。
+           WANT_DEX2C_STATIC_REG=1 ;;
+    --vmp-keep-dynamic-register) WANT_VMP=1; shift ;;   # 显式保留动态注册（VMP 会跳过，仅供调试）
     --obfuscate-mba) WANT_OBFUSCATE=1; OBF_MBA=1; shift ;;
     --obfuscate-flatten) WANT_OBFUSCATE=1; OBF_FLATTEN=1; shift ;;
     *)          log_err "未知参数: $1"; usage ;;
@@ -459,12 +503,24 @@ if [[ $WANT_ENGINE -eq 1 ]]; then
   #    arm64，loadLibrary 在 <clinit> 里、FindClass 目标就是该 <clinit>
   #    所属类）：EARLY FindClass OK / RegisterNatives -> 0。
   #    不要把 constructor 的失败经验平移到 JNI_OnLoad 上。
+  #
+  # ── --dex2c-static-register（2026-11-10）：关掉动态注册以解锁 VMP ────
+  # 动态注册的 JNINativeMethod 表存 `(void *)Java_xxx` = 取函数地址 →
+  # Amice VMP 判为 non-call address use → 静默跳过（见变量定义处的长注释）。
+  # 关掉后走静态短名，IR 里只有 define 没有地址引用 → 可虚拟化。
+  _D2C_REG_ARG="--dynamic-register"
+  if [[ $WANT_DEX2C_STATIC_REG -eq 1 ]]; then
+    _D2C_REG_ARG=""
+    echo "[dex2c] 注册方式: 静态短名（为 VMP 让路；业务方法名将进 .dynsym）"
+  else
+    echo "[dex2c] 注册方式: 动态注册（业务方法名不进 .dynsym，但业务函数无法 VMP）"
+  fi
   module_cd_run "$DEX2C_DIR" python3 dcc.py -i "$LINK_APK" -o "$WORK/dex2c-no-build.apk" \
     --project-archive "$WORK/dcc-project.zip" \
     --no-build \
     --disable-signing \
     --allow-global \
-    --dynamic-register \
+    ${_D2C_REG_ARG:+"$_D2C_REG_ARG"} \
     --filter "$DCC_FILTER"
 
   require_file "$WORK/dcc-project.zip" "dex2c 工程包（filter 可能未命中任何方法）"
@@ -787,10 +843,18 @@ fi
 #   ② 报错退出 —— 不做"找不到就静默跳过混淆"的降级：
 #      用户勾了混淆却没生效，比构建失败危险得多（以为防了其实没防）。
 _OBF_SPEC=""
-if [[ $WANT_OBFUSCATE -eq 1 ]]; then
-  _bundle="${AMICE_BUNDLE:-}"
+# ── Amice bundle 解析（--obfuscate 与 --vmp 共用，2026-11-10 抽出）──
+# 两个开关都需要「插件本体 + host libLLVM + 配套 NDK」这套环境，
+# 但需要的 pass 不同：
+#   --obfuscate → 全局 MBA / flatten（写法是环境变量，作用于所有编译单元）
+#   --vmp       → 只加载插件，靠 annotate("+vm_virtualize") 逐个函数启用
+# 抽成一个函数是为了避免两份"找 bundle/校验/定位 NDK"的代码漂移
+# （本仓库吃过多次"抄一遍=制造第二份真相"的亏，见 setup-toolchain 的来历）。
+resolve_amice_bundle() {
+  local _why="$1"          # 出现在报错里，说明是谁需要它
+  local _bundle="${AMICE_BUNDLE:-}"
   if [[ -z "$_bundle" || ! -d "$_bundle/amice" ]]; then
-    log_err "勾选了代码混淆，但找不到 Amice bundle"
+    log_err "启用了 $_why，但找不到 Amice bundle"
     log_err "     请设置 AMICE_BUNDLE 指向解压后的 amice-android-ndk-* 目录"
     log_err "     （该目录下应有 amice/lib/libamice.so 与 amice/llvm-lib/）"
     exit 1
@@ -807,9 +871,7 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   #   插件按 LLVM 主版本编译，与 NDK clang 严格绑定。
   #   实测（CI run 42055440429）：r27d 的 clang 18 加载 r29 插件 → SIGSEGV
   #   （exit code 139，clang frontend crashed）。
-  #   bundle 里的 android-ndk-rXX 与插件是配套发布的，不存在错配。
-  #
-  # 定位：bundle 根目录下唯一名为 android-ndk-* 的子目录。
+  local _bundle_ndk
   _bundle_ndk="$(find "$_bundle" -maxdepth 1 -type d -name 'android-ndk-*' | head -1)"
   if [[ -z "$_bundle_ndk" || ! -x "$_bundle_ndk/ndk-build" ]]; then
     log_err "bundle 里找不到自带的 NDK（期望 <bundle>/android-ndk-rXX/ndk-build）"
@@ -818,6 +880,10 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
     exit 1
   fi
   export AMICE_NDK_HOME="$_bundle_ndk"
+}
+
+if [[ $WANT_OBFUSCATE -eq 1 ]]; then
+  resolve_amice_bundle "--obfuscate（代码混淆）"
   # 子项默认：MBA 开（低风险，默认勾选），flatten 关（高风险，显式才开）。
   # 注意"父模块勾了但没勾任何子项"的情形：schema 里 mba 默认 true，
   # 正常不会发生；但命令行直调时可能出现，此处按"什么都没勾=不开混淆"处理，
@@ -832,6 +898,39 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   export AMICE_FLATTEN="$([[ $OBF_FLATTEN -eq 1 ]] && echo true || echo false)"
   log_info "代码混淆: $_OBF_SPEC（AMICE_MBA=$AMICE_MBA AMICE_FLATTEN=$AMICE_FLATTEN）"
   log_info "混淆用 NDK: $AMICE_NDK_HOME（bundle 自带，与插件配套）"
+fi
+
+# ── --vmp（2026-11-10）：指令级虚拟化，只作用于 .ncx 里的业务函数 ──────
+# 与 --obfuscate 的区别（这是本参数存在的理由）：
+#   --obfuscate 是【全局弱混淆】：MBA 重写算术、flatten 重排控制流。
+#     实测它在本项目里几乎是空的 —— NC_OBF 宏没有任何函数在用，
+#     消费方的 8 个 .c 也零 annotate，所以只剩全局 MBA 在起作用。
+#   --vmp 是【函数级强保护】：把函数体编译成自定义 VM 字节码，
+#     解锁后内存里不是明文 ARM64 而是字节码 → 挡住动态 dump。
+#
+# 只加载插件、不设 AMICE_MBA/AMICE_FLATTEN：VMP 由 annotate 逐函数启用，
+# 不需要也不想要全局弱混淆掺进来（两者叠加会让体积暴涨而强度增量很小）。
+if [[ $WANT_VMP -eq 1 ]]; then
+  resolve_amice_bundle "--vmp（指令级虚拟化）"
+  export AMICE_MBA=false
+  export AMICE_FLATTEN=false
+  # VM profile：默认用包内自带的 nox-vmp-func（函数级隔离：每函数独立
+  # 分派运行时 + 独立 handler 副本）。内置 amice-simple-vmp 是 module 级
+  # 共享，攻击者逆一套 VM 语义就能读全部受保护函数。
+  #
+  # ⚠️ 与 nox 的 make-zip-lib.sh 用同一份 profile，理由一致（见该文件注释）。
+  # ⚠️ 用环境变量 AMICE_VM_PROFILE_PATH 而不是 annotate("vm_profile=...")：
+  #    annotate 里再塞 profile 路径会和 +vm_virtualize 一起进
+  #    llvm.global.annotations，多一个字符串常量引用，不划算且难排查。
+  _vmp_prof="$GUARD_SRC/vmp-profile-func"
+  if [[ -f "$_vmp_prof/manifest.toml" ]]; then
+    export AMICE_VM_PROFILE_PATH="$_vmp_prof"
+    log_info "VMP profile: nox-vmp-func（函数级隔离）"
+  else
+    log_info "VMP profile: 内置 amice-simple-vmp（module 级共享）"
+    log_info "   ⚠️ 包内缺 vmp-profile-func/manifest.toml —— 强度降级但功能正常"
+  fi
+  log_info "VMP 用 NDK: $AMICE_NDK_HOME（bundle 自带，与插件配套）"
 fi
 
 # ── 纯 C 解密桩的源码（2026-11-09）────────────────────────────────
@@ -1022,7 +1121,19 @@ EOF
   echo "[cstub] 纯 C 解密桩: 类=$_stub_class NKEYS=$_nk"
 fi
 
-ndk_write_mk "$WORK/project/jni" nc "$GUARD_LIB_DIR" "$_OBF_SPEC"   # mk 模板唯一来源（报错十一），模块名固定 nc
+# ── Amice 插件加载规格（2026-11-10）──────────────────────────────────
+# ndk_write_mk 的第 4 参数非空 = 往 APP_CPPFLAGS 加 -fpass-plugin。
+# 三种情形：
+#   --obfuscate        → _OBF_SPEC = "mba" / "mba,flatten"（全局弱混淆）
+#   --vmp（只 VMP）    → _OBF_SPEC 为空，但插件仍必须加载 → 传 "vmp"
+#   两个都开           → "mba,vmp" 之类，只要非空即加载插件
+# 用 "vmp" 这个标记而不是空串，是因为空串会让 mk 完全不加 -fpass-plugin
+# → 插件没加载 → annotate("+vm_virtualize") 无人解析 → VMP 静默失效。
+_MK_OBF_SPEC="$_OBF_SPEC"
+if [[ $WANT_VMP -eq 1 ]]; then
+  _MK_OBF_SPEC="${_MK_OBF_SPEC:+$_MK_OBF_SPEC,}vmp"
+fi
+ndk_write_mk "$WORK/project/jni" nc "$GUARD_LIB_DIR" "$_MK_OBF_SPEC"   # mk 模板唯一来源（报错十一），模块名固定 nc
 
 # ── 通用段标记（2026-10 设施化第2层）──────────────────────────────
 # 让 dex2c 转译产物吃上 .ncx 加密：用规则把 JNI 函数打进加密段。
@@ -1060,6 +1171,34 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
 
   # 两条规则都挂上：静态注册 + 动态注册。
   # 只挂其中一条会在换注册方式时静默失防（本次事故就是这么来的）。
+  #
+  # ── VMP（2026-11-10）：给业务方法同时打 +vm_virtualize ──────────────
+  # 目的：解锁后内存里是 VM 字节码而不是明文 ARM64，挡住动态 dump。
+  # 前置条件（四条，缺一即被 Amice 静默跳过）：
+  #   ① 函数地址不被「非调用用途」引用 —— vm_virtualize/mod.rs:1067 的
+  #      has_unsupported_function_uses 只豁免 direct-call 和
+  #      @llvm.global.annotations。所以：
+  #        · 动态注册的 JNINativeMethod 表存 (void *)Java_xxx = 取地址 → 跳过
+  #          → 必须用 --dex2c-static-register 关掉它（--vmp 已自动联动）
+  #        · attribute 里不能带 used / retain（clang 会把它们变成
+  #          @llvm.used 表，表里是 ptr @func → 也算地址引用，实测确认）
+  #   ② 属性必须在 extern "C" 作用域内，否则 C++ mangling 成 _Z40Java_...
+  #      → ART 找不到符号。静态注册形态自带 extern "C"，天然满足。
+  #   ③ amice 插件必须真的加载（-fpass-plugin）→ 由 --vmp 负责
+  #   ④ 函数得有独立符号（noinline），否则被内联掉就无处虚拟化
+  _MARK_EXTRA=()
+  if [[ $WANT_VMP -eq 1 ]]; then
+    if [[ $WANT_DEX2C_STATIC_REG -eq 1 ]]; then
+      _MARK_EXTRA=(--annotate '+vm_virtualize')
+      echo "[mark] VMP: 业务方法打 +vm_virtualize（静态注册 + 无 used/retain）"
+    else
+      echo "❌ --vmp 需要静态注册，但检测到 --vmp-keep-dynamic-register" >&2
+      echo "   动态注册的 JNINativeMethod 表取了函数地址 → Amice 必然静默跳过" >&2
+      echo "   这个组合只会白跑一遍构建。去掉 --vmp-keep-dynamic-register，" >&2
+      echo "   或去掉 --vmp（二选一，不要两个都要）。" >&2
+      exit 1
+    fi
+  fi
   python3 "$GUARD_SRC/so_section_mark.py" "$WORK/project/jni" \
     --rule dex2c-jni \
     --rule dynamic-register-jni \
@@ -1068,6 +1207,7 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
     --exclude-func heartbeat \
     --exclude-func JNI_OnLoad \
     --exclude-func selftest \
+    "${_MARK_EXTRA[@]}" \
     -v 2>&1 | sed 's/^/  [mark] /' || {
     echo "❌ 段标记失败——dex2c 转译产物未吃上加密（用户明确要求）" >&2
     exit 1
@@ -1171,6 +1311,53 @@ fi
 
 log_step 4 6 "NDK 编译"
 ndk_build "$WORK/project"
+
+# ── VMP 产物侧断言（2026-11-10）──────────────────────────────────────
+# 为什么必须在【产物】上断言而不是看日志：
+#   AGENTS.md §3.3 —— "日志里有输出 ≠ 防护生效"。本项目已经付过代价：
+#   `.comment` 的"失败但继续"日志让该防护连续三个月零生效没人发现。
+#   VMP 的失败模式更隐蔽：Anmice 遇到不满足条件的函数是【静默跳过】，
+#   构建全绿、产物正常、只是没虚拟化。所以必须在产物上验。
+#
+# 判据：VMP 会把函数体换成「VM 运行时 + 字节码」，特征是【代码量暴涨】。
+#   实测 nox 单个函数 VMP 前后：1280 B → 22720 B（17 倍）。
+#   这里用更宽松的门槛：带 VMP 标记的函数数 ≥1，且 .ncx 段非空。
+#   （不做"体积必须涨 N 倍"的硬断言 —— 不同函数差异太大，会变成噪音源。）
+#
+# ⚠️ 局限（如实）：本断言只能证明"VMP 可能生效"，不能证明每个函数都生效。
+#   要精确到函数级必须用 AMICE_VM_EMIT_MARKERS 构建一次（会生成
+#   .amice.vm.meta.* 段），那是调试手段，不进生产。
+if [[ $WANT_VMP -eq 1 ]]; then
+  _so_path="$WORK/project/libs/arm64-v8a/libnc.so"
+  if [[ -f "$_so_path" ]]; then
+    _ncx_sz=$(python3 - "$_so_path" <<'PYEOF'
+import struct,sys
+so=open(sys.argv[1],'rb').read()
+try:
+    shoff=struct.unpack_from('<Q',so,0x28)[0]; shent=struct.unpack_from('<H',so,0x3a)[0]
+    shnum=struct.unpack_from('<H',so,0x3c)[0]; shstr=struct.unpack_from('<H',so,0x3e)[0]
+    sh=lambda k: struct.unpack_from('<IIQQQQIIQQ',so,shoff+k*shent)
+    st=sh(shstr)[4]
+    for k in range(shnum):
+        s=sh(k); nm=so[st+s[0]:so.index(b'\0',st+s[0])].decode()
+        if nm=='.ncx': print(s[5]); break
+    else: print(0)
+except Exception:
+    print(0)
+PYEOF
+)
+    if [[ "${_ncx_sz:-0}" -le 0 ]]; then
+      log_err "VMP 已开启，但产物里 .ncx 段为空或不存在 —— VMP 不可能生效"
+      log_err "   → 段标记没打上？检查上面 [mark] 的输出"
+      exit 1
+    fi
+    log_info "VMP 产物检查: .ncx = $_ncx_sz 字节（非空，标记已落进加密段）"
+    log_info "   ⚠️ 单函数是否真被虚拟化需真机/调试构建确认（AMICE_VM_EMIT_MARKERS）"
+  else
+    log_err "VMP 已开启，但找不到产物 $_so_path"
+    exit 1
+  fi
+fi
 fi   # 有 so 需求的组合才执行 STEP 3/4(报错二十三:纯 stringenc 组合跳过)
 
 # ── STEP 5: 解包 → smali 处理 → 放 so → 回编（全组合只做这一次） ────

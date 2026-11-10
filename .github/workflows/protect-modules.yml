@@ -172,6 +172,14 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/actions/tests/test_obfuscate_args.py
 
+      # VMP 前置条件（2026-11-10）：VMP 的失败模式是【静默跳过】——
+      # Amice 遇到不满足条件的函数直接跳过，构建全绿但没虚拟化。
+      # 21 项断言钉住 attribute 形态（不得含 used/retain）、IR 三条件、
+      # 两条反向验证、以及 --vmp 自动联动静态注册。
+      - name: VMP 前置条件（21 断言，含两条反向验证）
+        if: steps.scope.outputs.code == 'true'
+        run: bash scripts/pipelines/tests/test-vmp-preconditions.sh
+
       - name: nox 源码拷贝清单完整性（拆 .c 后必查）
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/actions/tests/test_nox_copy_list.py

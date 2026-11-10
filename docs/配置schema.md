@@ -303,7 +303,7 @@ state["模块.子项"] = "java"       ← 两种渲染的状态模型完全相�
 **模块顺序不是排版，是执行顺序**：`check-schema.py` 断言
 
 ```python
-keys == ["sigcheck", "dex2c", "obfuscate", "stringenc",
+keys == ["sigcheck", "dex2c", "obfuscate", "vmp", "stringenc",
          "antidiff", "envcheck", "packer"]
 ```
 

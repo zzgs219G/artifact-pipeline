@@ -146,24 +146,28 @@ def build_config(args) -> str:
     if args.all:
         # 「全量」= 所有保护强度项全开，含 --dex2c-stub（桩内核也抽进 so）。
         # 2026-11-01 用户定：全模块就该勾满；+30~60s 的代价不该写进「全量」预设。
+        # ⚠️ 2026-11-10：--all 【不含】vmp。理由：VMP 让 .ncx 涨 10-20 倍，
+        #    属于"要用就明确要"的强项，不该被一个"全量"顺手打开（会让人
+        #    误以为默认强度就该这样，且体积代价不透明）。要 VMP 请显式 --vmp。
         on = dict(sigcheck=True, dex2c=True, stringenc=True,
-                  antidiff=True, envcheck=True, packer=True)
+                  antidiff=True, envcheck=True, packer=True, vmp=False)
     elif args.std:
         on = dict(sigcheck=True, dex2c=True, stringenc=True,
-                  antidiff=False, envcheck=False, packer=False)
+                  antidiff=False, envcheck=False, packer=False, vmp=False)
     elif not any_switch:
         # 默认 = 快速档，只 sigcheck
         on = dict(sigcheck=True, dex2c=False, stringenc=False,
-                  antidiff=False, envcheck=False, packer=False)
+                  antidiff=False, envcheck=False, packer=False, vmp=False)
     else:
         on = dict(sigcheck=args.sigcheck, dex2c=args.dex2c,
                   stringenc=args.stringenc, antidiff=args.antidiff,
-                  envcheck=args.envcheck, packer=args.packer)
+                  envcheck=args.envcheck, packer=args.packer, vmp=args.vmp)
 
     cfg = {
         "schema_version": 1,
         "sigcheck": on["sigcheck"],
         "dex2c": {"enabled": on["dex2c"]},
+        "vmp": on["vmp"],
         "stringenc": {"enabled": on["stringenc"]},
         "antidiff": on["antidiff"],
         "envcheck": on["envcheck"],
@@ -302,6 +306,11 @@ def describe_plan(cfg_json: str) -> str:
          bool(c.get("obfuscate", {}).get("enabled")),
          "本脚本不控制；VMP 已烧进 libnox.a，与此项无关"
          if not c.get("obfuscate", {}).get("enabled") else ""),
+        # vmp（2026-11-10）：指令级虚拟化。自动联动关掉动态注册
+        # （动态注册的 JNINativeMethod 表取函数地址 → Amice 静默跳过）。
+        ("指令级VMP",
+         bool(c.get("vmp")),
+         "自动关动态注册（静态短名）；.ncx 体积约 10-20 倍"),
     ]
 
     out = []
@@ -718,7 +727,11 @@ def main() -> int:
     g.add_argument("--antidiff", action="store_true", help="防对比混淆")
     g.add_argument("--envcheck", action="store_true", help="环境检测")
     g.add_argument("--packer", action="store_true", help="基础加壳")
-    g.add_argument("--all", action="store_true", help="全选（含 packer，慢）")
+    g.add_argument("--vmp", action="store_true",
+                   help="指令级 VMP 虚拟化（把 dex2c 业务方法编成 VM 字节码）。"
+                        "自动关掉动态注册（静态短名），.ncx 体积约 10-20 倍。"
+                        "不在 --all 里，需显式指定")
+    g.add_argument("--all", action="store_true", help="全选（含 packer，慢；不含 vmp）")
 
     p = ap.add_argument_group("预设（互斥，优先于逐个开关）")
     p.add_argument("--fast", action="store_true",
