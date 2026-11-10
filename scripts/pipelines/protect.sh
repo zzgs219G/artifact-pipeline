@@ -154,6 +154,25 @@ WANT_DEX2C_STATIC_REG=0
 # 依赖：必须配 --dex2c-static-register（动态注册的 JNINativeMethod 表取了
 #   函数地址，Amice 会静默跳过，见该变量处注释）。
 WANT_VMP=0
+# NC_VMP_CSTUB（2026-11-11）：是否给 stringenc 的算法层（nc_strdec.c 的
+# 5 个函数）打 VMP 注解。默认 0 = 不打。
+#
+# 为什么默认关：真机实测（sigcheck+dex2c+stringenc+vmp，splitmix64 与
+# chacha20 两档都试过）应用启动页 SIGSEGV/SEGV_ACCERR，栈溢出：
+#   guard page 0x...e000-0x...f000 权限 ---
+#   崩溃 sp 恰在 guard page 上边界（再压 16B 即越界）
+#   x29 与 sp 相差整整 1.01MB
+#   5 次崩溃 fault addr 低位恒为 0xff0/0xff8（页尾）
+# 而同一份代码只 VMP sigcheck（derive_expected）则完全正常。
+#
+# ⚠️ 这不是「stringenc 不能 VMP」的普适结论 —— nox 自己的解密链 14 个
+# 函数全上 VMP 且真机可用。差别在字节码规模：那 5 个函数含 Base64 4-way、
+# UTF-8 解码、密钥流，字节码远长于 nox 那些 19~31 条指令的小函数，
+# 且 nc_strdec_decrypt → nc_block_ks → nc_mix64 是嵌套 VMP 调用。
+# 根因待查（dispatcher 区段内 61 处 bl 回自身，疑似 handler 递归分派）。
+#
+# 设 1 可重现旧行为，用于后续定位根因。
+NC_VMP_CSTUB=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sigcheck) WANT_SIGCHECK=1; shift ;;
@@ -1361,7 +1380,7 @@ if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
   # 含 Base64/UTF-8/密钥流，字节码远长于 nox 那些 19~31 条指令的小函数。
   # 根因待查（dispatcher 内 61 处 bl 回自身，疑似递归分派）。
   _CSTUB_ANN=()
-  if [[ $WANT_VMP -eq 1 && "${NC_VMP_CSTUB:-0}" == "1" ]]; then
+  if [[ $WANT_VMP -eq 1 && "$NC_VMP_CSTUB" == "1" ]]; then
     _CSTUB_ANN=(--annotate '+vm_virtualize')
     echo "[mark] VMP: 纯 C 桩算法层同步打 +vm_virtualize（实验开关已开）"
   elif [[ $WANT_VMP -eq 1 ]]; then
