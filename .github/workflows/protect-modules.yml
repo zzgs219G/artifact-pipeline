@@ -679,9 +679,10 @@ jobs:
           ndk-version: r27d
           nox-source: 'false'
 
-      # ── Amice bundle（仅当 protect_config 勾选 obfuscate 时）────────────
-      # 混淆是编译期 LLVM pass，需要 bundle 里的 libamice.so + host libLLVM.so。
-      # 后者官方 NDK 不带（实测 find $NDK -name libLLVM* 为空），必须来自 bundle。
+      # ── Amice bundle（obfuscate 或 vmp 任一勾选时）───────────────────
+      # 混淆与 VMP 都是编译期 LLVM pass，需要 bundle 里的 libamice.so +
+      # host libLLVM.so。后者官方 NDK 不带（实测 find $NDK -name libLLVM* 为空），
+      # 必须来自 bundle。
       #
       # 用 cache 与 amice-probe/amice-integrate 共用同一个 key —— 三个 job
       # 各自下载一次 848MB 是浪费；cache 命中后约 20 秒。
@@ -689,7 +690,12 @@ jobs:
       # 注意 PROTECT_OBF 的判定与 resolve-config 的解析**互相独立**：
       # 这里只是"要不要准备 bundle"，真正的参数由 protect.sh 从 args.txt 读。
       # 若两者不一致，protect.sh 会在找不到 bundle 时 fail-fast（不会静默）。
-      - name: 判定是否勾选了代码混淆
+      #
+      # ⚠️ 2026-11-11：判定条件从"只看 obfuscate"扩为"obfuscate 或 vmp"。
+      #    漏掉 vmp 的后果：勾了 VMP 却没下 bundle → protect.sh 的
+      #    resolve_amice_bundle 直接 exit 1 → 构建失败（这里还好，
+      #    属于 fail-fast 不是假绿，但会浪费一轮 CI）。
+      - name: 判定是否需要 Amice bundle（obfuscate 或 vmp）
         id: obf
         env:
           CFG: ${{ inputs.protect_config }}
@@ -704,12 +710,14 @@ jobs:
           except Exception:
               print('false'); raise SystemExit
           ob = d.get('obfuscate')
-          on = bool(ob.get('enabled')) if isinstance(ob, dict) else bool(ob)
-          print('true' if on else 'false')
+          obf_on = bool(ob.get('enabled')) if isinstance(ob, dict) else bool(ob)
+          vmp = d.get('vmp')
+          vmp_on = bool(vmp.get('enabled')) if isinstance(vmp, dict) else bool(vmp)
+          print('true' if (obf_on or vmp_on) else 'false')
           PY
           )
           echo "enabled=$flag" >> "$GITHUB_OUTPUT"
-          echo "代码混淆: $flag"
+          echo "需要 Amice bundle（obfuscate 或 vmp）: $flag"
 
       - name: 取 Amice bundle（复用缓存）
         if: steps.obf.outputs.enabled == 'true'
