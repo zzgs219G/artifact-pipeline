@@ -174,20 +174,23 @@ static void siglog(const char *prio, const char *fmt, ...) {
  * 775 行【之前】——宏必须先于使用点定义。故上移，两处共用同一份。#if 条件
  * 不变，行为与原先完全一致。 */
 #if defined(NC_GUARD_SECTIONED) && !defined(SIGCHECK_HOST_TEST)
-/* ⚠️ 2026-11-11：去掉 retain / used，改为只靠 section + noinline。
+/* ⚠️ 2026-11-11 二次修正：`used, retain` 必须保留。
  *
- * 原因：clang 会把 `used` / `retain` 变成 IR 的 @llvm.used 表，
- * 表里存的是 `ptr @func` —— 即函数地址引用。而 Amice 的 VMP
- * （vm_virtualize/mod.rs:1067 has_unsupported_function_uses）
- * 只豁免「直接调用」和「@llvm.global.annotations」，
- * @llvm.used 会被判 non-call address use → 该函数 VMP 静默跳过。
+ * 历史（同一天踩的坑，记下来防复发）：
+ *   第一版为了绕开「@llvm.used 让 Amice 跳过 VMP」，把 used/retain 删了，
+ *   以为「section 属性本身就能防死代码删除」。
+ *   **这是错的**：实测 `.ncx` 里的那些函数成了没人调用的死代码副本，
+ *   真正执行的是 `.text` 里另一份 —— 「VMP 报成功但加密段毫无变化」。
+ *   （`--gc-sections` 的判据是「有没有被引用」，不是「有没有 section」）
  *
- * 实测（本地 check-vmp-eligibility.py + 真构建 RUST_LOG=amice=debug）：
- *   带 used/retain 时，sig_check.c 的 4 个标段函数全部因 @llvm.used 被跳过。
+ * 现在的做法：
+ *   · 这里恢复 used + retain（函数一定被保留、不被 gc、不被优化掉）
+ *   · Amice 侧豁免 `@llvm.used`（本 fork 的 reaches_allowed_aggregate）：
+ *     `@llvm.used` 的语义是「别删这个符号」，不是「取地址去用」，
+ *     与 VMP 不冲突。上游把它当 non-call address use 是过严了。
  *
- * 安全性：section 归属本身已防死代码删除（段被锁箱器引用，
- * --gc-sections 不会回收有 section 属性的符号），noinline 防内联，
- * 所以去掉 used/retain 不影响"函数被保留"这个原始目的。 */
+ * 两条合起来才成立：used 保函数、amice 认 used。
+ * 只做前一条 → VMP 跳过；只做后一条 → 函数被 gc。 */
 #  if defined(NC_AMICE_VMP)
 /* --vmp 开启时同时请求 VMP 虚拟化。
  * ⚠️ 必须由定义宏控制而不是无条件加：没装 amice 插件时
@@ -196,9 +199,11 @@ static void siglog(const char *prio, const char *fmt, ...) {
  * ⚠️ 注解里不写 vm_profile_path —— 那会多一个字符串常量引用；
  *    profile 由环境变量 AMICE_VM_PROFILE_PATH 提供。 */
 #    define SIG_SEC_MARKED \
-       __attribute__((section(NC_SEC_CODE), noinline, annotate("+vm_virtualize")))
+       __attribute__((section(NC_SEC_CODE), used, retain, noinline, \
+                      annotate("+vm_virtualize")))
 #  else
-#    define SIG_SEC_MARKED __attribute__((section(NC_SEC_CODE), noinline))
+#    define SIG_SEC_MARKED \
+       __attribute__((section(NC_SEC_CODE), used, retain, noinline))
 #  endif
 #else
 #  define SIG_SEC_MARKED
