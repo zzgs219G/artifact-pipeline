@@ -670,47 +670,54 @@ static int find_apk_path(char *out, size_t outlen) {
  * 从 APK 文件中提取 v2/v3 签名块里第一张证书的 DER 字节。
  * 成功返回 malloc 的缓冲区（调用者 free）与长度。
  */
+/* ── 拆分说明（2026-11-11，为过 Amice VMP 的 32 寄存器预算）───────
+ *
+ * 原来 extract_cert_der 一个函数里做三件事，同时活跃值 values=17，
+ * 加上 5 个 temp 后 free=0 → VMP 直接跳过（register pressure）。
+ *
+ * 拆成三个小函数，每个只用 5~8 个值：
+ *   sig_find_eocd       从文件尾找 EOCD（读 22 字节 + 循环）
+ *   sig_read_v2block    定位 Signing Block + 遍历 pair 取 v2/v3
+ *   sig_parse_first_cert  解析 signer 结构，取出第一张证书
+ *   extract_cert_der      调度器（本人只剩 3 个变量）
+ *
+ * ⚠️ 日志打点位置与文案一字未动 —— 那些是 LSG/LSGS 密文标记，
+ *    由 make-sig-log.py 扫描生成，改了会导致 sign 校验文案错乱。
+ *
+ * ⚠️ 所有子函数必须 noinline：-Oz 会把它们内联回去，拆分失效
+ *    （nox 的 ncg_stub_recover 拆四次时踩过同一个坑）。
+ */
+
+/* 找 EOCD（End of Central Directory）。成功把 22 字节 EOCD 写进 out，返回 0。 */
 SIG_SEC_MARKED
-static int extract_cert_der(int fd, unsigned char **out_der, size_t *out_len) {
-    off_t fsize;
-    unsigned char eocd[22];
+static int sig_find_eocd(int fd, off_t fsize, unsigned char out[22]) {
     off_t search_start, pos;
-    unsigned long long cd_off;
-    unsigned char magic[16];
-    unsigned long long block_size;
+    if (fsize < 22) return -1;
+
+    /* 1. 从尾部 64KB+22 范围内找 EOCD（PK\x05\x06） */
+    search_start = (fsize > 65557) ? (fsize - 65557) : 0;
+    for (pos = fsize - 22; pos >= search_start; pos--) {
+        if (read_at(fd, out, 22, pos) != 0) return -1;
+        if (out[0] == 0x50 && out[1] == 0x4b && out[2] == 0x05 && out[3] == 0x06) break;
+    }
+    if (pos < search_start) return -1;
+    return 0;
+}
+
+/* 定位 APK Signing Block 并取出 v2/v3 块内容。成功返回长度（>0）。 */
+SIG_SEC_MARKED
+static int sig_read_v2block(int fd, off_t cd_off,
+                            unsigned char magic[16], unsigned char **out_value) {
     off_t block_start, pair_pos;
+    unsigned long long block_size;
+    unsigned char sz8[8];
     unsigned char header[12];
     unsigned long long block_id = 0;
     unsigned char *value = NULL;
     int found = -1;
 
-    fsize = lseek(fd, 0, SEEK_END);
-    if (fsize < 22) return -1;
-
-    /*LSG:BLK_START|【流程】开始解析 APK Signing Block(找 EOCD)*/
-    LSGD(LSG_BLK_START, "fsize=%ld", (long)fsize);
-
-    /* 1. 从尾部 64KB+22 范围内找 EOCD（PK\x05\x06） */
-    search_start = (fsize > 65557) ? (fsize - 65557) : 0;
-    for (pos = fsize - 22; pos >= search_start; pos--) {
-        if (read_at(fd, eocd, 22, pos) != 0) return -1;
-        if (eocd[0] == 0x50 && eocd[1] == 0x4b && eocd[2] == 0x05 && eocd[3] == 0x06) break;
-    }
-    if (pos < search_start) return -1;
-
-    cd_off = rd32le(eocd + 16);
-    if (cd_off == 0 || cd_off == 0xffffffffULL) return -1; /* 空/zip64 不支持 */
-
-    /* 2. CD 前应紧邻 Signing Block 尾部：magic 在 cd_off-16。
-     * AOSP 布局: [size-payload(8)][pairs...][size-total(8)][magic(16)]
-     * 尾部 size-total = pairs + 尾部 24 字节，整块 = size-total + 头部 8 字节，
-     * 块起点 = cd_off - size_total - 8。（实测部分签名工具头尾两字段写相同值，
-     * 故不校验头部 size-payload，定位以尾部字段为准） */
     if ((off_t)cd_off < 32) return -1;
     if (read_at(fd, magic, 16, (off_t)cd_off - 16) != 0) return -1;
-    /* 2026-10-20：magic 改为运行期从 LSGS 密文解码（此前是裸数组，
-     * strings 一条命令即中 "APK Sig Block 42"）。缓冲区开在栈上、
-     * 每次比较现解——本函数只在构造期跑一次，成本可忽略。 */
     {
         unsigned char want[17];   /* 16 magic + 1 NUL（lsg_s 是 C 字符串语义，见上） */
         const unsigned char *wm = sig_block_magic(want);
@@ -721,11 +728,8 @@ static int extract_cert_der(int fd, unsigned char **out_der, size_t *out_len) {
 /*LSGS:BLK_MAGIC2|APK Sig Block 42*/
     LSGI0(LSG_BLK_MAGIC_OK);
 
-    {
-        unsigned char sz8[8];
-        if (read_at(fd, sz8, 8, (off_t)cd_off - 24) != 0) return -1;
-        block_size = rd64le(sz8);
-    }
+    if (read_at(fd, sz8, 8, (off_t)cd_off - 24) != 0) return -1;
+    block_size = rd64le(sz8);
     if ((off_t)(block_size + 8) > cd_off) return -1;
     block_start = (off_t)cd_off - 8 - (off_t)block_size;
 
@@ -750,59 +754,89 @@ static int extract_cert_der(int fd, unsigned char **out_der, size_t *out_len) {
         pair_pos += 8 + (off_t)pair_len;
     }
     if (found < 0) return -1;
+    *out_value = value;
+    return found;
+}
+
+/* 从 v2/v3 块内容解析出第一张证书的 DER（malloc，调用者 free）。成功返回 0。 */
+SIG_SEC_MARKED
+static int sig_parse_first_cert(const unsigned char *value, int found,
+                                unsigned char **out_der, size_t *out_len) {
+    const unsigned char *p = value;
+    const unsigned char *end = value + found;
+    unsigned int signer_len, sd_len, digests_len, certs_len, cert_len;
+    const unsigned char *signer, *sd, *certs;
 
     /*
-     * 4. 解析 signer 结构（所有长度均为 uint32 LE 前缀）：
-     *    value = [len signers][signer...]
-     *    signer = [len][signed_data][len signatures][len public_key]
-     *    signed_data = [len digests][len certificates][len additional]
-     *    certificates = [len cert1][...]
+     * 解析 signer 结构（所有长度均为 uint32 LE 前缀）：
+     *   value = [len signers][signer...]
+     *   signer = [len][signed_data][len signatures][len public_key]
+     *   signed_data = [len digests][len certificates][len additional]
+     *   certificates = [len cert1][...]
      */
+    p += 4;                                     /* signers 区总长（无需使用） */
+    if (p + 4 > end) return -1;
+    signer_len = rd32le(p); p += 4;             /* 第一个 signer 的长度 */
+    if (p + signer_len > end) return -1;
+    signer = p;
+
+    /* signer 内部：signed_data */
+    if (signer + 4 > signer + signer_len) return -1;
+    sd_len = rd32le(signer); signer += 4;
+    sd = signer;
+    if (sd + sd_len > end) return -1;
+
+    /* signed_data 内部：跳过 digests，取 certificates */
+    if (sd + 4 > sd + sd_len) return -1;
+    digests_len = rd32le(sd); sd += 4;
+    if (sd + digests_len + 4 > sd + sd_len) return -1;
+    sd += digests_len;
+    certs_len = rd32le(sd); sd += 4;            /* certificates 区总长 */
+    certs = sd;
+
+    if (certs + 4 > certs + certs_len) return -1;
+    cert_len = rd32le(certs); certs += 4;       /* 第一张证书 DER */
+    if (cert_len == 0 || certs + cert_len > end) return -1;
+
+    *out_der = (unsigned char *)malloc(cert_len);
+    if (!*out_der) return -1;
+    memcpy(*out_der, certs, cert_len);
+    *out_len = cert_len;
+    return 0;
+}
+
+SIG_SEC_MARKED
+static int extract_cert_der(int fd, unsigned char **out_der, size_t *out_len) {
+    off_t fsize;
+    unsigned char eocd[22];
+    unsigned char magic[16];
+    unsigned char *value = NULL;
+    int found;
+
+    fsize = lseek(fd, 0, SEEK_END);
+    if (fsize < 22) return -1;
+
+    /*LSG:BLK_START|【流程】开始解析 APK Signing Block(找 EOCD)*/
+    LSGD(LSG_BLK_START, "fsize=%ld", (long)fsize);
+
+    if (sig_find_eocd(fd, fsize, eocd) != 0) return -1;
+
     {
-        const unsigned char *p = value;
-        const unsigned char *end = value + found;
-        unsigned int signer_len, sd_len, digests_len, certs_len, cert_len;
-        const unsigned char *signer, *sd, *certs;
-
-        p += 4;                                     /* signers 区总长（无需使用） */
-        if (p + 4 > end) goto fail;
-        signer_len = rd32le(p); p += 4;             /* 第一个 signer 的长度 */
-        if (p + signer_len > end) goto fail;
-        signer = p;
-
-        /* signer 内部：signed_data */
-        if (signer + 4 > signer + signer_len) goto fail;
-        sd_len = rd32le(signer); signer += 4;
-        if (signer + sd_len > signer - 4 + signer_len + 0) { /* 长度自洽性检查放在下面 */
-        }
-        sd = signer;
-        if (sd + sd_len > end) goto fail;
-
-        /* signed_data 内部：跳过 digests，取 certificates */
-        if (sd + 4 > sd + sd_len) goto fail;
-        digests_len = rd32le(sd); sd += 4;
-        if (sd + digests_len + 4 > sd + sd_len) goto fail;
-        sd += digests_len;
-        certs_len = rd32le(sd); sd += 4;            /* certificates 区总长 */
-        certs = sd;
-
-        if (certs + 4 > certs + certs_len) goto fail;
-        cert_len = rd32le(certs); certs += 4;       /* 第一张证书 DER */
-        if (cert_len == 0 || certs + cert_len > end) goto fail;
-
-        *out_der = (unsigned char *)malloc(cert_len);
-        if (!*out_der) goto fail;
-        memcpy(*out_der, certs, cert_len);
-        *out_len = cert_len;
-
-        free(value);
-        /*LSG:CERT_OK|【成功】证书 DER 提取成功*/
-        LSGI(LSG_CERT_OK, "der_len=%zu", *out_len);
-        return 0;
+        unsigned long long cd_off = rd32le(eocd + 16);
+        if (cd_off == 0 || cd_off == 0xffffffffULL) return -1; /* 空/zip64 不支持 */
+        found = sig_read_v2block(fd, (off_t)cd_off, magic, &value);
     }
-fail:
+    if (found < 0) return -1;
+
+    if (sig_parse_first_cert(value, found, out_der, out_len) != 0) {
+        free(value);
+        return -1;
+    }
+
     free(value);
-    return -1;
+    /*LSG:CERT_OK|【成功】证书 DER 提取成功*/
+    LSGI(LSG_CERT_OK, "der_len=%zu", *out_len);
+    return 0;
 }
 
 /* ─────────────────────────── 校验主逻辑 ─────────────────────────── */
