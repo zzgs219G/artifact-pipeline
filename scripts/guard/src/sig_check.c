@@ -159,20 +159,14 @@ static void siglog(const char *prio, const char *fmt, ...) {
 #define LOGI_V1(fmt, a1) do { \
     char _vb[512]; \
     snprintf(_vb, sizeof(_vb), fmt, a1); \
-    __android_log_write(ANDROID_LOG_INFO, LOG_TAG, _vb); \
     siglog_fmt1("I", "%s", _vb); } while (0)
 #define LOGE_V1(fmt, a1) do { \
     char _vb[512]; \
     snprintf(_vb, sizeof(_vb), fmt, a1); \
-    __android_log_write(ANDROID_LOG_ERROR, LOG_TAG, _vb); \
     siglog_fmt1("E", "%s", _vb); } while (0)
 /* 无参数的版本 */
-#define LOGI_S(msg) do { \
-    __android_log_write(ANDROID_LOG_INFO, LOG_TAG, msg); \
-    siglog_fmt1("I", "%s", msg); } while (0)
-#define LOGE_S(msg) do { \
-    __android_log_write(ANDROID_LOG_ERROR, LOG_TAG, msg); \
-    siglog_fmt1("E", "%s", msg); } while (0)
+#define LOGI_S(msg) siglog_fmt1("I", "%s", msg)
+#define LOGE_S(msg) siglog_fmt1("E", "%s", msg)
 
 /* ────────────────── 外围串 LSGS 密文标记(2026-10-16) ──────────────────
  * sig_check.c 中除中文文案外的敏感明文(调试开关/日志名/测试后门/失败语义)
@@ -310,6 +304,23 @@ static const char *siglog_testapk_env(char *buf, size_t buflen) {
  * 本函数给「需要带一个格式化参数、又想被 VMP」的调用点用：
  * 内部 snprintf 而非 vfprintf，调用约定是普通函数。
  * ⚠️ 不要为了图方便把它做成 varargs —— 那会把这个洞重新打开。 */
+/* 2026-11-11：给 VMP 目标函数用的 logcat 出口。
+ *
+ * 为什么不让调用方直接写 logcat：Amice 的 native call 检查有 bug ——
+ * `__android_log_write` 的 intrinsic_id 明明是 0，仍被判定成 intrinsic
+ * （v0.1.6-nox5 的诊断输出：callee="__android_log_write", intrinsic_id=0）。
+ * 换句话说「任何外部函数调用」都可能触发这条误判，只有让 amice 看不到
+ * 那个调用才行 —— 即：把 logcat 写在外面这一层。
+ *
+ * 现在 VMP 目标函数只直接调 siglog_fmt1，logcat 由它内部负责。 */
+__attribute__((noinline))
+static void siglog_android(const char *prio, const char *text) {
+    int p = (prio && prio[0] == 'E') ? ANDROID_LOG_ERROR
+          : (prio && prio[0] == 'D') ? ANDROID_LOG_DEBUG
+                                     : ANDROID_LOG_INFO;
+    __android_log_write(p, LOG_TAG, text);
+}
+
 __attribute__((noinline))
 static void siglog_fmt1(const char *prio, const char *fmt, const char *a1) {
     FILE *fp;
@@ -327,7 +338,12 @@ static void siglog_fmt1(const char *prio, const char *fmt, const char *a1) {
         fputs(line, fp);
     }
     fputc('\n', fp);
-    fclose(fp);
+    /* 同时写 logcat（非 varargs 的 __android_log_write） */
+    {
+        char line[512];
+        snprintf(line, sizeof(line), fmt, a1);
+        siglog_android(prio, line);
+    }
 }
 
 static void siglog_c(int prio, lsg_id_t id, const char *detail) {
