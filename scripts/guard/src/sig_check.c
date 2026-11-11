@@ -705,57 +705,71 @@ static int sig_find_eocd(int fd, off_t fsize, unsigned char out[22]) {
 }
 
 /* 定位 APK Signing Block 并取出 v2/v3 块内容。成功返回长度（>0）。 */
+/* 校验 Signing Block magic（同时把 16 字节读进 out_magic）。成功返回 0。 */
 SIG_SEC_MARKED
-static int sig_read_v2block(int fd, off_t cd_off,
-                            unsigned char magic[16], unsigned char **out_value) {
-    off_t block_start, pair_pos;
-    unsigned long long block_size;
-    unsigned char sz8[8];
-    unsigned char header[12];
-    unsigned long long block_id = 0;
-    unsigned char *value = NULL;
-    int found = -1;
+static int sig_check_block_magic(int fd, off_t cd_off, unsigned char out_magic[16]) {
+    unsigned char want[17];   /* 16 magic + 1 NUL（lsg_s 是 C 字符串语义，见上） */
+    const unsigned char *wm;
 
     if ((off_t)cd_off < 32) return -1;
-    if (read_at(fd, magic, 16, (off_t)cd_off - 16) != 0) return -1;
-    {
-        unsigned char want[17];   /* 16 magic + 1 NUL（lsg_s 是 C 字符串语义，见上） */
-        const unsigned char *wm = sig_block_magic(want);
-        if (wm == NULL || memcmp(magic, wm, 16) != 0) return -1; /* 无 v2/v3 签名 */
-    }
+    if (read_at(fd, out_magic, 16, (off_t)cd_off - 16) != 0) return -1;
+    wm = sig_block_magic(want);
+    if (wm == NULL || memcmp(out_magic, wm, 16) != 0) return -1; /* 无 v2/v3 签名 */
 
     /*LSG:BLK_MAGIC_OK|【成功】找到 APK Signing Block magic*/
 /*LSGS:BLK_MAGIC2|APK Sig Block 42*/
     LSGI0(LSG_BLK_MAGIC_OK);
+    return 0;
+}
 
-    if (read_at(fd, sz8, 8, (off_t)cd_off - 24) != 0) return -1;
-    block_size = rd64le(sz8);
-    if ((off_t)(block_size + 8) > cd_off) return -1;
-    block_start = (off_t)cd_off - 8 - (off_t)block_size;
+/* 遍历 ID-value pairs，取出 v2/v3 块内容。成功返回长度（>0）。 */
+SIG_SEC_MARKED
+static int sig_scan_pairs(int fd, off_t cd_off, off_t block_start,
+                          unsigned long long block_size, unsigned char **out_value) {
+    off_t pair_pos;
+    unsigned char header[12];
+    unsigned char *value = NULL;
 
-    /* 3. 遍历 ID-value pairs，找 v2/v3 块 */
     pair_pos = block_start + 8;
     while (pair_pos + 12 <= (off_t)cd_off - 24) {
-        unsigned long long pair_len;
+        unsigned long long pair_len, block_id;
         if (read_at(fd, header, 12, pair_pos) != 0) break;
         pair_len = rd64le(header);            /* 长度含 id(4)+value */
         block_id = (unsigned long long)rd32le(header + 8);
         if (pair_len < 4 || pair_len > block_size) break;
         if (block_id == V2_BLOCK_ID || block_id == V3_BLOCK_ID) {
             unsigned long long vlen = pair_len - 4;
+            int found;
             value = (unsigned char *)malloc(vlen);
             if (!value) return -1;
             if (read_at(fd, value, vlen, pair_pos + 12) != 0) { free(value); return -1; }
             found = (int)vlen;
             /*LSG:BLK_ID_OK|【成功】命中 v2/v3 签名块,读取 signer 数据*/
             LSGI(LSG_BLK_ID_OK, "id=0x%llx len=%d", (unsigned long long)block_id, found);
-            break;
+            *out_value = value;
+            return found;
         }
         pair_pos += 8 + (off_t)pair_len;
     }
-    if (found < 0) return -1;
-    *out_value = value;
-    return found;
+    return -1;
+}
+
+/* 定位 Signing Block 并取出 v2/v3 块内容。成功返回长度（>0）。 */
+SIG_SEC_MARKED
+static int sig_read_v2block(int fd, off_t cd_off,
+                            unsigned char magic[16], unsigned char **out_value) {
+    off_t block_start;
+    unsigned long long block_size;
+    unsigned char sz8[8];
+
+    if (sig_check_block_magic(fd, cd_off, magic) != 0) return -1;
+
+    if (read_at(fd, sz8, 8, (off_t)cd_off - 24) != 0) return -1;
+    block_size = rd64le(sz8);
+    if ((off_t)(block_size + 8) > cd_off) return -1;
+    block_start = (off_t)cd_off - 8 - (off_t)block_size;
+
+    return sig_scan_pairs(fd, cd_off, block_start, block_size, out_value);
 }
 
 /* 从 v2/v3 块内容解析出第一张证书的 DER（malloc，调用者 free）。成功返回 0。 */
