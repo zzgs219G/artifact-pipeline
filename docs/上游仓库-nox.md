@@ -8,6 +8,14 @@
 >
 > ⚠️ 与源码冲突时以源码为准。本文的每一条都能用 `ls` / `git ls-files` 复核。
 
+> 📌 **2026-11-11 补充：Amice bundle 已改为自己的 fork。**
+> 我们用的不是上游 `fuqiuluo/amice` 原版，而是 `zzgs219G/amice` 的
+> `v0.1.6-nox3`（4 个补丁：保 section / 裁剪 CI / 跳过 JNI_OnLoad /
+> `AMICE_VM_ONLY_ANNOTATED`）。
+> **完整记录见 [`so层防御/amice-fork改造记录.md`](./so层防御/amice-fork改造记录.md)** ——
+> 包括每个补丁对应的一次真机崩溃、实测数据、以及 VMP 覆盖率只有 5/9 的原因。
+> 改 amice 或换 bundle 版本前必读。
+
 ---
 
 ## 0. 三十秒定位
