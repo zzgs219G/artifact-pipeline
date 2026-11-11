@@ -450,11 +450,22 @@ static void nc_ensure_key(void)
      *   在 .text 里生成明文立即数 —— 那样等于绕过整个段加密。
      *   与 nox 的 ncg_stub_slot 同一手法（见 nox AGENTS.md §2.3 的教训）。
      *
+     * ⚠️⚠️ 必须用 .ncxr 而不是 .ncx（2026-11-11 实测踩坑）：
+     *   .ncx 是 AXR（可执行）段。把【可写】数据塞进去，链接器会把整个
+     *   LOAD 段标成 RWE —— Android 14+ 直接拒绝加载：
+     *     UnsatisfiedLinkError: dlopen failed: "libnc.so" has load segments
+     *     that are both writable and executable
+     *   实测：改成 .ncx 后应用启动即崩，连 constructor 都没跑到。
+     *   .ncxr 是 AWR（可写不可执行），本来就是给常量/数据用的，
+     *   而且锁箱器同样会加密它（protect.sh 的 --section .ncx,.ncxr）。
+     *
+     *   这正是 nox AGENTS.md §2.2 的硬约束：「数据段不能用 .ncx」。
+     *
      * 为什么这里安全（时序）：
      *   本函数由【首次解密调用】惰性触发，晚于 constructor(50) 解锁 .ncx。
      *   不在 JNI_OnLoad 期读。 */
     static uint8_t nc_strdec_key_cipher[NC_STRDEC_KEYLEN]
-        __attribute__((section(".ncx"), used, retain)) = NC_STRDEC_KEY_BYTES;
+        __attribute__((section(".ncxr"), used, retain)) = NC_STRDEC_KEY_BYTES;
 #endif
 
     static volatile int done = 0;
