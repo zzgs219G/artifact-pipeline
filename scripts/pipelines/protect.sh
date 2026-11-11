@@ -154,25 +154,28 @@ WANT_DEX2C_STATIC_REG=0
 # 依赖：必须配 --dex2c-static-register（动态注册的 JNINativeMethod 表取了
 #   函数地址，Amice 会静默跳过，见该变量处注释）。
 WANT_VMP=0
-# NC_VMP_CSTUB（2026-11-11）：是否给 stringenc 的算法层（nc_strdec.c 的
-# 5 个函数）打 VMP 注解。默认 0 = 不打。
+# NC_VMP_CSTUB（2026-11-11）：是否给 stringenc 的【密钥流函数】打 VMP 注解。
+# 默认 1 = 打（只打 3 个最值钱的，不是全部 6 个 —— 见下）。
 #
-# 为什么默认关：真机实测（sigcheck+dex2c+stringenc+vmp，splitmix64 与
-# chacha20 两档都试过）应用启动页 SIGSEGV/SEGV_ACCERR，栈溢出：
-#   guard page 0x...e000-0x...f000 权限 ---
-#   崩溃 sp 恰在 guard page 上边界（再压 16B 即越界）
-#   x29 与 sp 相差整整 1.01MB
-#   5 次崩溃 fault addr 低位恒为 0xff0/0xff8（页尾）
-# 而同一份代码只 VMP sigcheck（derive_expected）则完全正常。
+# 选哪三个（攻防口径，不是按代码量）：
+#   nc_block_ks              splitmix64 密钥流块生成
+#   nc_chacha20_keystream64  ChaCha20 密钥流（当前生产档）
+#   nc_mix64                 splitmix64 终混合
+#   这三个决定「能不能解密全部字符串」—— 拿到密钥流算法 = 全包沦陷。
+#   不选的三个不值得：b64_decode / utf8_to_utf16 是公开编码算法，
+#   decrypt 只是装配流程（真正的秘密在密钥流里）。
+#
+# 为什么不一刀切全上（2026-11-11 真机实测）：
+#   6 个函数一起 VMP → 启动页 SIGSEGV/SEGV_ACCERR 栈溢出（Amice 的
+#   spill frame 是栈分配，ART 线程池线程只有约 1MB 栈）。只挑 3 个密钥流
+#   函数（代码短、局部变量少、寄存器需求低）风险小得多。
 #
 # ⚠️ 这不是「stringenc 不能 VMP」的普适结论 —— nox 自己的解密链 14 个
-# 函数全上 VMP 且真机可用。差别在字节码规模：那 5 个函数含 Base64 4-way、
-# UTF-8 解码、密钥流，字节码远长于 nox 那些 19~31 条指令的小函数，
-# 且 nc_strdec_decrypt → nc_block_ks → nc_mix64 是嵌套 VMP 调用。
-# 根因待查（dispatcher 区段内 61 处 bl 回自身，疑似 handler 递归分派）。
+# 函数全上 VMP 且真机可用。差别在字节码规模：Base64 4-way、UTF-8 解码
+# 那几个字节码远长于 nox 那些 19~31 条指令的小函数。
 #
-# 设 1 可重现旧行为，用于后续定位根因。
-NC_VMP_CSTUB=0
+# 设 0 可整体关闭（回到"algorithm 层只受锁箱保护"）。
+NC_VMP_CSTUB=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sigcheck) WANT_SIGCHECK=1; shift ;;
@@ -1392,17 +1395,30 @@ if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
   # 14 个函数全上 VMP 且真机可用。差别在字节码规模：这里 5 个函数
   # 含 Base64/UTF-8/密钥流，字节码远长于 nox 那些 19~31 条指令的小函数。
   # 根因待查（dispatcher 内 61 处 bl 回自身，疑似递归分派）。
-  _CSTUB_ANN=()
   if [[ $WANT_VMP -eq 1 && "$NC_VMP_CSTUB" == "1" ]]; then
-    _CSTUB_ANN=(--annotate '+vm_virtualize')
-    echo "[mark] VMP: 纯 C 桩算法层同步打 +vm_virtualize（实验开关已开）"
+    echo "[mark] VMP: 密钥流函数稍后单独打注解（NC_VMP_CSTUB=1）"
   elif [[ $WANT_VMP -eq 1 ]]; then
     echo "[mark] VMP: 纯 C 桩算法层【不】打注解（NC_VMP_CSTUB=0，实测真机栈溢出）"
   fi
+  # 一次调用同时做两件事（2026-11-11 改）：
+  #   --pattern           → 6 个算法函数全部进 .ncx（受锁箱保护）
+  #   --annotate-pattern  → 只有 3 个密钥流函数追加 VMP 注解
+  #
+  # 为什么不分成两次调用：so_section_mark 的幂等判断会认为"已标过段"，
+  # 第二次补 annotate 时命中 0 个（实测）。工具明确写着"不做增量补注，
+  # 同一函数请一次标全"，所以加了 --annotate-pattern 参数来支持
+  # "一次调用、不同函数不同 annotation"。
+  _MARK_ARGS=()
+  if [[ $WANT_VMP -eq 1 && "$NC_VMP_CSTUB" == "1" ]]; then
+    _MARK_ARGS=(
+      --annotate '+vm_virtualize'
+      --annotate-pattern '^[ \t]*(?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_block_ks|nc_chacha20_keystream64|nc_mix64)[ \t]*\('
+    )
+  fi
   python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec.c" \
-    --pattern '^[ \t]*((?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_strdec_decrypt|nc_strdec_b64_decode|nc_strdec_utf8_to_utf16|nc_block_ks|nc_mix64)[ \t]*\()' \
+    --pattern '^[ \t]*((?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_strdec_decrypt|nc_strdec_b64_decode|nc_strdec_utf8_to_utf16|nc_block_ks|nc_mix64|nc_chacha20_keystream64)[ \t]*\()' \
     --section .ncx \
-    "${_CSTUB_ANN[@]+"${_CSTUB_ANN[@]}"}" \
+    "${_MARK_ARGS[@]+"${_MARK_ARGS[@]}"}" \
     -v 2>&1 | sed 's/^/  [mark] /' || {
     echo "❌ 纯 C 解密桩段标记失败 —— 算法将以明文留在 .text" >&2
     exit 1
@@ -1415,8 +1431,8 @@ if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
   # 写成 section("\\.ncx") → grep 收到 \.ncx → 一个都匹配不到 → 假红）。
   _cstub_marked=$(grep -cF 'section(".ncx")' "$_cstub_jni_dst/nc_strdec.c" 2>/dev/null || true)
   _cstub_marked="${_cstub_marked:-0}"
-  if [[ -z "$_cstub_marked" || "$_cstub_marked" -lt 5 ]]; then
-    echo "❌ 纯 C 桩段标记只命中 ${_cstub_marked:-0} 处（应为 5：decrypt/b64_decode/utf8/block_ks/mix64）" >&2
+  if [[ -z "$_cstub_marked" || "$_cstub_marked" -lt 6 ]]; then
+    echo "❌ 纯 C 桩段标记只命中 ${_cstub_marked:-0} 处（应为 6：decrypt/b64_decode/utf8/block_ks/mix64/chacha20_keystream64）" >&2
     echo "   → nc_strdec.c 的函数头形态变了，正则已脱节" >&2
     echo "   → 不许静默放行：那等于算法以明文进产物" >&2
     exit 1
