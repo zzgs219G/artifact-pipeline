@@ -73,6 +73,14 @@ int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
     va_end(ap);
     return 0;
 }
+/* 2026-11-11：sig_check.c 的 VMP 友好日志宏改用 __android_log_write
+ * （非 varargs —— __android_log_print 是 varargs，会让 Amice 跳过整个函数）。
+ * host 端同样需要 stub。 */
+int __android_log_write(int prio, const char *tag, const char *text) {
+    (void)tag; (void)prio;
+    fputs(text, stderr);
+    return 0;
+}
 extern void sig_verify_test(void);
 int main(int argc, char **argv) {
     sig_verify_test();

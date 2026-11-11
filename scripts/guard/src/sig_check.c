@@ -138,23 +138,40 @@ static void siglog(const char *prio, const char *fmt, ...) {
                        siglog("E", __VA_ARGS__); } while (0)
 
 /* ── VMP 友好版（2026-11-11）────────────────────────────────────────
- * 只走 siglog_fmt1（非 varargs），**不碰 siglog**。
- * 用于「所在函数要被 VMP」的日志点：siglog 是 varargs，内含
- * llvm.va_start/va_end，Amice 会把调用它的函数整体跳过。
+ * 供「所在函数要被 VMP」的日志点使用。
  *
- * 全部用 do-while + 条件判断，与 LOGI/LOGE 的调用点写法保持兼容。 */
+ * ⚠️⚠️ 两个 varargs 都要避开，缺一不可：
+ *   ① siglog(prio, fmt, ...)          → llvm.va_start intrinsic
+ *   ② __android_log_print(prio, tag, fmt, ...)  → 同样是 varargs 签名
+ *
+ * 实测（2026-11-11，真构建 RUST_LOG=amice=debug）：
+ *   含 __android_log_print 的函数 100% 被跳过，理由却是
+ *   "LLVM intrinsic calls are not supported"（文案不提 varargs，极易查错方向）：
+ *     sig_verify      1 处调用 → 跳过
+ *     sig_collect_fp  3 处调用 → 跳过
+ *     sig_compare_fp  1 处调用 → 跳过
+ *   而 0 处调用的 6 个子函数（extract_cert_der 那一批）全部 VMP 成功。
+ *
+ * 改用 __android_log_write(prio, tag, text)：签名是三个指针，**非 varargs**。
+ * 信息先在栈上 snprintf 拼好，再分别写 logcat 与文件。
+ *
+ * ⚠️ 不要为了图方便改回 LOGI/LOGE —— 那会把这个洞重新打开。 */
 #define LOGI_V1(fmt, a1) do { \
-    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, fmt, a1); \
-    siglog_fmt1("I", fmt, a1); } while (0)
+    char _vb[512]; \
+    snprintf(_vb, sizeof(_vb), fmt, a1); \
+    __android_log_write(ANDROID_LOG_INFO, LOG_TAG, _vb); \
+    siglog_fmt1("I", "%s", _vb); } while (0)
 #define LOGE_V1(fmt, a1) do { \
-    __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, fmt, a1); \
-    siglog_fmt1("E", fmt, a1); } while (0)
-/* 无参数的版本：直接给个常量串，不经过 siglog */
+    char _vb[512]; \
+    snprintf(_vb, sizeof(_vb), fmt, a1); \
+    __android_log_write(ANDROID_LOG_ERROR, LOG_TAG, _vb); \
+    siglog_fmt1("E", "%s", _vb); } while (0)
+/* 无参数的版本 */
 #define LOGI_S(msg) do { \
-    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "%s", msg); \
+    __android_log_write(ANDROID_LOG_INFO, LOG_TAG, msg); \
     siglog_fmt1("I", "%s", msg); } while (0)
 #define LOGE_S(msg) do { \
-    __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", msg); \
+    __android_log_write(ANDROID_LOG_ERROR, LOG_TAG, msg); \
     siglog_fmt1("E", "%s", msg); } while (0)
 
 /* ────────────────── 外围串 LSGS 密文标记(2026-10-16) ──────────────────
