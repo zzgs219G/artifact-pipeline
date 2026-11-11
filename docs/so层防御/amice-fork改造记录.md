@@ -248,34 +248,32 @@ LOGI_S / LOGE_S                // 常量串版本
 
 ## 5. 当前的防护矩阵（2026-11-11 最终状态）
 
-### 5.1 哪些函数有什么保护（2026-11-11 拆函数后）
+### 5.1 哪些函数有什么保护（2026-11-11 最终）
 
 | 函数 | 做什么 | 锁箱 | VMP |
 |---|---|---|---|
 | **`nc_strdec_key_cipher`**（8 字节密钥） | **解密全部字符串的种子** | ✅ `.ncxr` | — 数据不能 VMP |
 | **`derive_expected`** | **签名标准答案的派生** | ✅ `.ncx` | ✅ |
-| `nc_block_ks` | splitmix64 密钥流 | ✅ `.ncx` | ✅ |
-| `nc_mix64` | splitmix64 终混合 | ✅ `.ncx` | ✅ |
-| `sig_find_eocd` | 找 EOCD（拆出来的） | ✅ `.ncx` | ✅ |
+| `nc_block_ks` | 密钥流块（chacha20 档） | ✅ `.ncx` | ✅（未出现在 skip 日志） |
+| `sig_find_eocd` | 找 EOCD | ✅ `.ncx` | ✅ |
 | `sig_check_block_magic` | 校验 Signing Block magic | ✅ `.ncx` | ✅ |
 | `sig_scan_pairs` | 遍历 ID-value pairs | ✅ `.ncx` | ✅ |
 | `sig_read_v2block` | 定位 Signing Block | ✅ `.ncx` | ✅ |
 | `sig_parse_first_cert` | 解析 signer，取证书 | ✅ `.ncx` | ✅ |
 | `extract_cert_der` | 上述五者的调度器 | ✅ `.ncx` | ✅ |
-| `sig_compare_fp` | 派生 + 比对 | ✅ `.ncx` | ❌ intrinsic（varargs 残留） |
-| `sig_collect_fp` | 定位+提取+SHA256 | ✅ `.ncx` | ❌ 同上 |
-| `sig_verify` | 调度器（3 个变量） | ✅ `.ncx` | ❌ 同上（但已无业务逻辑） |
+| `sig_collect_fp` | 定位+提取+SHA256 | ✅ `.ncx` | ✅ |
+| `sig_compare_fp` | 派生 + 比对 | ✅ `.ncx` | ✅ |
+| `sig_verify` | 调度器 | ✅ `.ncx` | ✅ |
+| `find_apk_path` | 从 maps 定位 APK | ✅ `.ncx` | ✅ |
 | `nc_chacha20_keystream64` | ChaCha20 密钥流 | ✅ `.ncx` | ❌ 寄存器超限 |
-| `find_apk_path` | 从 maps 定位 APK | ✅ `.ncx` | ❌ 取自身地址 |
 | `nc_strdec_decrypt` / `b64_decode` / `utf8_to_utf16` | 公开编码算法 | ✅ `.ncx` | 不需要（公开算法） |
 
-**VMP 覆盖率 6/16**（拆函数前是 3/10）。覆盖面：
-- 签名答案派生（`derive_expected`）
-- splitmix64 密钥流（`nc_block_ks` / `nc_mix64`）
-- **整个 APK 签名块解析链**（6 个函数，拆出来的）
+**sigcheck 侧 VMP 覆盖率 10/10（100%）。** 唯一未覆盖的是
+`nc_chacha20_keystream64`（16 个 uint32 状态塞不进 32 个 VM 寄存器）。
 
 **密钥本身仍是「锁箱 + 不能 VMP」** —— 数据段无法虚拟化。
 
+### 5.2 产物指标
 ### 5.2 产物指标
 ### 5.2 产物指标
 
@@ -325,7 +323,7 @@ LOGI_S / LOGE_S                // 常量串版本
 把字节码搬进 `.ncxr`。**注意**：搬进去之后，需要确认 dispatcher 能读到
 （`.ncxr` 是 RW-，可读，所以理论可行）。
 
-### 7.2 覆盖率：拆函数后从 3/10 提到 6/10
+### 7.2 覆盖率：拆函数后 3/10 → 10/10
 
 `values=21` 被跳过不是原理限制，是**工程问题** —— 拆函数就能解决。
 nox 自己的 `ncguard_stub_recover` 当初 `values=22`，拆了四次才过。
@@ -339,6 +337,9 @@ nox 自己的 `ncguard_stub_recover` 当初 `values=22`，拆了四次才过。
 
 （`alloca` 数 ≈ 局部变量数，Amice 的 `values` 统计口径更大，但量级一致）
 
+**最终结果：sigcheck 侧 10/10 全部 VMP**（`42989325068` 实测），
+最后一个障碍不是寄存器而是 Amice 的 intrinsic 误判，见 §7.2.1。
+
 #### 三个必须记住的拆分纪律
 
 **① 一次拆不够是常态。** 首次拆 `extract_cert_der` 后，
@@ -351,9 +352,9 @@ nox 自己的 `ncguard_stub_recover` 当初 `values=22`，拆了四次才过。
 
 **③ 日志调用方式会决定能不能 VMP。** 见 §7.2.1。
 
-#### 7.2.1 varargs 的 `siglog` 会阻止 VMP（隐蔽）
+#### 7.2.1 Amice 的 intrinsic 判定有 bug（最隐蔽的一坑，跨三轮才定位）
 
-拆分后寄存器预算过了，但撞上新墙：
+拆完函数后的报错：
 
 ```
 skip function "sig_verify":     LLVM intrinsic calls are not supported
@@ -361,40 +362,57 @@ skip function "sig_collect_fp": LLVM intrinsic calls are not supported
 skip function "sig_compare_fp": LLVM intrinsic calls are not supported
 ```
 
-**报错文案是 "intrinsic 不支持"，真因却是 varargs。**
+**本地 IR 里这三个函数没有任何 `llvm.*` intrinsic 调用** —— 查了好几轮都找不到。
+前三轮的「修法」全部无效：
 
-`sig_check.c` 有两个日志函数：
+| 轮次 | 我以为是 | 做了什么 | 结果 |
+|---|---|---|---|
+| 1 | `siglog` 是 varargs | 新增 `siglog_fmt1` 换掉 `LOGE/LOGI` | ❌ 仍跳过 |
+| 2 | `__android_log_print` 也是 varargs | 换成 `__android_log_write` | ❌ 仍跳过 |
+| 3 | 拆函数不够 | 再拆 | ❌ 仍跳过 |
 
-| 函数 | 类型 | 被谁用 |
-|---|---|---|
-| `siglog(prio, fmt, ...)` | **varargs** | `LOGD/LOGI/LOGE` 宏 |
-| `siglog_c(prio, id, detail)` | 普通函数 | `LSGD/LSGI/LSGE` 宏 |
+**第四轮：给 amice 加诊断，把 callee 名字打出来**（`v0.1.6-nox5`）：
 
-`siglog` 内部 `va_start/vfprintf/va_end`，IR 里生成
-`llvm.va_start.p0` / `llvm.va_end.p0`。Amice 不支持含 varargs 的调用链，
-于是**把调用 `siglog` 的函数整体跳过**。
+```rust
+// translator.rs:8101
+if callee.get_intrinsic_id() != 0 || callee.is_llvm_function() {
+    bail!("LLVM intrinsic calls are not supported by vm_virtualize            (callee={:?}, intrinsic_id={})", ...);
+}
+```
 
-而 `extract_cert_der` 那批之所以能过，是因为它们**只用 LSG 系列**，
-没有直接用 `LOGE/LOGI` 宏。
+输出：
 
-**修法**：新增非 varargs 的 `siglog_fmt1` + `LOGI_V1/LOGE_V1/LOGI_S/LOGE_S`
-四个宏，把 VMP 目标函数里的 7 处 `LOGx` 换掉。
+```
+skip function "sig_verify": LLVM intrinsic calls are not supported by vm_virtualize
+  (callee="__android_log_write", intrinsic_id=0)
+```
 
-**教训**：Amice 的 skip 理由是**最后撞到的那面墙**，不是根因。
-寄存器过了才暴露 intrinsic，intrinsic 报错又指向 varargs ——
-必须拿 IR 逐层验，不能只看日志文案。
+**`intrinsic_id=0` 就是「不是 intrinsic」。** 所以是
+`callee.is_llvm_function()` 对 `__android_log_write` 返回了 true —— **Amice 误判**。
 
-#### 7.2.2 还没解决的三个
+**可复用的结论**：
+
+> **只要 VMP 目标函数直接调用外部库函数，就可能被这条误判打死。**
+> 换具体函数（`siglog` → `__android_log_print` → `__android_log_write`）
+> **解决不了问题** —— 必须改变调用层次，让 amice 看不到那个调用。
+
+**最终修法**（`8caaa95`）：新增 `siglog_android(prio, text)`，
+把 logcat 写在这一层；`siglog_fmt1` 内部调它。四个宏现在只剩
+`siglog_fmt1` 一个调用。
+
+**效果**：skip 列表从 5 条降到 1 条，`sig_verify` / `sig_collect_fp` /
+`sig_compare_fp` / **`find_apk_path`** 全部消失。
+
+**附带的第二个教训：`find_apk_path` 的 skip 是误报。**
+它的理由是 `function has non-call address uses`（确实 `dladdr(&self)`），
+但它是被 `sig_collect_fp` 拖累的 —— 父函数通过后自己就过了。
+**Amice 的 skip 理由会误报、会传播，不能当诊断依据。**
+
+#### 7.2.2 还没解决的
 
 | 函数 | 现状 | 判断 |
 |---|---|---|
 | `nc_chacha20_keystream64` | `values=6 spilled=2` | ChaCha20 是**公开规范**（RFC 8439），VMP 它价值低；且 16 字状态天然塞不进 32 寄存器 |
-| `sig_verify` / `sig_collect_fp` / `sig_compare_fp` | 仍报 intrinsic 不支持 | 拆完只剩流程控制，**真正逻辑已在子函数里**（那些已 VMP）。继续查的边际收益低 |
-| `find_apk_path` | 取自身地址（`dladdr`） | 要么把取地址移到调用方，要么放弃 |
-
-**关键认知**：`sig_verify` 拆完后自己只剩 3 个变量、无业务逻辑。
-**它 VMP 与否不影响防护强度** —— 秘密在已 VMP 的 `derive_expected` 和
-子函数里。
 
 ### 7.3 v7a 上 VMP 不完整
 
