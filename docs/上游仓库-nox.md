@@ -10,11 +10,14 @@
 
 > 📌 **2026-11-11 补充：Amice bundle 已改为自己的 fork。**
 > 我们用的不是上游 `fuqiuluo/amice` 原版，而是 `zzgs219G/amice` 的
-> `v0.1.6-nox3`（4 个补丁：保 section / 裁剪 CI / 跳过 JNI_OnLoad /
-> `AMICE_VM_ONLY_ANNOTATED`）。
+> **`v0.1.6-nox4`**（6 个补丁：保 section / 裁剪 CI / 跳过 JNI_OnLoad /
+> `AMICE_VM_ONLY_ANNOTATED` / 豁免 `@llvm.used` / `--annotate-pattern`）。
 > **完整记录见 [`so层防御/amice-fork改造记录.md`](./so层防御/amice-fork改造记录.md)** ——
-> 包括每个补丁对应的一次真机崩溃、实测数据、以及 VMP 覆盖率只有 5/9 的原因。
+> 包括 7 个真机事故的完整排查过程、防护矩阵、以及已知缺口。
 > 改 amice 或换 bundle 版本前必读。
+>
+> ⚠️ **最容易踩的一条**：代码进 `.ncx`（可执行），数据进 `.ncxr`（可写）。
+> 混放会生成 RWX 段，**Android 14+ 直接拒绝加载**（`UnsatisfiedLinkError`）。
 
 ---
 
