@@ -980,6 +980,19 @@ if [[ $WANT_VMP -eq 1 ]]; then
   #    无人发现，因为日志里只有"失败但继续"。
   export RUST_LOG="${RUST_LOG:-amice=debug}"
   log_info "RUST_LOG=amice=debug（用于捕获 VMP 的 skip function 日志）"
+  # ── AMICE_VM_ONLY_ANNOTATED（2026-11-11，本 fork 的补丁）─────────────
+  # 让 VMP 只处理【带 annotate("+vm_virtualize")】的函数，而不是全部。
+  #
+  # 为什么必须（实测数据）：AMICE_VM_VIRTUALIZE=true 是全局开关，
+  # default_config.enable 会传给每个无注解的函数（amice-macro/src/lib.rs:151），
+  # 于是所有函数都成候选。dex2c 引入 87 个引擎辅助函数后：
+  #   只 sigcheck+vmp:                .text 180,836 / 43 个函数 / 466KB
+  #   sigcheck+dex2c+stringenc+vmp:   .text 648,176 / 130 个函数 / 1,397KB
+  # 白涨 467KB，且启动页栈溢出（多余的 runtime 副本 + 深调用链）。
+  #
+  # 有了这个开关，NC_VMP_CSTUB 之类的"给谁打注解"才真正生效。
+  export AMICE_VM_ONLY_ANNOTATED=1
+  log_info "VMP 只处理带 annotate 的函数（AMICE_VM_ONLY_ANNOTATED=1）"
 fi
 
 # ── 纯 C 解密桩的源码（2026-11-09）────────────────────────────────
