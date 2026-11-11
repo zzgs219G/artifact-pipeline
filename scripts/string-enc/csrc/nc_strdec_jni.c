@@ -438,6 +438,25 @@ void nc_strdec_jni_set_key(JNIEnv *env, jclass clazz, jbyteArray key)
  */
 static void nc_ensure_key(void)
 {
+#if defined(NC_STRDEC_HAVE_CFG) && defined(NC_STRDEC_KEY_BYTES)
+    /* 密钥常量的存储位置（2026-11-11）：必须在文件作用域 + .ncx 段。
+     *
+     * 为什么不能在函数内 static const：
+     *   会编译进 .rodata【明文】。攻击者不必逆任何算法，直接读这 8 字节
+     *   种子，配公开的 splitmix64/ChaCha20 就能解开全部字符串。
+     *
+     * 为什么加 volatile：
+     *   -Oz 会把 const 数组的内容当编译期常量传播到使用点，
+     *   在 .text 里生成明文立即数 —— 那样等于绕过整个段加密。
+     *   与 nox 的 ncg_stub_slot 同一手法（见 nox AGENTS.md §2.3 的教训）。
+     *
+     * 为什么这里安全（时序）：
+     *   本函数由【首次解密调用】惰性触发，晚于 constructor(50) 解锁 .ncx。
+     *   不在 JNI_OnLoad 期读。 */
+    static uint8_t nc_strdec_key_cipher[NC_STRDEC_KEYLEN]
+        __attribute__((section(".ncx"), used, retain)) = NC_STRDEC_KEY_BYTES;
+#endif
+
     static volatile int done = 0;
     int expected = 0;
     if (nc_strdec_has_key()) {
@@ -491,8 +510,26 @@ static void nc_ensure_key(void)
 #if defined(NC_STRDEC_HAVE_CFG) && defined(NC_STRDEC_KEY_BYTES)
     /* ② 回退：编译期常量（仅未包壳时存在此宏） */
     if (!got) {
-        static const uint8_t k[NC_STRDEC_KEYLEN] = NC_STRDEC_KEY_BYTES;
-        nc_strdec_set_key(k);
+        /* ⚠️ 2026-11-11：密钥常量必须进 .ncx 加密段。
+         *
+         * 原来写成函数内 `static const uint8_t k[] = NC_STRDEC_KEY_BYTES;`
+         * —— 编译进 .rodata【明文】。攻击者不需要逆任何算法，
+         * 直接从 .rodata 捞出这 8 字节种子，用 RFC 上的 splitmix64/ChaCha20
+         * 就能解开全部字符串（算法是公开的，密钥才是秘密）。
+         *
+         * 现在提到文件作用域 + section(".ncx")：
+         *   · 段被锁箱器整段加密 → 磁盘上是密文
+         *   · 运行期 constructor(50) 解锁后明文可用
+         *
+         * 时序安全性：读取发生在 nc_ensure_key()，而它由【首次解密调用】
+         * 惰性触发（见 nc_strdec_jni.c 里 nc_strdec_jni_decrypt 的注释），
+         * 一定晚于 constructor(50) 的解锁。不在 JNI_OnLoad 期读。
+         *
+         * ⚠️ 用 const volatile：防 -Oz 把数组内容当编译期常量传播到
+         *    各使用点（那会在 .text 里生成明文立即数，绕过整个加密）。
+         *    与 nox 的 ncg_stub_slot 同一手法。 */
+        *(volatile uint8_t *)nc_strdec_key_cipher;   /* 阻止 -Oz 常量传播 */
+        nc_strdec_set_key(nc_strdec_key_cipher);
     }
 #else
     /* 走到这里 = 包壳且 ① 没拿到种子（或非 native 组合）。
