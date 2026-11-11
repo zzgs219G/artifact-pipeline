@@ -1080,14 +1080,100 @@ static void sig_kill_via(int variant) {
     pthread_attr_destroy(&attr);
 }
 
+/* ── 拆分说明（2026-11-11，为过 Amice VMP 的 32 寄存器预算）───────
+ *
+ * 原来 sig_verify 一个函数 values=21 + temps=1 → free=0 → VMP 跳过。
+ * 拆成「采集指纹」+「比对」+「调度」三段，每段变量数降到一个数量级以内。
+ *
+ * 三条纪律（与 extract_cert_der 的拆分相同）：
+ *   ① 日志文案一字未动（LSG/LSGS 是加密标记，改了会错乱）
+ *   ② 每个子函数都 SIG_SEC_MARKED（进 .ncx，且带 noinline 防内联）
+ *   ③ killvar 语义不变：失败分支自己决定走哪个处置变体
+ */
+
+/* 采集 APK 证书指纹：定位 → 打开 → 提取证书 → SHA256。
+ * 成功返回 0 并把 32 字节指纹写进 actual；失败返回该走的 killvar 变体（≥0）
+ * 或 -1 表示"环境异常类，走 variant 0"。 */
 SIG_SEC_MARKED
-static void sig_verify(void) {
+static int sig_collect_fp(unsigned char actual[32]) {
     char apk_path[1024];
     int fd;
     unsigned char *der = NULL;
     size_t der_len = 0;
-    unsigned char actual[32];
+
+    /*LSG:FIND_START|【流程】开始定位 APK 文件 find_apk_path*/
+    LSGI0(LSG_FIND_START);
+
+    if (find_apk_path(apk_path, sizeof(apk_path)) != 0) {
+        /* LSGS 密文化(2026-10-16):原文案直接暴露"这是签名校验"。 */
+        char m[64];
+        const char *mm = lsg_s(LSGS_ERR_APK_NOT_FOUND, m, sizeof(m));
+        if (mm) LOGE("%s", mm);
+        /*LSG:NOT_FOUND|【失败】三条定位路径(maps/so反推/data/app)全部失败*/
+        LSGE0(LSG_NOT_FOUND);
+        return -1;            /* 环境异常类 → variant 0 */
+    }
+
+    fd = open(apk_path, O_RDONLY);
+    if (fd < 0) {
+        LOGE("open apk failed: %s errno=%d(%s)", apk_path, errno, strerror(errno));
+        /*LSG:OPEN_ERR|【失败】打开 APK 失败 open()*/
+        LSGE(LSG_OPEN_ERR, "%s errno=%d", apk_path, errno);
+        return -1;            /* 环境异常类 → variant 0 */
+    }
+    /*LSG:OPEN_OK|【成功】APK 已打开*/
+    LSGI(LSG_OPEN_OK, "%s", apk_path);
+
+    if (extract_cert_der(fd, &der, &der_len) != 0) {
+        close(fd);
+        /* LSGS 密文化(2026-10-16):原文案暴露"这是签名校验"+教会攻击者怎么重签。 */
+        {
+            char m[128];
+            const char *mm = lsg_s(LSGS_ERR_NO_SIGN_BLOCK, m, sizeof(m));
+            if (mm) LOGE("%s: %s", mm, apk_path);
+        }
+        /*LSG:BLK_FAIL|【失败】签名块解析失败(无 v2/v3 或结构异常)*/
+        LSGE(LSG_BLK_FAIL, "%s", apk_path);
+        return -1;
+    }
+
+    sha256(der, der_len, actual);
+    free(der);
+    close(fd);
+    return 0;
+}
+
+/* 打印实际指纹（排障用）并做双轮派生比对。
+ * 返回 0 = 一致；非 0 = 不一致。 */
+SIG_SEC_MARKED
+static int sig_compare_fp(const unsigned char actual[32]) {
+    unsigned char expected[32];
     int i, mismatch = 0;
+
+    {
+        char hex[65];
+        static const char d[] = "0123456789abcdef";
+        for (i = 0; i < 32; i++) {
+            hex[i*2]   = d[actual[i] >> 4];
+            hex[i*2+1] = d[actual[i] & 15];
+        }
+        hex[64] = '\0';
+        LOGI("nc: fp=%s", hex);   /* so加固2026-10: 原文 "cert fp actual=%s",改缩写,fp=指纹(排障用) */
+        /*LSG:FP|【数据】实际证书指纹 actual_fp*/
+        LSGI(LSG_FP, "%s", hex);
+    }
+
+    /* [2026-10 改] 恒定时间比较:对实际指纹做双轮派生后与 SIG_HASH_STORED 比对
+     * (原来直接比明文 SIG_HASH;expected 含派生结果,still 恒定时间) */
+    derive_expected(actual, expected);
+    for (i = 0; i < 32; i++) mismatch |= expected[i] ^ SIG_HASH_STORED[i];
+    return mismatch;
+}
+
+SIG_SEC_MARKED
+static void sig_verify(void) {
+    unsigned char actual[32];
+    int i;
     int slot_configured = 0;
     /* 失败变体选择（2026-10-19 多出口）：缺省 2 = 最重处置，
      * 保证任何未显式设置的失败路径都不会被"轻处理"。 */
@@ -1109,73 +1195,12 @@ static void sig_verify(void) {
         return;
     }
 
-    /*LSG:FIND_START|【流程】开始定位 APK 文件 find_apk_path*/
-    LSGI0(LSG_FIND_START);
-
-    if (find_apk_path(apk_path, sizeof(apk_path)) != 0) {
-        /* LSGS 密文化(2026-10-16):原文案直接暴露"这是签名校验"。 */
-        {
-            char m[64];
-            const char *mm = lsg_s(LSGS_ERR_APK_NOT_FOUND, m, sizeof(m));
-            if (mm) LOGE("%s", mm);
-        }
-        /*LSG:NOT_FOUND|【失败】三条定位路径(maps/so反推/data/app)全部失败*/
-        LSGE0(LSG_NOT_FOUND);
+    if (sig_collect_fp(actual) != 0) {
         killvar = 0;          /* 环境异常类 → variant 0 */
         goto fail;
     }
 
-    fd = open(apk_path, O_RDONLY);
-    if (fd < 0) {
-        LOGE("open apk failed: %s errno=%d(%s)", apk_path, errno, strerror(errno));
-        /*LSG:OPEN_ERR|【失败】打开 APK 失败 open()*/
-        LSGE(LSG_OPEN_ERR, "%s errno=%d", apk_path, errno);
-        killvar = 0;          /* 环境异常类 → variant 0 */
-        goto fail;
-    }
-    /*LSG:OPEN_OK|【成功】APK 已打开*/
-    LSGI(LSG_OPEN_OK, "%s", apk_path);
-
-    if (extract_cert_der(fd, &der, &der_len) != 0) {
-        close(fd);
-        /* LSGS 密文化(2026-10-16):原文案暴露"这是签名校验"+教会攻击者怎么重签。 */
-        {
-            char m[64];
-            const char *mm = lsg_s(LSGS_ERR_NO_SIGN_BLOCK, m, sizeof(m));
-            if (mm) LOGE("%s: %s", mm, apk_path);
-        }
-        /*LSG:BLK_FAIL|【失败】无 v2/v3 签名块或解析失败(重签工具须启用 v2)*/
-        LSGE(LSG_BLK_FAIL, "%s", apk_path);
-        killvar = 1;          /* 畸形输入类 → variant 1 */
-        goto fail;
-    }
-
-    sha256(der, der_len, actual);
-    free(der);
-    close(fd);
-
-    {
-        char hex[65];
-        static const char d[] = "0123456789abcdef";
-        for (i = 0; i < 32; i++) {
-            hex[i*2]   = d[actual[i] >> 4];
-            hex[i*2+1] = d[actual[i] & 15];
-        }
-        hex[64] = '\0';
-        LOGI("nc: fp=%s", hex);   /* so加固2026-10: 原文 "cert fp actual=%s",改缩写,fp=指纹(排障用) */
-        /*LSG:FP|【数据】实际证书指纹 actual_fp*/
-        LSGI(LSG_FP, "%s", hex);
-    }
-
-    /* [2026-10 改] 恒定时间比较:对实际指纹做双轮派生后与 SIG_HASH_STORED 比对
-     * (原来直接比明文 SIG_HASH;expected 含派生结果,still 恒定时间) */
-    {
-        unsigned char expected[32];
-        derive_expected(actual, expected);
-        for (i = 0; i < 32; i++) mismatch |= expected[i] ^ SIG_HASH_STORED[i];
-    }
-
-    if (mismatch == 0) {
+    if (sig_compare_fp(actual) == 0) {
         LOGI("nc: ok");   /* so加固2026-10: 原文 "signature verify ok",改中性 */
         /*LSG:VERIFY_OK|【通过】指纹比对一致,签名校验通过,放行*/
         LSGI0(LSG_VERIFY_OK);
