@@ -137,6 +137,26 @@ static void siglog(const char *prio, const char *fmt, ...) {
 #define LOGE(...) do { __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__); \
                        siglog("E", __VA_ARGS__); } while (0)
 
+/* ── VMP 友好版（2026-11-11）────────────────────────────────────────
+ * 只走 siglog_fmt1（非 varargs），**不碰 siglog**。
+ * 用于「所在函数要被 VMP」的日志点：siglog 是 varargs，内含
+ * llvm.va_start/va_end，Amice 会把调用它的函数整体跳过。
+ *
+ * 全部用 do-while + 条件判断，与 LOGI/LOGE 的调用点写法保持兼容。 */
+#define LOGI_V1(fmt, a1) do { \
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, fmt, a1); \
+    siglog_fmt1("I", fmt, a1); } while (0)
+#define LOGE_V1(fmt, a1) do { \
+    __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, fmt, a1); \
+    siglog_fmt1("E", fmt, a1); } while (0)
+/* 无参数的版本：直接给个常量串，不经过 siglog */
+#define LOGI_S(msg) do { \
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "%s", msg); \
+    siglog_fmt1("I", "%s", msg); } while (0)
+#define LOGE_S(msg) do { \
+    __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", msg); \
+    siglog_fmt1("E", "%s", msg); } while (0)
+
 /* ────────────────── 外围串 LSGS 密文标记(2026-10-16) ──────────────────
  * sig_check.c 中除中文文案外的敏感明文(调试开关/日志名/测试后门/失败语义)
  * 全部密文化。明文唯一载体:下方标记;so 里只有密文。
@@ -258,6 +278,39 @@ static const char *siglog_testlog_env(char *buf, size_t buflen) {
 }
 static const char *siglog_testapk_env(char *buf, size_t buflen) {
     return lsg_s(LSGS_ENV_TESTAPK, buf, buflen);
+}
+
+/* ── 非 varargs 的文件日志（2026-11-11，为让 VMP 能处理调用者）────────
+ *
+ * 背景：siglog() 是 varargs，内部有 llvm.va_start/va_end。Amice 的 VMP
+ * 不支持含 varargs 的调用链 —— 实测 sig_verify / sig_collect_fp /
+ * sig_compare_fp 三个函数全被跳过：
+ *     skip function "sig_verify": LLVM intrinsic calls are not supported
+ *
+ * 而 extract_cert_der 那一批之所以能过，是因为它们只用 LSGE/LSGI
+ * （走 siglog_c，非 varargs），没有直接用 LOGE/LOGI 宏。
+ *
+ * 本函数给「需要带一个格式化参数、又想被 VMP」的调用点用：
+ * 内部 snprintf 而非 vfprintf，调用约定是普通函数。
+ * ⚠️ 不要为了图方便把它做成 varargs —— 那会把这个洞重新打开。 */
+__attribute__((noinline))
+static void siglog_fmt1(const char *prio, const char *fmt, const char *a1) {
+    FILE *fp;
+    struct timespec ts;
+    unsigned long ms;
+    if (siglog_ready != 1) return;
+    fp = fopen(siglog_path, "a");
+    if (!fp) { siglog_ready = 0; return; }
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ms = (unsigned long)ts.tv_sec * 1000UL + (unsigned long)(ts.tv_nsec / 1000000UL);
+    fprintf(fp, "[%lu][%s][pid %d] ", ms, prio, (int)getpid());
+    {
+        char line[512];
+        snprintf(line, sizeof(line), fmt, a1);
+        fputs(line, fp);
+    }
+    fputc('\n', fp);
+    fclose(fp);
 }
 
 static void siglog_c(int prio, lsg_id_t id, const char *detail) {
@@ -1108,7 +1161,7 @@ static int sig_collect_fp(unsigned char actual[32]) {
         /* LSGS 密文化(2026-10-16):原文案直接暴露"这是签名校验"。 */
         char m[64];
         const char *mm = lsg_s(LSGS_ERR_APK_NOT_FOUND, m, sizeof(m));
-        if (mm) LOGE("%s", mm);
+        if (mm) LOGE_V1("%s", mm);
         /*LSG:NOT_FOUND|【失败】三条定位路径(maps/so反推/data/app)全部失败*/
         LSGE0(LSG_NOT_FOUND);
         return -1;            /* 环境异常类 → variant 0 */
@@ -1116,7 +1169,8 @@ static int sig_collect_fp(unsigned char actual[32]) {
 
     fd = open(apk_path, O_RDONLY);
     if (fd < 0) {
-        LOGE("open apk failed: %s errno=%d(%s)", apk_path, errno, strerror(errno));
+        /* 三参数 → 先拼一次，再走单参数版本（siglog 是 varargs，VMP 不支持）*/
+        { char _b[256]; snprintf(_b, sizeof(_b), "open apk failed: %s errno=%d(%s)", apk_path, errno, strerror(errno)); LOGE_S(_b); }
         /*LSG:OPEN_ERR|【失败】打开 APK 失败 open()*/
         LSGE(LSG_OPEN_ERR, "%s errno=%d", apk_path, errno);
         return -1;            /* 环境异常类 → variant 0 */
@@ -1130,7 +1184,8 @@ static int sig_collect_fp(unsigned char actual[32]) {
         {
             char m[128];
             const char *mm = lsg_s(LSGS_ERR_NO_SIGN_BLOCK, m, sizeof(m));
-            if (mm) LOGE("%s: %s", mm, apk_path);
+            /* 两参数 → 同上 */
+            { char _b[256]; snprintf(_b, sizeof(_b), "%s: %s", mm, apk_path); LOGE_S(_b); }
         }
         /*LSG:BLK_FAIL|【失败】签名块解析失败(无 v2/v3 或结构异常)*/
         LSGE(LSG_BLK_FAIL, "%s", apk_path);
@@ -1158,7 +1213,7 @@ static int sig_compare_fp(const unsigned char actual[32]) {
             hex[i*2+1] = d[actual[i] & 15];
         }
         hex[64] = '\0';
-        LOGI("nc: fp=%s", hex);   /* so加固2026-10: 原文 "cert fp actual=%s",改缩写,fp=指纹(排障用) */
+        LOGI_V1("nc: fp=%s", hex);   /* so加固2026-10: 原文 "cert fp actual=%s",改缩写,fp=指纹(排障用) */
         /*LSG:FP|【数据】实际证书指纹 actual_fp*/
         LSGI(LSG_FP, "%s", hex);
     }
@@ -1189,7 +1244,7 @@ static void sig_verify(void) {
         if (SIG_HASH_STORED[i] != 0) { slot_configured = 1; break; }
     }
     if (!slot_configured) {
-        LOGI("nc: slot empty");   /* so加固2026-10: 原文 "sig hash slot empty, skip verify" 含路标词,改中性 */
+        LOGI_S("nc: slot empty");   /* so加固2026-10: 原文 "sig hash slot empty, skip verify" 含路标词,改中性 */
         /*LSG:SLOT_EMPTY|【通过】指纹槽全零:流水线未注入,跳过校验(调试模式)*/
         LSGI0(LSG_SLOT_EMPTY);
         return;
@@ -1201,12 +1256,12 @@ static void sig_verify(void) {
     }
 
     if (sig_compare_fp(actual) == 0) {
-        LOGI("nc: ok");   /* so加固2026-10: 原文 "signature verify ok",改中性 */
+        LOGI_S("nc: ok");   /* so加固2026-10: 原文 "signature verify ok",改中性 */
         /*LSG:VERIFY_OK|【通过】指纹比对一致,签名校验通过,放行*/
         LSGI0(LSG_VERIFY_OK);
         return;
     }
-    LOGE("nc: mm");   /* so加固2026-10: 原文 "signature mismatch (actual vs expected...)",排障走上方 fp 行 */
+    LOGE_S("nc: mm");   /* so加固2026-10: 原文 "signature mismatch (actual vs expected...)",排障走上方 fp 行 */
     /*LSG:VERIFY_MM|【失败】指纹比对不一致 → 校验失败,延时退出已安排*/
     LSGE0(LSG_VERIFY_MM);
 
