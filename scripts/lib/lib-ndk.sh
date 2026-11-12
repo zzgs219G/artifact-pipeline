@@ -38,7 +38,24 @@ ndk_require() {
 ndk_write_mk() {
   local jni="$1" mod="${2:-nc}" guard_lib_dir="${3:-}" obf_spec="${4:-}"
   cat > "$jni/Application.mk" <<'EOF'
-APP_STL := c++_static
+# ⚠️ 2026-11-12 瘦身：c++_static → c++_shared
+#
+# 为什么换：c++_static 会把整套 libc++ / libc++abi / libunwind 静态链进
+# libnc.so。即使加了 -fno-exceptions -fno-rtti（见 APP_CPPFLAGS）和
+# nc_demangle_stub.c 顶掉 demangler，实测仍剩 ~110 KB 的 libunwind
+# 栈展开代码（它是 libc++abi.a 里预编译的 .o，编译期 flag 管不到）。
+# 换 c++_shared 后这部分由系统的 libc++_shared.so 提供。
+#
+# 实测（只勾 dex2c 的组合）：
+#   c++_static + demangle stub + fno-exceptions/fno-rtti  496,184 B
+#   c++_shared（本改动）                                   见构建日志
+#
+# ⚠️ 代价：产物多一个依赖 libc++_shared.so。它自 Android 5(API 21) 起随
+#   系统提供，但**极少数精简 ROM / 某些定制系统可能缺**。缺失时 dlopen
+#   报 "library libc++_shared.so not found"。
+#    兜底：若目标用户群包含这类设备，改回 c++_static（体积 +110KB 换兼容）。
+#    判断依据：本项目 APP_PLATFORM := android-21，最低支持版本即该依赖的下限。
+APP_STL := c++_shared
 # NC_GUARD_SECTIONED: 让判决核心（nc_verify_t1）与签名表进 .ncx 加密段。
 # 为什么是显式宏而不是 __ANDROID__ 自动判断：宿主端任何一次"想验证段布局"
 # 的编译都会因为"标了段却没人解锁"而读到密文 → 假红。见 nc_link.c 的注释。
