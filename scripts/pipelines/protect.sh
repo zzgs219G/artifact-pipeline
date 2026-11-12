@@ -32,9 +32,15 @@
 #   产出工程包(jni/nc/*.cpp + compiled_methods.txt),mark-native/stringenc 等下游消费方不变
 #
 # 转译类名来源决策(规则优先,修复联合勾选无视用户规则的 bug):
-#   提供了规则(无论是否联合勾选) → 用户规则(rules-to-filter.py)
-#   未提供规则 + 联合勾选 sigcheck → 自动抽主类(make-filter-from-apk.py)
-#   未提供规则 + 未勾 sigcheck   → 报错退出(fail-fast,无类名来源)
+#   提供了规则(任何勾选组合) → 用户规则(rules-to-filter.py)
+#   未提供规则             → 自动抽主类(make-filter-from-apk.py,只读 APK 的 Manifest)
+#
+# ⚠️ 2026-11-12 解除对 --sigcheck 的依赖:此前"自动抽主类"被绑在
+#    WANT_SIGCHECK 上,但那一步的实际输入只有 $LINK_APK(APK 文件本身),
+#    make-filter-from-apk.py 从 AndroidManifest 解析 LAUNCHER activity,
+#    不需要 sigcheck 的任何产物。该限制是从 apk-protect-action 迁入时
+#    带进来的历史包袱(2026-10-31 4eaa644),已无技术依据。
+#    影响:用户勾 --dex2c 且规则留空时必须连带勾 --sigcheck 才能出包。
 #
 # --stringenc [规则文件]   → dex 层字符串常量加密(与 dex2c 同款规则语法,内部复用
 #   rules-to-filter.py 的 class_rule_to_filter 做类匹配)。规则必填(没有"自动抽
@@ -302,16 +308,12 @@ require_dir "$GUARD_SRC" "so 加密设施目录"
 if [[ $WANT_ENGINE -eq 1 ]]; then
     DEX2C_DIR="$(ensure_dex2c)"             # 从 tools/dex2c.zip 解压(幂等)并取得 Dex2C 目录
     require_dir "$DEX2C_DIR" "dex2c 工具目录"
-  # 规则文件:提供了就必须非空;没提供且未联合 sigcheck → 无类名来源,fail-fast
+  # 规则文件:提供了就必须非空。没提供 → 自动抽主类(只读 APK,不依赖 sigcheck)。
   # ⚠️ 只在【dex2c 模块】勾选时校验；只勾 dex2c_stub 时无用户类名规则可言
   if [[ $WANT_DEX2C -eq 0 ]]; then
     :
   elif [[ -n "$TRANSPILE_RULES" ]]; then
     require_nonempty_file "$TRANSPILE_RULES" "dex2c 规则文件"
-  elif [[ $WANT_SIGCHECK -eq 0 ]]; then
-    log_err "--dex2c 未提供规则文件且未勾选 --sigcheck,没有类名来源"
-    log_err "     (提供规则文件: --dex2c rules.txt;或联合 --sigcheck 自动抽取主类)"
-    exit 1
   fi
 fi
 if [[ $WANT_STRINGENC -eq 1 ]]; then
@@ -472,11 +474,11 @@ if [[ $WANT_ENGINE -eq 1 ]]; then
     if grep -qE '^L\.\*;\.\*$|^\.\*$' "$WORK/dcc_filter.txt"; then
       log_err "检测到全量转译规则(**): 会把整个 App 的所有方法抽进 so,上游明确不支持"
       log_err "     (混淆过的大方法会生成坏 C 代码,报错是难排查的 undeclared identifier)"
-      log_err "     正确姿势: ①规则留空+勾选签名校验 → 自动抽主类; ②定向规则,如 com.xixin.box.**"
+      log_err "     正确姿势: ①规则留空 → 自动抽主类; ②定向规则,如 com.xixin.box.**"
       exit 1
     fi
     DCC_FILTER="$WORK/dcc_filter.txt"
-  elif [[ $WANT_SIGCHECK -eq 1 ]]; then
+  else
     log_info "filter 来源: 未提供规则,自动抽取主类(make-filter-from-apk)"
     # 动态解析 Manifest 里的 LAUNCHER activity → 自动生成 filter（一行一个类）
     python3 "$ROOT/scripts/filter/make-filter-from-apk.py" "$LINK_APK" \

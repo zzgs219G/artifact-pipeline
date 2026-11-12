@@ -99,6 +99,14 @@ rc, args, files, err = run(cfg(sigcheck=True, dex2c={"enabled": True, "rules_fil
 check("T3 dex2c+sigcheck 留空规则 → --dex2c 无文件参数",
       rc == 0 and args == ["--sigcheck", "--dex2c"], f"rc={rc} args={args} err={err}")
 
+# T3c（2026-11-12 解除 sigcheck 耦合）: 只勾 dex2c + 规则留空也必须放行。
+# 此前 required.unless 绑在 sigcheck 上，导致用户必须连带勾选签名校验才能出包。
+# 但自动抽主类的实际输入只有 APK 的 Manifest（make-filter-from-apk.py），
+# 与 sigcheck 产物无关 —— 那个限制是从 apk-protect-action 迁入时带进来的。
+rc, args, files, err = run(cfg(dex2c={"enabled": True, "rules_file": ""}))
+check("T3c 只 dex2c 留空规则 → 放行（不再要求 sigcheck）",
+      rc == 0 and args == ["--dex2c"], f"rc={rc} args={args} err={err}")
+
 # T2b（2026-12 dcc 引擎下架：schema 已删 dcc 模块块，旧 App 快照提交 dcc key
 # 必须被保险丝 a 拒绝——静默忽略会变成"勾了没生效"的幽灵勾选项）
 rc, args, files, err = run(cfg(dcc={"enabled": True, "rules_file": "**/com.test.**"}))

@@ -25,14 +25,7 @@
           "multiline": true,
           "default": "",
           "value_kind": "rules_file",
-          "required": {
-            "when": "always",
-            "unless": {
-              "key": "sigcheck",
-              "is": true
-            }
-          },
-          "hint": "留空并勾选签名校验：自动抽取主界面类；也可填写 com.test.** 等定向规则。不支持 ** 全量（整个 App 转译，引擎不支持）"
+          "hint": "留空：自动抽取主界面类（从 APK 的 Manifest 解析，不依赖签名校验）；也可填写 com.test.** 等定向规则。不支持 ** 全量（整个 App 转译，引擎不支持）"
         }
       ]
     },
