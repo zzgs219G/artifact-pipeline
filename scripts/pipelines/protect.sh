@@ -1693,26 +1693,19 @@ if [[ -d "$WORK/project/libs" ]]; then
     # ⚠️ 与 .ncr（第一套 VMP 数据）的区别：.ncr 装的是 nox 解密链自己的
     #    字节码，解它的钥匙派生要执行它里面的函数，加密即自锁，只能明文。
     # ⚠️ 老产物可能没有 .nct（没开第二套 VMP），所以先探测再决定。
-    # ⚠️⚠️ 2026-11-12 实测否决：.nct 不能进锁箱
+    # 2026-11-12：.nct（消费方 VMP 数据段）进锁箱。
     #
-    # 试过把 .nct（消费方 VMP 数据段）纳入 --section 加密，真机 dlopen 即崩：
-    #   Fatal signal 4 (SIGILL) at libnc.so+0x82ad8（.ncx 段内）
-    #   backtrace: call_constructors → constructor(50)
-    # 试了两个段序（.nct 在后 / .nct 在最前）都崩，且崩溃地址完全一致。
+    # ⚠️ 必须放【最前】：段序要与 _SEG_KEYS、C 侧 segs[] 三者一致。
+    # .ncx 里的 VMP wrapper 一执行就要读 .nct 的字节码，若那时还是密文
+    # → 解释器把密文当 opcode → 真机 SIGILL。
+    # .nct 的钥匙 k_nct 只需 master（来自 .ncxhr），与 .ncx 无依赖，
+    # 所以「先解 .nct」没有循环依赖。
     #
-    # 手工验证过：k_nct 派生正确、.nct 能解出熵 2.79 的明文（说明解密
-    # 本身没问题）。但 Amice 在 .nct 里放了 5 类 global（字节码 /
-    # metadata / native_table / descriptor_table / ...），它们之间是
-    # 构建期固定的指针关系。解释器在 constructor 阶段就按固定偏移读取，
-    # 若那一刻是密文 → 读到垃圾 → 按垃圾值跳转 → SIGILL。
-    #
-    # 要让它成立，得改 Amice：让解释器在每次读字节码时按需解密，
-    # 而不是假设整段已就绪。那是 Amice 架构改动，工作量远超收益。
-    #
-    # 所以：.nct 保持明文，只作为「一眼看出 VMP 有多大」的观测窗口。
+    # ⚠️ 曾经的 SIGILL 真因是 NCGL_INSN 写成 11（应为 10），不是这条路
+    # 不通 —— 详见 nox 的 nc_guard_key.c 里那条 _Static_assert。
     if readelf -SW "$so" 2>/dev/null | grep -q '\.nct'; then
-      _NCT_SZ=$(readelf -SW "$so" 2>/dev/null | grep '\.nct' | head -1 | awk '{print $6}')
-      echo "  [lock] 检测到 .nct 段（消费方 VMP 数据，$((16#$_NCT_SZ)) 字节）—— 保持明文不加密"
+      _SECTIONS=".nct,$_SECTIONS"
+      echo "  [lock] 检测到 .nct 段（消费方 VMP 数据），纳入锁箱并置于最前"
     fi
     python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" \
       --section "$_SECTIONS" --from-apk "$IN_APK" \
