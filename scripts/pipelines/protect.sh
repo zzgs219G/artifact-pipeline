@@ -1017,6 +1017,20 @@ if [[ $WANT_VMP -eq 1 ]]; then
   # 有了这个开关，NC_VMP_CSTUB 之类的"给谁打注解"才真正生效。
   export AMICE_VM_ONLY_ANNOTATED=1
   log_info "VMP 只处理带 annotate 的函数（AMICE_VM_ONLY_ANNOTATED=1）"
+
+  # ── 2026-11-12：VMP 数据落独立段 .nct，供锁箱加密 ────────────────
+  # 默认 Amice 把字节码 global 塞进 .rodata（与 dex2c 的 opcode 表、
+  # 字符串混在一起，明文可读）。设了环境变量后它们进 .nct，
+  # protect.sh 的锁箱步骤就能把它整段加密。
+  #
+  # ⚠️ 只能用 .nct，不能用 .ncr ——
+  #    .ncr 是 nox 解密链自己的 VMP 数据（预编译在 libnox.a 里），
+  #    解它的钥匙派生要执行它里面的函数，加密即自锁，必须明文。
+  #    这里编的是消费方的函数（sig_check 等），在 constructor(65535)
+  #    才运行，解锁早已完成，没有循环依赖。
+  # ⚠️ 段名必须与 nc_guard_layout.h 的 NC_SEC_VMP2 一致。
+  export AMICE_VM_DATA_SECTION=".nct"
+  log_info "VMP 数据段: .nct（将被锁箱加密；nox 自己的 .ncr 保持明文）"
 fi
 
 # ── 纯 C 解密桩的源码（2026-11-09）────────────────────────────────
@@ -1669,6 +1683,19 @@ if [[ -d "$WORK/project/libs" ]]; then
     else
       echo "  [lock] ⚠️ 未发现 .ncxr 段（NC_GUARD_SECTIONED 未定义？）" >&2
       echo "  [lock]    → 签名判定函数已加密，但 SIG_SALT/SIG_HASH_STORED 仍在明文" >&2
+    fi
+    # 2026-11-12：.nct（消费方 VMP 数据段）也进锁箱。
+    #
+    # Amice 的 AMICE_VM_DATA_SECTION=.nct 让 VMP 字节码落到独立段（而不是
+    # 混进 .rodata 明文）。该段装的是 sig_check 等「解锁之后才运行」的
+    # 函数的 VM 字节码 —— 没有循环依赖，可以加密。
+    #
+    # ⚠️ 与 .ncr（第一套 VMP 数据）的区别：.ncr 装的是 nox 解密链自己的
+    #    字节码，解它的钥匙派生要执行它里面的函数，加密即自锁，只能明文。
+    # ⚠️ 老产物可能没有 .nct（没开第二套 VMP），所以先探测再决定。
+    if readelf -SW "$so" 2>/dev/null | grep -q '\.nct'; then
+      _SECTIONS="$_SECTIONS,.nct"
+      echo "  [lock] 检测到 .nct 段（消费方 VMP 数据），纳入锁箱"
     fi
     python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" \
       --section "$_SECTIONS" --from-apk "$IN_APK" \

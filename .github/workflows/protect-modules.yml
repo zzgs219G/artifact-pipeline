@@ -277,14 +277,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/amice-bundle
-          key: amice-r29-v0.1.6-nox5
+          key: amice-r29-v0.1.6-nox8
 
       - name: 解压 Amice bundle
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           mkdir -p ~/amice-bundle && cd ~/amice-bundle
-          URL=https://github.com/zzgs219G/amice/releases/download/v0.1.6-nox5/amice-android-ndk-r29-linux-x86_64.tar.gz
+          URL=https://github.com/zzgs219G/amice/releases/download/v0.1.6-nox8/amice-android-ndk-r29-linux-x86_64.tar.gz
           echo "下载 $URL"
           curl -fL --retry 3 --retry-delay 5 -o amice.tar.gz "$URL"
           echo "=== 校验 sha256（官方值见 release 资产 .sha256）==="
@@ -429,7 +429,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/amice-bundle
-          key: amice-r29-v0.1.6-nox5
+          key: amice-r29-v0.1.6-nox8
 
       - name: 若 cache 未命中则下载
         run: |
@@ -438,7 +438,7 @@ jobs:
             echo "✅ cache 命中"; exit 0
           fi
           mkdir -p ~/amice-bundle && cd ~/amice-bundle
-          URL=https://github.com/zzgs219G/amice/releases/download/v0.1.6-nox5/amice-android-ndk-r29-linux-x86_64.tar.gz
+          URL=https://github.com/zzgs219G/amice/releases/download/v0.1.6-nox8/amice-android-ndk-r29-linux-x86_64.tar.gz
           curl -fL --retry 3 -o a.tar.gz "$URL"
           curl -fsSL -o a.sha256 "$URL.sha256"
           WANT=$(awk '{print $1}' a.sha256); GOT=$(sha256sum a.tar.gz | awk '{print $1}')
@@ -724,7 +724,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/amice-bundle
-          key: amice-r29-v0.1.6-nox5
+          key: amice-r29-v0.1.6-nox8
 
       - name: 下载 Amice bundle（cache 未命中时）
         if: steps.obf.outputs.enabled == 'true'
@@ -735,7 +735,7 @@ jobs:
             exit 0
           fi
           mkdir -p ~/amice-bundle && cd ~/amice-bundle
-          URL=https://github.com/zzgs219G/amice/releases/download/v0.1.6-nox5/amice-android-ndk-r29-linux-x86_64.tar.gz
+          URL=https://github.com/zzgs219G/amice/releases/download/v0.1.6-nox8/amice-android-ndk-r29-linux-x86_64.tar.gz
           curl -fL --retry 3 -o a.tar.gz "$URL"
           curl -fsSL -o a.sha256 "$URL.sha256"
           WANT=$(awk '{print $1}' a.sha256); GOT=$(sha256sum a.tar.gz | awk '{print $1}')
