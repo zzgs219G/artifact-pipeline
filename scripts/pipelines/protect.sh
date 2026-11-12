@@ -861,6 +861,24 @@ if [[ -n "$_guard_dst" ]]; then
     # ⚠️ 漏拷 .h 的症状：编译期直接报 ncg_shdr_t / ncg_boot_key 未声明（报错早）。
     cp "$GUARD_SRC/nc_guard_crypto.c"  "$_guard_dst/"
     cp "$GUARD_SRC/nc_guard_internal.h" "$_guard_dst/"
+    # nc_guard_report.c（2026-11-13）：自检报告 + 段熵体检。
+    # ⚠️ 漏拷的症状：链接缺 ncg_report_build → dlopen 报
+    #    `undefined symbol: ncg_report_flush`（分 TU 编译不报错，
+    #    只在链接后 dlopen 才炸）。这个坑 2026-11-13 在 nox 侧踩了三次。
+    #
+    # nc_guard_report.c（2026-11-13）：自检报告 + 段熵体检。
+    # 显式列出是给 test_nox_copy_list.py 的正则看的（它从本文件抽取
+    # nc_guard_*.c 清单与 nox 的 LIB_SRCS 对比）。
+    cp "$GUARD_SRC/nc_guard_report.c" "$_guard_dst/"
+    #
+    # ⚠️⚠️ 但显式清单每次都有人忘（2026-11-13 在 nox 侧连踩三次，
+    #    这里是第四次）。所以再加一道【扫描兜底】：把 GUARD_SRC 下
+    #    所有 nc_guard_*.c 一律拷过去。显式那几行保留，作用是
+    #    "意图说明 + 给断言提供清单"，真正的完整性由这道兜底保证。
+    for _c in "$GUARD_SRC"/nc_guard_*.c; do
+      [ -f "$_c" ] || continue
+      cp -f "$_c" "$_guard_dst/" 2>/dev/null || true
+    done
     GUARD_LIB_DIR=""      # 源码形态：mk 不需要额外链接 .a
     echo "[nox] 分发形态: 源码（编进 NDK 工程）"
   else
