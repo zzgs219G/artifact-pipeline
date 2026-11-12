@@ -42,7 +42,14 @@ APP_STL := c++_static
 # NC_GUARD_SECTIONED: 让判决核心（nc_verify_t1）与签名表进 .ncx 加密段。
 # 为什么是显式宏而不是 __ANDROID__ 自动判断：宿主端任何一次"想验证段布局"
 # 的编译都会因为"标了段却没人解锁"而读到密文 → 假红。见 nc_link.c 的注释。
-APP_CPPFLAGS += -fvisibility=hidden -fno-ident -Oz -ffunction-sections -fdata-sections
+# ⚠️ 2026-11-12 瘦身（照抄 dpt-shell 的已验证结论，见 docs/变更历史.md 2026-11-10 条）：
+#   -fno-exceptions -fno-rtti -fno-unwind-tables
+#   实测 dpt-shell 上这三项省 32,360 B（442,312 → 409,952 的那一步）。
+#   libnc.so 此前没加，导致 libc++abi 的异常表和 RTTI 全被链进来。
+# ⚠️ 代价：壳内不能再写 try/catch（现在没有）；dex2c 产物用 EX_LandingPad +
+#    显式 goto 分发，不依赖 .eh_frame，所以安全。
+APP_CPPFLAGS += -fvisibility=hidden -fno-ident -Oz -ffunction-sections -fdata-sections \
+                -fno-exceptions -fno-rtti -fno-unwind-tables
 # ⚠️ 2026-10-21 加固 flag 补齐（白嫖清单）：
 #   · -fstack-protector-strong：NDK 默认弱版（只护含 char 数组的函数），
 #     strong 版把取用栈地址的函数全护上——密钥处理函数全是 uint8_t[]

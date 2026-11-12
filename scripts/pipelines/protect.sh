@@ -596,6 +596,24 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   unzip -q "$WORK/dcc-project.zip" -d "$WORK/project"
 fi
 
+# ── 2026-11-12 瘦身：顶掉 libc++abi 的 demangler（-100KB 级）───────────
+# 因果链：APP_STL=c++_static → libc++abi.a 的 cxa_default_handlers.cpp.o
+#   （导出 __cxa_terminate_handler，被运行时引用）→ 它引用 __cxa_demangle
+#   → cxa_demangle.cpp.o（606 个符号，.text 里近 100 KB）整块被拉进 so。
+# 用同名强符号在链接期切断，详见 nc_demangle_stub.c 的头注释。
+#
+# ⚠️ 这一段【必须在 sigcheck 分支之外】—— dex2c 单独勾选时同样会拉进
+#    libc++abi（正是我们量体积的那个组合），漏了它瘦身不生效。
+if [[ $WANT_SIGCHECK -eq 1 || $WANT_TRANSPILE -eq 1 ]]; then
+  if [[ $WANT_TRANSPILE -eq 1 ]]; then
+    _DM_DIR="$WORK/project/jni/nc"
+  else
+    _DM_DIR="$WORK/project/jni"
+  fi
+  mkdir -p "$_DM_DIR"
+  cp "$ROOT/scripts/guard/src/nc_demangle_stub.c" "$_DM_DIR/"
+fi
+
 if [[ $WANT_SIGCHECK -eq 1 ]]; then
   # 联合时并入 dcc 工程 jni/nc/；单独时放 jni/ 根 —— ndk_write_mk 的两级
   # wildcard 都收（报错十一/十三教训），两种布局等价
@@ -607,6 +625,7 @@ if [[ $WANT_SIGCHECK -eq 1 ]]; then
     mkdir -p "$WORK/project/jni"
     SIG_DST="$WORK/project/jni"
   fi
+
   cp "$ROOT/scripts/guard/src/sig_check.c"    "$SIG_DST/"
   cp "$ROOT/scripts/guard/src/nc_link.c"      "$SIG_DST/"
   cp "$ROOT/scripts/guard/src/nc_link_jni.c"  "$SIG_DST/"
