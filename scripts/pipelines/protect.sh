@@ -1703,9 +1703,11 @@ if [[ -d "$WORK/project/libs" ]]; then
     #
     # ⚠️ 曾经的 SIGILL 真因是 NCGL_INSN 写成 11（应为 10），不是这条路
     # 不通 —— 详见 nox 的 nc_guard_key.c 里那条 _Static_assert。
+    # 2026-11-12 实验：.nct 暂不加密，验证「段分离本身」是否安全。
+    # 若此版真机正常 → 说明段分离没问题，SIGILL 是加密导致；
+    # 若仍崩 → 说明是 Amice 在 .nct 段位置上的假设问题，与加密无关。
     if readelf -SW "$so" 2>/dev/null | grep -q '\.nct'; then
-      _SECTIONS=".nct,$_SECTIONS"
-      echo "  [lock] 检测到 .nct 段（消费方 VMP 数据），纳入锁箱并置于最前"
+      echo "  [lock] 检测到 .nct 段（消费方 VMP 数据）—— 实验版：不加密"
     fi
     python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" \
       --section "$_SECTIONS" --from-apk "$IN_APK" \
