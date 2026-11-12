@@ -1693,9 +1693,11 @@ if [[ -d "$WORK/project/libs" ]]; then
     # ⚠️ 与 .ncr（第一套 VMP 数据）的区别：.ncr 装的是 nox 解密链自己的
     #    字节码，解它的钥匙派生要执行它里面的函数，加密即自锁，只能明文。
     # ⚠️ 老产物可能没有 .nct（没开第二套 VMP），所以先探测再决定。
+    # ⚠️ .nct 必须放【最前】：段序与 _SEG_KEYS、C 侧 segs[] 三者必须一致。
+    # 理由见 so-section-lock.py 的 _SEG_KEYS 注释（真机 SIGILL 实证）。
     if readelf -SW "$so" 2>/dev/null | grep -q '\.nct'; then
-      _SECTIONS="$_SECTIONS,.nct"
-      echo "  [lock] 检测到 .nct 段（消费方 VMP 数据），纳入锁箱"
+      _SECTIONS=".nct,$_SECTIONS"
+      echo "  [lock] 检测到 .nct 段（消费方 VMP 数据），纳入锁箱并置于最前"
     fi
     python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" \
       --section "$_SECTIONS" --from-apk "$IN_APK" \
