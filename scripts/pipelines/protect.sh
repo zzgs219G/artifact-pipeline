@@ -1044,7 +1044,14 @@ if [[ $WANT_VMP -eq 1 ]]; then
   #    （2026-11-12 的 AMICE_VM_DATA_SECTION 把字节码抽到 .nct，是错的：
   #      实测产物 .ncx 只剩 8 个 wrapper、真逻辑全在箱外。）
   export AMICE_VM_INSN_SECTION=".nct"
-  log_info "VMP 解释器段: .nct（进锁箱，可执行）"
+  # 数据段：字节码与 descriptor 表必须分开
+  #   .ncq  字节码（纯数据）→ 进锁箱加密
+  #   .ncs  descriptor/native 表（含 R_AARCH64_RELATIVE 重定位）
+  #         → 必须明文：加密后解锁写回会覆盖链接器填的指针 → SIGILL
+  # ⚠️ 为什么字节码不能直接进 .ncx：.ncx 里有函数（AX），const 数据
+  #    进同段 clang 直接报 section type conflict（实测确认）。
+  export AMICE_VM_DATA_SECTION=".ncq,.ncs"
+  log_info "VMP 段: 解释器 .nct(加密) / 字节码 .ncq(加密) / 数据表 .ncs(明文)"
 fi
 
 # ── 纯 C 解密桩的源码（2026-11-09）────────────────────────────────
@@ -1720,6 +1727,19 @@ if [[ -d "$WORK/project/libs" ]]; then
       echo "  [lock] 发现 .nct（消费方 VMP 解释器段），纳入一级锁箱"
     else
       echo "  [lock] 未发现 .nct —— 本次构建没有第二套 VMP 解释器可加密" >&2
+    fi
+    # ── VM 字节码段（.ncq，2026-11-13）───────────────────────────────
+    # 字节码是【每个包独一无二的业务逻辑】，比解释器更值得保护：
+    #   解释器是通用的 VM 规则（逆一次通吃所有包）
+    #   字节码是具体逻辑（每包不同）
+    # 之前它在 .rodata 明文段，只靠 Amice 的 bytecode.key（那个 key 由
+    # 编译期常量 seed 派生，写在解释器代码里，等于没有独立保护）。
+    # ⚠️ 段序：.ncq 排在 .nct 之后即可（它在解锁后才被解释器读）。
+    if readelf -SW "$so" 2>/dev/null | grep -q '\.ncq'; then
+      _SECTIONS=".nct,.ncq,$_SECTIONS"
+      echo "  [lock] 发现 .ncq（VM 字节码段），纳入一级锁箱"
+    else
+      echo "  [lock] 未发现 .ncq —— 字节码仍在 .rodata（未单独加密）" >&2
     fi
     python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" \
       --section "$_SECTIONS" --from-apk "$IN_APK" \
