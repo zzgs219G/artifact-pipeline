@@ -1018,32 +1018,33 @@ if [[ $WANT_VMP -eq 1 ]]; then
   export AMICE_VM_ONLY_ANNOTATED=1
   log_info "VMP 只处理带 annotate 的函数（AMICE_VM_ONLY_ANNOTATED=1）"
 
-  # ── VMP 数据段（2026-11-13）────────────────────────────────────────
-  # 让 Amice 把 VMP 生成的 global 放进可辨认的段，而不是混在 .rodata。
+  # ── VMP 解释器段（2026-11-13）──────────────────────────────────────
+  # 让 Amice 把 VMP 生成的【解释器】放进可辨认的段，而不是混在 .text。
   #
-  # amice ≥ v0.1.6-nox14 按「是否含指针」拆两类段：
-  #   AMICE_VM_DATA_SECTION  纯数据（字节码 / const_pool / metadata）
-  #   AMICE_VM_PTR_SECTION   指针表（descriptor_table / native_call_table）
+  # 架构：
+  #   .ncx   业务代码被 VMP 后的【字节码 + wrapper】 ← 锁箱加密的就是它
+  #   .nct   第二套 VMP（消费方 sigcheck）的【解释器】 ← 本行配置，进锁箱
   #
-  # 消费方（本流水线）编的是第二套 VMP（sig_check 等），它的函数在
-  # constructor(65535) 才第一次执行，远在解锁（constructor(50)）之后，
-  # 所以纯数据部分【可以加密】→ 命名为 .nct，由 protect.sh 的一级锁箱
-  # 探测后纳入 --section。
+  # 为什么第二套解释器可以加密：
+  #   那些函数在 constructor(65535) 才第一次执行，远在解锁
+  #   （constructor(50)）之后，那时解释器已可解密，无循环依赖。
   #
-  # ⚠️ 指针段【必须明文】且不能进锁箱：那些位置是 R_AARCH64_RELATIVE
-  #    重定位槽，dlopen 时由动态链接器填真值。加密后解锁写回会覆盖掉
-  #    链接器填好的指针 → 垃圾指针 → 解释器跳错地址 → 真机 SIGILL。
-  #    2026-11-12 实测：.ncr 内 83 个 RELATIVE 全落在 descriptor_table
-  #    区间 0xc350~0x23548，整段加密即崩。
+  # 为什么第一套（nox 自己的 .ncr）不在这里配：
+  #   它是循环依赖 —— 解 .ncx 的钥匙要执行第一套解释器里的代码，
+  #   若解释器加密则解锁前跑不了，自锁。所以 .ncr 保持明文，
+  #   由 nox 打 .a 时用 amice 的默认行为（不设 AMICE_VM_INSN_SECTION）。
+  #
+  # ⚠️⚠️ 解释器段必须是【可执行】的（SHF_EXECINSTR）。它是 ARM64 代码，
+  #    放进只读数据段执行即 SIGSEGV。锁箱解密后按代码段处理（RX）。
+  #    （2026-11-13 之前的 .nct 是纯数据段 A，装字节码；现在装代码，必须 AX）
   #
   # ⚠️ 段名不带 vm/vmp/amice 字样：段名留在 .shstrtab（strip 删不掉），
   #    自解释的名字等于直接告诉逆向者"这里是 VM"。
-  # ⚠️ 只有本流水线（消费方）设这两个变量。nox 打 .a 时用 amice 默认值
-  #    （.ncr/.ncd），第一套数据因此留在明文 .ncr —— 那是刻意的，
-  #    它存在循环依赖，加密即自锁。
-  export AMICE_VM_DATA_SECTION=".nct"
-  export AMICE_VM_PTR_SECTION=".ncd"
-  log_info "VMP 数据段: .nct（纯数据，进锁箱）/ .ncd（指针表，明文）"
+  # ⚠️ 字节码【不】另设段 —— 让它跟着函数留在 .ncx 里，锁箱才锁得到。
+  #    （2026-11-12 的 AMICE_VM_DATA_SECTION 把字节码抽到 .nct，是错的：
+  #      实测产物 .ncx 只剩 8 个 wrapper、真逻辑全在箱外。）
+  export AMICE_VM_INSN_SECTION=".nct"
+  log_info "VMP 解释器段: .nct（进锁箱，可执行）"
 fi
 
 # ── 纯 C 解密桩的源码（2026-11-09）────────────────────────────────
@@ -1697,31 +1698,28 @@ if [[ -d "$WORK/project/libs" ]]; then
       echo "  [lock] ⚠️ 未发现 .ncxr 段（NC_GUARD_SECTIONED 未定义？）" >&2
       echo "  [lock]    → 签名判定函数已加密，但 SIG_SALT/SIG_HASH_STORED 仍在明文" >&2
     fi
-    # ── VMP 数据段（.nct，2026-11-13）───────────────────────────────
-    # .nct = 消费方（第二套）VMP 的纯数据（字节码 / const_pool / metadata）。
-    # 由 Amice 生成（AMICE_VM_DATA_SECTION=.nct），本仓库 C 代码不标记它，
+    # ── VMP 解释器段（.nct，2026-11-13）─────────────────────────────
+    # .nct = 消费方（第二套）VMP 的【解释器】。
+    # 由 Amice 生成（AMICE_VM_INSN_SECTION=.nct），本仓库 C 代码不标记它，
     # 所以只能探测。探测到就纳入一级锁箱。
     #
     # 为什么只有 .nct 能加密、.ncr 不能：
-    #   .ncr 是第一套（nox 解密链自己的 VMP）——解它的钥匙要执行它里面的
-    #   函数（ncg_boot_key 被 VMP），循环依赖，只能明文。
-    #   .nct 的函数在 constructor(65535) 才跑，解锁（constructor(50)）
-    #   早已完成，没有循环依赖。
-    # 为什么 .ncd 也不能加密：
-    #   它是指针表（descriptor_table / native_call_table），含
-    #   R_AARCH64_RELATIVE 重定位，dlopen 时由动态链接器填真值。
-    #   加密后解锁写回会覆盖那些指针 → 垃圾指针 → 真机 SIGILL（已实测）。
+    #   .ncr 是第一套（nox 解密链自己的 VMP）的解释器 —— 解 .ncx 的钥匙
+    #   要执行它里面的代码（ncg_boot_key 被 VMP）。若它加密则解锁前跑不了
+    #   → 自锁。只能明文。
+    #   .nct 是第一套解锁完成后才用到的（constructor(65535)），无循环依赖。
     #
     # ⚠️ 段序必须与 nc_guard_boot.c 的 segs[] 一致：.nct 排最前！
-    #   原因：.ncx 里的函数带 VMP wrapper，wrapper 第一条就 bl 到解释器
-    #   读 .nct 字节码。若 .nct 尚未解密 → 解释器把密文当 opcode →
-    #   真机 SIGILL（2026-11-12 实测，崩溃点在 .ncx 段内）。
-    #   而 k_nct 只需 master（.ncxhr 已解），与 .ncx 无依赖。
+    #   原因：.ncx 里的 wrapper 第一条就 bl 到解释器；若 .nct（解释器）
+    #   尚未解密 → 执行密文 → 真机 SIGILL（2026-11-12 实测，崩溃点在
+    #   .ncx 段内）。而 k_nct 只需 master（.ncxhr 已解），与 .ncx 无依赖。
+    # ⚠️ 解释器段必须可执行：它是代码不是数据。解密后按代码段处理（RX），
+    #   由 nc_guard_boot.c 的 is_code 分支决定。
     if readelf -SW "$so" 2>/dev/null | grep -q '\.nct'; then
       _SECTIONS=".nct,$_SECTIONS"
-      echo "  [lock] 发现 .nct（消费方 VMP 数据段），纳入一级锁箱"
+      echo "  [lock] 发现 .nct（消费方 VMP 解释器段），纳入一级锁箱"
     else
-      echo "  [lock] 未发现 .nct —— 本次构建没有第二套 VMP 数据可加密" >&2
+      echo "  [lock] 未发现 .nct —— 本次构建没有第二套 VMP 解释器可加密" >&2
     fi
     python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" \
       --section "$_SECTIONS" --from-apk "$IN_APK" \
