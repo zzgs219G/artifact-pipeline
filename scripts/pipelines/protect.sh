@@ -1080,7 +1080,7 @@ if [[ $WANT_VMP -eq 1 ]]; then
     # 旧行为：全局关混淆，只留 VMP（上游 amice 无跳过逻辑时的安全选项）
     export AMICE_MBA=false
     export AMICE_FLATTEN=false
-    log_info "混淆全局关闭（TMP_VMP_ONLY=0，仅 VMP）"
+    log_info "混淆全局关闭：仅 VMP，不做任何混淆（兼容上游 amice 的旧行为）"
   fi
   # ⚠️⚠️ 2026-11-11 修（VMP 空转的真因）：必须设 AMICE_VM_VIRTUALIZE=true。
   #
