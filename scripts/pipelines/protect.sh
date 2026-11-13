@@ -1721,54 +1721,73 @@ if [[ -d "$WORK/project/libs" ]]; then
     # ⚠️ 段名必须与 nc_guard_boot.c 的宏 / so-section-lock.py 的常量一致。
     # 2026-10-19 段名中性化（.ncguard→.ncx）时漏改这里 → 锁箱报
     # 「段 .ncguard 不存在」→ 构建失败（CI 39176711044 实证）。
-    _SECTIONS=".ncx"
-    if readelf -SW "$so" 2>/dev/null | grep -q '\.ncxr'; then
-      _SECTIONS=".ncx,.ncxr"
-    else
-      echo "  [lock] ⚠️ 未发现 .ncxr 段（NC_GUARD_SECTIONED 未定义？）" >&2
-      echo "  [lock]    → 签名判定函数已加密，但 SIG_SALT/SIG_HASH_STORED 仍在明文" >&2
-    fi
-    # ── VMP 解释器段（.nct，2026-11-13）─────────────────────────────
-    # .nct = 消费方（第二套）VMP 的【解释器】。
-    # 由 Amice 生成（AMICE_VM_INSN_SECTION=.nct），本仓库 C 代码不标记它，
-    # 所以只能探测。探测到就纳入一级锁箱。
+    # ── 一级锁箱的段列表 ────────────────────────────────────────────
+    # ⚠️⚠️ 用【数组】而不是字符串拼接（2026-11-13 重构）：
     #
-    # 为什么只有 .nct 能加密、.ncr 不能：
-    #   .ncr 是第一套（nox 解密链自己的 VMP）的解释器 —— 解 .ncx 的钥匙
-    #   要执行它里面的代码（ncg_boot_key 被 VMP）。若它加密则解锁前跑不了
-    #   → 自锁。只能明文。
-    #   .nct 是第一套解锁完成后才用到的（constructor(65535)），无循环依赖。
+    #   此前是三段字符串拼接：
+    #     _SECTIONS=".ncx"
+    #     _SECTIONS=".nct,$_SECTIONS"          # → .nct,.ncx
+    #     _SECTIONS=".nct,.ncv,$_SECTIONS"     # → .nct,.ncv,.nct,.ncx  ← .nct 两次！
+    #   第二句已经把 .nct 加进去了，第三句又写死一遍前缀。
     #
-    # ⚠️ 段序必须与 nc_guard_boot.c 的 segs[] 一致：.nct 排最前！
-    #   原因：.ncx 里的 wrapper 第一条就 bl 到解释器；若 .nct（解释器）
-    #   尚未解密 → 执行密文 → 真机 SIGILL（2026-11-12 实测，崩溃点在
-    #   .ncx 段内）。而 k_nct 只需 master（.ncxhr 已解），与 .ncx 无依赖。
-    # ⚠️ 解释器段必须可执行：它是代码不是数据。解密后按代码段处理（RX），
-    #   由 nc_guard_boot.c 的 is_code 分支决定。
+    #   后果（实测）：
+    #     · .nct 被 RC4 加密两次 → 等于还原成明文
+    #     · MAC 输入把 .nct 密文拼了两遍
+    #   症状：ncg_head_unlock 返回 -11（MAC 失败）→ .ncx/.nct 保持密文
+    #        → 执行密文 → SIGILL，崩溃点落在 .ncx+0x8f78，完全不指向段列表。
+    #
+    #   改用数组后：每个段只在 append 处出现一次，顺序由 append 顺序决定，
+    #   不可能重复。若要加新段，只在下面 append 一处加。
+    #
+    # 段序必须与 nc_guard_boot.c 的 segs[] 严格一致：
+    #   0 .nct   第二套解释器（k_nct）
+    #   1 .ncv   第二套字节码（k_bc2）
+    #   2 .ncx   业务代码+壳（k_so）
+    #   3 .ncxr  签名表（k_so_r）
+    _SEC_ARR=()
+    # ① .nct = 消费方第二套 VMP 的【解释器】
+    #   ⚠️ 必须排最前：.ncx 里的 wrapper 第一条就 bl 到解释器；若 .nct 尚未
+    #      解密 → 执行密文 → SIGILL（2026-11-12 实测，崩溃点在 .ncx 段内）。
+    #      而 k_nct 只需 master（.ncxhr 已解），与 .ncx 无依赖，先解不循环。
+    #   ⚠️ 解释器是代码，解密后按 RX 处理（由 is_code/SHF_EXECINSTR 决定）。
     if readelf -SW "$so" 2>/dev/null | grep -q '\.nct'; then
-      _SECTIONS=".nct,$_SECTIONS"
+      _SEC_ARR+=(".nct")
       echo "  [lock] 发现 .nct（消费方 VMP 解释器段），纳入一级锁箱"
     else
       echo "  [lock] 未发现 .nct —— 本次构建没有第二套 VMP 解释器可加密" >&2
     fi
-    # ── VM 字节码段（.ncv，2026-11-13）───────────────────────────────
-    # 字节码是【每个包独一无二的业务逻辑】，比解释器更值得保护：
-    #   解释器 = 通用 VM 规则（逆一次通吃所有包）
-    #   字节码 = 具体逻辑（每包不同）
-    # 之前它在 .rodata 明文段，只靠 Amice 的 bytecode.key（那个 key 由
-    # 编译期常量 seed 派生，写在解释器代码里，等于没有独立保护）。
-    #
-    # ⚠️ 为什么是 .ncv 而不是 .ncq：
-    #   .ncq/.ncs 是 nox 第一套（libnox.a 预编译进来的）用的段名。
-    #   两套链接进同一个 so，用同名段会混在一起 —— 实测后果是
-    #   第一套解释器按 adr 偏移找表却找到第二套的 → 寄存器读垃圾 → SIGSEGV。
-    #   第二套专用 .ncv(字节码) / .ncw(表)。
-    # ⚠️ 段序：.ncv 排在 .nct 之后即可（解锁后才被解释器读）。
+    # ② .ncv = 消费方第二套的【VM 字节码】
+    #   字节码是每包独有的业务逻辑，比解释器更值得保护（解释器是通用 VM 规则）。
+    #   ⚠️ 不能与第一套共用段名：两套链接进同一个 so，同名会混淆 →
+    #      第一套解释器按 adr 偏移找到第二套的表 → 寄存器读垃圾 → SIGSEGV。
+    #      第一套专用 .ncq(字节码)/.ncs(表)，第二套专用 .ncv/.ncw。
     if readelf -SW "$so" 2>/dev/null | grep -q '\.ncv'; then
-      _SECTIONS=".nct,.ncv,$_SECTIONS"
+      _SEC_ARR+=(".ncv")
       echo "  [lock] 发现 .ncv（消费方 VM 字节码段），纳入一级锁箱"
     else
       echo "  [lock] 未发现 .ncv —— 字节码仍在 .rodata（未单独加密）" >&2
+    fi
+    # ③ .ncx = 业务代码 + VMP 壳（一直都有）
+    _SEC_ARR+=(".ncx")
+    # ④ .ncxr = 签名表（可选）
+    if readelf -SW "$so" 2>/dev/null | grep -q '\.ncxr'; then
+      _SEC_ARR+=(".ncxr")
+    else
+      echo "  [lock] ⚠️ 未发现 .ncxr 段（NC_GUARD_SECTIONED 未定义？）" >&2
+      echo "  [lock]    → 签名判定函数已加密，但 SIG_SALT/SIG_HASH_STORED 仍在明文" >&2
+    fi
+    _SECTIONS=$(IFS=,; echo "${_SEC_ARR[*]}")
+    echo "  [lock] 锁箱段序: $_SECTIONS"
+    # ⚠️ 断言：段名不得重复。
+    #    2026-11-13 的 SIGILL 就是段名重复导致的（.nct 被加密两次 =
+    #    RC4 两次还原成明文 + MAC 拼两遍），而症状完全不指向段列表。
+    #    数组写法已从根上避免，这条断言是第二道保险（有人再改回字符串拼接时）。
+    _DUP=$(printf '%s\n' "${_SEC_ARR[@]}" | sort | uniq -d)
+    if [[ -n "$_DUP" ]]; then
+      echo "❌ 锁箱段列表有重复段名: $_DUP" >&2
+      echo "   → 重复加密 = RC4 两次还原成明文；MAC 也会拼错" >&2
+      echo "   → 症状是解锁返回 -11 + 执行密文 SIGILL，不指向这里" >&2
+      exit 1
     fi
     python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" \
       --section "$_SECTIONS" --from-apk "$IN_APK" \
