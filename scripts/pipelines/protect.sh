@@ -1090,7 +1090,7 @@ if [[ $WANT_VMP -eq 1 ]]; then
     # 两种情况结论相同，故不拆分支。
     export AMICE_MBA=false
     export AMICE_FLATTEN=false
-    log_info "不做混淆（未勾选代码混淆，或 TMP_VMP_ONLY=0），只保留 VMP"
+    log_info "不做混淆（未勾选代码混淆，或按函数分流的开关已关闭），只保留 VMP"
   fi
   # ⚠️⚠️ 2026-11-11 修（VMP 空转的真因）：必须设 AMICE_VM_VIRTUALIZE=true。
   #
