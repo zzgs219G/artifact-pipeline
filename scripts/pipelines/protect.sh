@@ -1071,16 +1071,26 @@ fi
 #    没这个跳过逻辑，全局开混淆会破坏 VMP。
 if [[ $WANT_VMP -eq 1 ]]; then
   resolve_amice_bundle "--vmp（指令级虚拟化）"
-  if [[ "${TMP_VMP_ONLY:-1}" == "1" ]]; then
-    # 按函数分流：全局开混淆，Amice 内部跳过 VMP 函数
+  if [[ "${TMP_VMP_ONLY:-1}" == "1" && $WANT_OBFUSCATE -eq 1 ]]; then
+    # 用户【勾了】代码混淆 + 开了 VMP → 按函数分流：
+    # 混淆全局生效，但 Amice 内部跳过标了 +vm_virtualize 的函数。
+    #
+    # ⚠️ 必须要求 WANT_OBFUSCATE -eq 1：初版无条件开 AMICE_MBA=true，
+    #    结果用户没勾混淆也被强行混淆 —— 且实测导致 sig_verify 从
+    #    "VMP 成功" 退回 "undef/poison 被跳过"（改动前 2 个跳过，
+    #    改动后 3 个）。没勾的模块不能因为内部实现细节被悄悄打开。
     export AMICE_MBA="${AMICE_MBA:-true}"
     export AMICE_FLATTEN="${AMICE_FLATTEN:-true}"
     log_info "混淆与 VMP 按函数分流（标了 +vm_virtualize 的函数不上混淆）"
   else
-    # 旧行为：全局关混淆，只留 VMP（上游 amice 无跳过逻辑时的安全选项）
+    # 两种情况走这里：
+    #   ① 用户没勾「代码混淆」→ 本来就不该混淆，关掉是对的
+    #   ② TMP_VMP_ONLY=0（用上游 amice，无跳过逻辑）→ 必须关，
+    #      否则弱混淆会破坏 VMP 的 CFG 识别
+    # 两种情况结论相同，故不拆分支。
     export AMICE_MBA=false
     export AMICE_FLATTEN=false
-    log_info "混淆全局关闭：仅 VMP，不做任何混淆（兼容上游 amice 的旧行为）"
+    log_info "不做混淆（未勾选代码混淆，或 TMP_VMP_ONLY=0），只保留 VMP"
   fi
   # ⚠️⚠️ 2026-11-11 修（VMP 空转的真因）：必须设 AMICE_VM_VIRTUALIZE=true。
   #
