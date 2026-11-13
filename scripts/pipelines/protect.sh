@@ -98,6 +98,70 @@ GUARD_LIB_DIR=""                              # 静态库形态时的 lib 目录
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# ── 构建期体积报告（2026-11-14）──────────────────────────────────────
+# 为什么需要：此前 protect.sh 完全不打 so 体积，想知道"各模块产生多大
+# so"只能自己 readelf 反汇编 —— 一次几十分钟，还常常推错。
+# 而体积是排查"为什么包变大/变多大算正常"的第一手信息。
+#
+# ⚠️ 位置在【锁箱之前】：这一刻的 so 是模块原始产物（VMP 已在编译期
+#    做完），是"模块自己的体量"。锁箱只改内容不改大小，所以这里打的
+#    数与最终产物一致，但语义更清楚 —— 它反映的是模块，不是加密。
+#
+# ⚠️ 只打日志，不做断言：体积随模块组合变化很大，没有普适阈值。
+#    断言该由具体组合的测试来写，不该在通用流水线里制造噪音。
+_size_report() {
+  local stage="$1" so
+  local _found=0
+  for so in "$WORK"/project/libs/*/libnc.so; do
+    [[ -f "$so" ]] || continue
+    _found=1
+    local abi; abi="$(basename "$(dirname "$so")")"
+    local total; total=$(stat -c%s "$so" 2>/dev/null || echo 0)
+    local kb; kb=$(awk -v t="$total" 'BEGIN{printf "%.1f", t/1024}')
+    echo "[size:$stage] $abi libnc.so = ${total} B (${kb} KB)"
+    # 按段分组打印。分组口径与 nox 的 nc_guard_report.c 一致，
+    # 这样构建期与运行期两份日志能直接对照。
+    if command -v readelf >/dev/null 2>&1; then
+      readelf -S -W "$so" 2>/dev/null | awk '
+        # strtonum() 是 gawk 扩展，Ubuntu runner 默认 mawk 没有 ——
+        # 用了会直接 "function not defined" 报错，整段体积明细消失。
+        # 所以自己算：逐位 h*16 + 十六进制值。
+        function hex2dec(h,   i, v, c) {
+          sub(/^0x/, "", h); v = 0
+          for (i = 1; i <= length(h); i++) {
+            c = tolower(substr(h, i, 1))
+            v = v * 16 + index("0123456789abcdef", c) - 1
+          }
+          return v
+        }
+        $2 ~ /^\.nc/ || $2 == ".text" || $2 == ".rodata" || $2 == ".data" {
+          name = $2; size = hex2dec($6)
+          if (name ~ /^\.(ncxh|ncxhr|nck|ncks)$/) g = "nox设施"
+          else if (name ~ /^\.(ncr|nct|ncq|ncv|ncs|ncw)$/) g = "VMP载荷"
+          else if (name ~ /^\.(ncx|ncxr)$/) g = "业务载荷"
+          else g = "基础代码"
+          sum[g] += size; det[g] = det[g] sprintf("      %-9s %9d B\n", name, size)
+          order[g] = 1
+        }
+        END {
+          split("nox设施 VMP载荷 业务载荷 基础代码", gs, " ")
+          cov = 0
+          for (i = 1; i <= 4; i++) {
+            g = gs[i]
+            if (!order[g]) continue
+            printf "  %-10s %9d B\n", g, sum[g]
+            printf "%s", det[g]
+            cov += sum[g]
+          }
+          printf "  %-10s %9d B\n", "已统计", cov
+        }' 2>/dev/null
+    else
+      echo "  [size] 无 readelf，跳过段明细"
+    fi
+  done
+  [[ $_found -eq 1 ]] || echo "[size:$stage] （未生成 libnc.so）"
+}
+
 WANT_SIGCHECK=0; WANT_DEX2C=0; WANT_PACKER=0; WANT_ENVCHECK=0; DEX2C_RULES=""
 PACKER_SMALLER=0   # 报错四十三:--packer-smaller(体积优化)→ 环境变量传 packer.sh
 DPT_EXTRA_ARGS_TEXT=""  # 通用 dpt 参数通道(报错四十三后方向调整):自由文本,空格分隔
@@ -1539,70 +1603,6 @@ fi
 
 log_step 4 6 "NDK 编译"
 ndk_build "$WORK/project"
-
-# ── 构建期体积报告（2026-11-14）──────────────────────────────────────
-# 为什么需要：此前 protect.sh 完全不打 so 体积，想知道"各模块产生多大
-# so"只能自己 readelf 反汇编 —— 一次几十分钟，还常常推错。
-# 而体积是排查"为什么包变大/变多大算正常"的第一手信息。
-#
-# ⚠️ 位置在【锁箱之前】：这一刻的 so 是模块原始产物（VMP 已在编译期
-#    做完），是"模块自己的体量"。锁箱只改内容不改大小，所以这里打的
-#    数与最终产物一致，但语义更清楚 —— 它反映的是模块，不是加密。
-#
-# ⚠️ 只打日志，不做断言：体积随模块组合变化很大，没有普适阈值。
-#    断言该由具体组合的测试来写，不该在通用流水线里制造噪音。
-_size_report() {
-  local stage="$1" so
-  local _found=0
-  for so in "$WORK"/project/libs/*/libnc.so; do
-    [[ -f "$so" ]] || continue
-    _found=1
-    local abi; abi="$(basename "$(dirname "$so")")"
-    local total; total=$(stat -c%s "$so" 2>/dev/null || echo 0)
-    local kb; kb=$(awk -v t="$total" 'BEGIN{printf "%.1f", t/1024}')
-    echo "[size:$stage] $abi libnc.so = ${total} B (${kb} KB)"
-    # 按段分组打印。分组口径与 nox 的 nc_guard_report.c 一致，
-    # 这样构建期与运行期两份日志能直接对照。
-    if command -v readelf >/dev/null 2>&1; then
-      readelf -S -W "$so" 2>/dev/null | awk '
-        # strtonum() 是 gawk 扩展，Ubuntu runner 默认 mawk 没有 ——
-        # 用了会直接 "function not defined" 报错，整段体积明细消失。
-        # 所以自己算：逐位 h*16 + 十六进制值。
-        function hex2dec(h,   i, v, c) {
-          sub(/^0x/, "", h); v = 0
-          for (i = 1; i <= length(h); i++) {
-            c = tolower(substr(h, i, 1))
-            v = v * 16 + index("0123456789abcdef", c) - 1
-          }
-          return v
-        }
-        $2 ~ /^\.nc/ || $2 == ".text" || $2 == ".rodata" || $2 == ".data" {
-          name = $2; size = hex2dec($6)
-          if (name ~ /^\.(ncxh|ncxhr|nck|ncks)$/) g = "nox设施"
-          else if (name ~ /^\.(ncr|nct|ncq|ncv|ncs|ncw)$/) g = "VMP载荷"
-          else if (name ~ /^\.(ncx|ncxr)$/) g = "业务载荷"
-          else g = "基础代码"
-          sum[g] += size; det[g] = det[g] sprintf("      %-9s %9d B\n", name, size)
-          order[g] = 1
-        }
-        END {
-          split("nox设施 VMP载荷 业务载荷 基础代码", gs, " ")
-          cov = 0
-          for (i = 1; i <= 4; i++) {
-            g = gs[i]
-            if (!order[g]) continue
-            printf "  %-10s %9d B\n", g, sum[g]
-            printf "%s", det[g]
-            cov += sum[g]
-          }
-          printf "  %-10s %9d B\n", "已统计", cov
-        }' 2>/dev/null
-    else
-      echo "  [size] 无 readelf，跳过段明细"
-    fi
-  done
-  [[ $_found -eq 1 ]] || echo "[size:$stage] （未生成 libnc.so）"
-}
 
 _size_report "编译后"
 
