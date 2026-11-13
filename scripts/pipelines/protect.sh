@@ -1745,16 +1745,35 @@ if [[ -d "$WORK/project/libs" ]]; then
     #   2 .ncx   业务代码+壳（k_so）
     #   3 .ncxr  签名表（k_so_r）
     _SEC_ARR=()
+    # ── 2026-11-13：.ncv/.nct 不进锁箱（用户决定）──────────────────
+    # 收益/代价实测：
+    #   .ncv 128,533 B 加密 → APK 压后从 37KB 涨到 128KB（+91KB）
+    #   .nct 104,200 B 加密 → APK 压后从 45KB 涨到 104KB（+59KB）
+    #   加密段熵 8.0，zlib 完全压不动（100.0%），体积代价是硬开销。
+    #
+    # 而加密带来的强度增益接近于零，理由：
+    #   ① 解释器不是秘密：Amice 开源，vmp-profile-func/runtime.vm 就在
+    #      公开仓库里，攻击者抄一份即可，不需要逆你的。
+    #   ② 解释器必须能执行 → 运行期必然在内存里明文（解密后 mprotect RX），
+    #      frida dump 一次就有。加密只在"静态读 so"这条路上有效。
+    #   ③ 五段共用同一 master：攻破一次五个全开。加密收益是"一次性"的，
+    #      体积代价是"线性"的 —— 多项加密的边际收益递减。
+    #
+    # 字节码（.ncv）的强度来自 VMP（理解成本），不来自加密（获取成本）。
+    # 所以这两个段保持明文，跟着 .rodata/.text 走正常压缩。
+    #
+    # ⚠️ 保留加密能力的段：.ncx / .ncxr / .ncxh（体积小、且是"判定逻辑"
+    #    本身 —— 那才是静态改包的目标）。
+    #
     # ① .nct = 消费方第二套 VMP 的【解释器】
     #   ⚠️ 必须排最前：.ncx 里的 wrapper 第一条就 bl 到解释器；若 .nct 尚未
     #      解密 → 执行密文 → SIGILL（2026-11-12 实测，崩溃点在 .ncx 段内）。
     #      而 k_nct 只需 master（.ncxhr 已解），与 .ncx 无依赖，先解不循环。
     #   ⚠️ 解释器是代码，解密后按 RX 处理（由 is_code/SHF_EXECINSTR 决定）。
     if readelf -SW "$so" 2>/dev/null | grep -q '\.nct'; then
-      _SEC_ARR+=(".nct")
-      echo "  [lock] 发现 .nct（消费方 VMP 解释器段），纳入一级锁箱"
+      echo "  [lock] 发现 .nct（消费方 VMP 解释器段）—— 不加密（体积/收益不划算）"
     else
-      echo "  [lock] 未发现 .nct —— 本次构建没有第二套 VMP 解释器可加密" >&2
+      echo "  [lock] 未发现 .nct —— 本次构建没有第二套 VMP 解释器" >&2
     fi
     # ② .ncv = 消费方第二套的【VM 字节码】
     #   字节码是每包独有的业务逻辑，比解释器更值得保护（解释器是通用 VM 规则）。
@@ -1762,10 +1781,9 @@ if [[ -d "$WORK/project/libs" ]]; then
     #      第一套解释器按 adr 偏移找到第二套的表 → 寄存器读垃圾 → SIGSEGV。
     #      第一套专用 .ncq(字节码)/.ncs(表)，第二套专用 .ncv/.ncw。
     if readelf -SW "$so" 2>/dev/null | grep -q '\.ncv'; then
-      _SEC_ARR+=(".ncv")
-      echo "  [lock] 发现 .ncv（消费方 VM 字节码段），纳入一级锁箱"
+      echo "  [lock] 发现 .ncv（消费方 VM 字节码段）—— 不加密（体积/收益不划算）"
     else
-      echo "  [lock] 未发现 .ncv —— 字节码仍在 .rodata（未单独加密）" >&2
+      echo "  [lock] 未发现 .ncv —— 本次构建没有第二套 VMP 字节码" >&2
     fi
     # ③ .ncx = 业务代码 + VMP 壳（一直都有）
     _SEC_ARR+=(".ncx")
