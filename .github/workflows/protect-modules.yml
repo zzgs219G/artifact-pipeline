@@ -184,6 +184,14 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/actions/tests/test_nox_copy_list.py
 
+      # 工具包版本一致性（2026-11-13 新增）
+      # 为什么需要：11-13 实测发现 nox.zip 登记 v0.9.12-obf 而实物是
+      # v0.9.37-plain（落后 25 个版本）。这类不一致没有任何现有断言能拦，
+      # 而它会让读文档的人（或 AI）据此推出完全错误的结论。
+      # 跑在 code 变更时（换 zip 通常伴随代码改动），也可手动触发。
+      - name: 工具包版本一致性（登记表 vs 实物 VERSION/sha256）
+        run: python3 scripts/actions/tests/test-toolkit-version.py
+
       - name: packer 冒烟（26 项，含 schema→arg 契约）
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/packer/tests/test-packer.sh
