@@ -1053,12 +1053,35 @@ fi
 #   --vmp 是【函数级强保护】：把函数体编译成自定义 VM 字节码，
 #     解锁后内存里不是明文 ARM64 而是字节码 → 挡住动态 dump。
 #
-# 只加载插件、不设 AMICE_MBA/AMICE_FLATTEN：VMP 由 annotate 逐函数启用，
-# 不需要也不想要全局弱混淆掺进来（两者叠加会让体积暴涨而强度增量很小）。
+# 混淆与 VMP 的关系（2026-11-14 改）：从"全局互斥"改为"按函数分流"。
+#
+# 旧做法：开 VMP 时全局关掉 MBA/Flatten。原因是两者叠加会互相破坏 ——
+#   Flatten 在 PipelineStart 先跑，把函数改成状态机后 VmVirtualize
+#   （OptimizerLast）识别不出原始 CFG → 该函数被 VMP 跳过 →
+#   防护从"读不懂"降级为"1~2 小时读懂"（实测见 nox NC_OBF 注释）。
+#
+# 新做法：全局开着，由 Amice 内部按函数注解跳过 ——
+#   `TMP_VMP_ONLY=1`（默认）时，标了 +vm_virtualize 的函数不上任何混淆，
+#   其余函数正常混淆。语义是【互斥而非叠加】：每函数只吃一层最强保护。
+#
+# ⚠️ 依赖 amice fork 的改动（2026-11-14）：各混淆 pass 的 do_pass 里读
+#    read_function_annotate，见到 +vm_virtualize / +vmp 就 continue。
+#    用上游 amice 时该跳过不存在，必须把 TMP_VMP_ONLY 设为 0 退回旧行为。
+# ⚠️ TMP_VMP_ONLY=0 会恢复旧语义（VMP 时全局不混淆），因为上游 amice
+#    没这个跳过逻辑，全局开混淆会破坏 VMP。
 if [[ $WANT_VMP -eq 1 ]]; then
   resolve_amice_bundle "--vmp（指令级虚拟化）"
-  export AMICE_MBA=false
-  export AMICE_FLATTEN=false
+  if [[ "${TMP_VMP_ONLY:-1}" == "1" ]]; then
+    # 按函数分流：全局开混淆，Amice 内部跳过 VMP 函数
+    export AMICE_MBA="${AMICE_MBA:-true}"
+    export AMICE_FLATTEN="${AMICE_FLATTEN:-true}"
+    log_info "混淆与 VMP 按函数分流（标了 +vm_virtualize 的函数不上混淆）"
+  else
+    # 旧行为：全局关混淆，只留 VMP（上游 amice 无跳过逻辑时的安全选项）
+    export AMICE_MBA=false
+    export AMICE_FLATTEN=false
+    log_info "混淆全局关闭（TMP_VMP_ONLY=0，仅 VMP）"
+  fi
   # ⚠️⚠️ 2026-11-11 修（VMP 空转的真因）：必须设 AMICE_VM_VIRTUALIZE=true。
   #
   #   函数注解（annotate("+vm_virtualize")）只是【函数级覆盖】，
@@ -1602,7 +1625,9 @@ if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
 fi
 
 log_step 4 6 "NDK 编译"
-ndk_build "$WORK/project"
+# tee 到文件：VMP/混淆的 skip 日志要从这里汇总（见下方产物侧断言）。
+# pipefail 已在脚本头部开启，ndk_build 的失败不会被 tee 吞掉。
+ndk_build "$WORK/project" 2>&1 | tee "$WORK/ndk-build.log"
 
 _size_report "编译后"
 
@@ -1647,6 +1672,32 @@ PYEOF
     fi
     log_info "VMP 产物检查: .ncx = $_ncx_sz 字节（非空，标记已落进加密段）"
     log_info "   ⚠️ 单函数是否真被虚拟化需真机/调试构建确认（AMICE_VM_EMIT_MARKERS）"
+
+    # ── VMP 跳过清单必须可见（2026-11-14）────────────────────────────
+    # 为什么需要：VMP 遇到不满足条件的函数会【静默跳过】，构建全绿而
+    # 实际没保护 —— 这是本项目反复踩的坑（AGENTS §3.3"日志有输出≠防护生效"）。
+    #
+    # amice fork 已把跳过日志从 debug! 提到 info!，格式固定：
+    #     [amice] VMP skipped: <函数名> (<原因>)
+    # 这里把它汇总成一行，让读日志的人/AI 一眼看到"哪些函数没有 VMP 保护"，
+    # 而不必反汇编产物逐函数判断。
+    #
+    # ⚠️ 只打印不 fail：跳过是预期行为（如 dex2c 产物因寄存器预算必跳过），
+    #    不是构建错误。数量异常时由人判断是否要调模块组合。
+    if [[ -f "$WORK/ndk-build.log" ]]; then
+      _skip_list=$(grep -oE '\[amice\] VMP skipped: [^ (]+' "$WORK/ndk-build.log" 2>/dev/null \
+                   | sed 's/.*skipped: //' | sort -u || true)
+      _skip_n=$(printf '%s\n' "$_skip_list" | grep -c . || echo 0)
+      if [[ "${_skip_n:-0}" -gt 0 ]]; then
+        log_warn "VMP 跳过了 $_skip_n 个函数（它们没有任何 VMP 保护）:"
+        printf '%s\n' "$_skip_list" | while read -r _fn; do
+          [[ -n "$_fn" ]] && log_warn "   - $_fn"
+        done
+        log_warn "   → 若这些都是关键函数，考虑换模块组合或调小函数体"
+      else
+        log_info "VMP 跳过清单: 无（所有标记函数都被虚拟化）"
+      fi
+    fi
   else
     log_err "VMP 已开启，但找不到产物 $_so_path"
     exit 1
