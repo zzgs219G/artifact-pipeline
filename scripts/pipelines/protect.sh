@@ -1068,7 +1068,12 @@ if [[ $WANT_VMP -eq 1 ]]; then
   #         → 必须明文：加密后解锁写回会覆盖链接器填的指针 → SIGILL
   # ⚠️ 为什么字节码不能直接进 .ncx：.ncx 里有函数（AX），const 数据
   #    进同段 clang 直接报 section type conflict（实测确认）。
-  export AMICE_VM_DATA_SECTION=".ncq,.ncs"
+  # ⚠️⚠️ 必须与 nox 打 .a 时用的段名【不同】（两者会链接进同一个 so）：
+  #   nox 第一套：.ncq 字节码 / .ncs 表
+  #   消费方第二套：.ncv 字节码 / .ncw 表
+  # 用同一组段名的后果（2026-11-13 实测）：两套的数据混在一段里，
+  # 第一套解释器按 adr 偏移找表却找到第二套的 → 寄存器读到垃圾 → SIGSEGV。
+  export AMICE_VM_DATA_SECTION=".ncv,.ncw"
   log_info "VMP 段: 解释器 .nct(加密) / 字节码 .ncq(加密) / 数据表 .ncs(明文)"
 fi
 
@@ -1746,18 +1751,24 @@ if [[ -d "$WORK/project/libs" ]]; then
     else
       echo "  [lock] 未发现 .nct —— 本次构建没有第二套 VMP 解释器可加密" >&2
     fi
-    # ── VM 字节码段（.ncq，2026-11-13）───────────────────────────────
+    # ── VM 字节码段（.ncv，2026-11-13）───────────────────────────────
     # 字节码是【每个包独一无二的业务逻辑】，比解释器更值得保护：
-    #   解释器是通用的 VM 规则（逆一次通吃所有包）
-    #   字节码是具体逻辑（每包不同）
+    #   解释器 = 通用 VM 规则（逆一次通吃所有包）
+    #   字节码 = 具体逻辑（每包不同）
     # 之前它在 .rodata 明文段，只靠 Amice 的 bytecode.key（那个 key 由
     # 编译期常量 seed 派生，写在解释器代码里，等于没有独立保护）。
-    # ⚠️ 段序：.ncq 排在 .nct 之后即可（它在解锁后才被解释器读）。
-    if readelf -SW "$so" 2>/dev/null | grep -q '\.ncq'; then
-      _SECTIONS=".nct,.ncq,$_SECTIONS"
-      echo "  [lock] 发现 .ncq（VM 字节码段），纳入一级锁箱"
+    #
+    # ⚠️ 为什么是 .ncv 而不是 .ncq：
+    #   .ncq/.ncs 是 nox 第一套（libnox.a 预编译进来的）用的段名。
+    #   两套链接进同一个 so，用同名段会混在一起 —— 实测后果是
+    #   第一套解释器按 adr 偏移找表却找到第二套的 → 寄存器读垃圾 → SIGSEGV。
+    #   第二套专用 .ncv(字节码) / .ncw(表)。
+    # ⚠️ 段序：.ncv 排在 .nct 之后即可（解锁后才被解释器读）。
+    if readelf -SW "$so" 2>/dev/null | grep -q '\.ncv'; then
+      _SECTIONS=".nct,.ncv,$_SECTIONS"
+      echo "  [lock] 发现 .ncv（消费方 VM 字节码段），纳入一级锁箱"
     else
-      echo "  [lock] 未发现 .ncq —— 字节码仍在 .rodata（未单独加密）" >&2
+      echo "  [lock] 未发现 .ncv —— 字节码仍在 .rodata（未单独加密）" >&2
     fi
     python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" \
       --section "$_SECTIONS" --from-apk "$IN_APK" \
