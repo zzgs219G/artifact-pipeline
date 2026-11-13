@@ -719,6 +719,10 @@ def main() -> int:
     ap.add_argument("--workflow", default=DEFAULT_WORKFLOW, help="workflow 文件名")
     ap.add_argument("--name", default="", help="任务显示名（面板可见）")
     ap.add_argument("--dpt-extra", default="", help="附加 dpt.jar 参数")
+    ap.add_argument("--no-lock", action="store_true",
+                    help="【测试用】跳过 so 锁箱（.ncx/.ncxr/.ncxh 保持明文）。"
+                         "产物能跑但静态可读，不可发给终端用户。"
+                         "用于对比锁箱前后差异、或排查是不是锁箱导致的问题")
 
     g = ap.add_argument_group("模块勾选")
     g.add_argument("--sigcheck", action="store_true", help="签名校验")
@@ -857,6 +861,8 @@ def main() -> int:
     want_sign = (args.sign or args.all) and not args.no_sign
     if want_sign:
         payload["sign"] = True
+    if args.no_lock:
+        payload["no_lock"] = True
     print(f"  workflow: {args.workflow}")
     if args.dry_run:
         print(f"  config:   {config}")

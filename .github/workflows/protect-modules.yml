@@ -52,6 +52,11 @@ on:
         required: false
         type: boolean
         default: false
+      no_lock:
+        description: '【测试用】跳过 so 锁箱（.ncx/.ncxr/.ncxh 保持明文）。产物能跑但静态可读，不可发给终端用户'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   # ── 秒级回归（2026-11-01 新增）────────────────────────────────────
@@ -655,6 +660,11 @@ jobs:
     # 同时排除 amice_probe 模式：那个模式只做插件探路，不下 APK、不出包。
     if: github.event_name == 'workflow_dispatch' && !inputs.amice_probe
     env:
+      # 测试开关：跳过锁箱（见 protect.sh 的 TMP_NOLOCK 注释）。
+      # 为什么用 env 而不是 CLI 参数：它不该出现在 protect.sh 的
+      # usage 里（那会让人以为它是正式选项），也不进 config-schema
+      # （App 端看不到，不会被误勾）。
+      TMP_NOLOCK: ${{ inputs.no_lock && '1' || '0' }}
       R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
       R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
       R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}

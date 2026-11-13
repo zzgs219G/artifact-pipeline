@@ -30,9 +30,14 @@ assert "workflow_dispatch" in pif, \
     "protect job 必须用 if 限制为 workflow_dispatch（否则 push 时因缺输入必然失败）"
 
 inputs = trigger["workflow_dispatch"]["inputs"]
+# no_lock（2026-11-13）：测试用，跳过 so 锁箱。
+# ⚠️ 它【不在 config-schema.json 里】—— 那是给 App 勾选 UI 用的，
+#    而这个开关不该出现在用户界面（跳过锁箱 = 产物静态可读）。
+#    只能通过 workflow input 或 trigger_build.py --no-lock 触发。
 assert set(inputs) == {"apk_url", "protect_config", "dpt_extra_args", "sign",
-                       "amice_probe"}, \
-    f"inputs 应为 apk_url+protect_config+dpt_extra_args+sign+amice_probe: {list(inputs)}"
+                       "amice_probe", "no_lock"}, \
+    f"inputs 应为 apk_url+protect_config+dpt_extra_args+sign+amice_probe+no_lock: {list(inputs)}"
+assert inputs["no_lock"]["default"] is False, "no_lock 必须默认 false（默认照常锁箱）"
 assert inputs["protect_config"]["required"] is True
 assert inputs["dpt_extra_args"]["required"] is False, "dpt_extra_args 应可选(报错四十三通用通道)"
 assert "dpt.jar" in inputs["dpt_extra_args"]["description"], "dpt_extra_args 描述缺用途说明"

@@ -66,6 +66,9 @@ ALLOW = {
     'ANDROID_NDK_HOME', 'ANDROID_HOME', 'ANDROID_SDK_ROOT', 'JAVA_HOME',
     'R2_ACCESS_KEY', 'R2_SECRET_KEY', 'R2_ENDPOINT', 'R2_BUCKET',
     'R2_PUBLIC_DOMAIN',
+    # 构建期调试开关（2026-11-13）：全是 `${VAR:-默认值}` 形态，
+    # 由 CI env 或本地 export 传入，脚本内不赋值 —— 与 TMP_NOMARK 同族。
+    'TMP_NOLOCK', 'TMP_NOMARK',
     # bash / 常见工具
     'BASH_SOURCE', 'FUNCNAME', 'LINENO', 'IFS', 'PS4', 'RANDOM', 'SECONDS',
     'REPLY', 'OPTARG', 'OPTIND', 'UID', 'EUID', 'PPID', 'SHELL',

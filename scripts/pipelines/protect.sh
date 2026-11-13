@@ -1669,7 +1669,27 @@ fi
 # cert 与 package 都由 so-section-lock.py 从 $IN_APK 自己提（定点读 Signing
 # Block + AXML 解析），protect.sh 不重复实现 —— 单一职责。
 # 换 key 重打包 → cert 变 → k_so 变 → 密文解不开（fail-closed）。
-if [[ -d "$WORK/project/libs" ]]; then
+#
+# ── TMP_NOLOCK：测试用，跳过锁箱（2026-11-13）─────────────────────
+# 用途：本地/CI 排查时想看"不锁箱的产物长什么样"，或对比锁箱前后差异。
+#   TMP_NOLOCK=1 python3 scripts/trigger_build.py ...
+#
+# ⚠️ 这是【临时开关】，不是产品选项：
+#   · 不走 config-schema.json（App 端看不到，不会误勾）
+#   · 默认 0（不设就照常锁箱）
+#   · 跳过锁箱 = .ncx/.ncxr/.ncxh 保持明文，静态可读。
+#     产物【能跑】（nc_guard_boot.c 有"未锁"分支：magic 不匹配 → stub
+#     直接返回 → 段是明文 → 本体照常执行），但**不能发给终端用户**。
+#
+# 与 TMP_NOMARK 同类：都是构建期调试开关，用 ${VAR:-0} 读环境变量，
+# 不进参数解析（避免被当成正式 CLI 选项写进文档）。
+if [[ "${TMP_NOLOCK:-0}" == "1" ]]; then
+  echo ""
+  echo "⚠️⚠️ TMP_NOLOCK=1：跳过 so 锁箱（.ncx/.ncxr/.ncxh 保持明文）"
+  echo "     产物能跑，但静态可读，【不可发给终端用户】"
+  echo ""
+fi
+if [[ "${TMP_NOLOCK:-0}" != "1" && -d "$WORK/project/libs" ]]; then
   for so in "$WORK"/project/libs/*/libnc.so; do
     [[ -f "$so" ]] || continue
     # ── .comment 段移除（2026-10-21，白嫖清单 #2——实为还债）──────
@@ -1850,6 +1870,40 @@ if [[ -d "$WORK/project/libs" ]]; then
       echo "❌ 元数据清理失败 —— 产物将泄露函数边界与工具链指纹" >&2
       exit 1
     }
+  done
+fi
+
+# ── TMP_NOLOCK 的产物断言（2026-11-13）───────────────────────────────
+# 为什么需要：开关失效没人发现 = 最危险的那类 bug（以为没锁，实际锁了；
+# 或以为锁了，实际明文）。这里在产物侧验，不看日志。
+if [[ "${TMP_NOLOCK:-0}" == "1" ]]; then
+  for so in "$WORK"/project/libs/*/libnc.so; do
+    [[ -f "$so" ]] || continue
+    _ent=$(python3 -c "
+import sys, math
+d = open('$so','rb').read()
+# 取 .ncx 段
+sh = int.from_bytes(d[0x28:0x30],'little'); es = int.from_bytes(d[0x3a:0x3c],'little')
+en = int.from_bytes(d[0x3c:0x3e],'little'); si = int.from_bytes(d[0x3e:0x40],'little')
+o = sh + si*es; so_off = int.from_bytes(d[o+0x18:o+0x20],'little')
+for k in range(en):
+    o = sh + k*es; no = int.from_bytes(d[o:o+4],'little')
+    nm = d[so_off+no: d.index(b'\0', so_off+no)].decode()
+    if nm == '.ncx':
+        fo = int.from_bytes(d[o+0x18:o+0x20],'little')
+        sz = int.from_bytes(d[o+0x20:o+0x28],'little')
+        seg = d[fo:fo+sz]
+        c = [0]*256
+        for b in seg: c[b] += 1
+        print('%.2f' % -sum((v/len(seg))*math.log2(v/len(seg)) for v in c if v))
+        break
+" 2>/dev/null || echo "0")
+    if awk "BEGIN{exit !(${_ent:-0} > 7.5)}" 2>/dev/null; then
+      echo "❌ TMP_NOLOCK=1 但 $(basename $(dirname $so)) 的 .ncx 熵 ${_ent}（仍是密文）" >&2
+      echo "   → 开关没生效，检查 protect.sh 的 TMP_NOLOCK 判定" >&2
+      exit 1
+    fi
+    echo "  [nolock] $(basename $(dirname $so)): .ncx 熵 ${_ent}（明文，符合预期）"
   done
 fi
 
