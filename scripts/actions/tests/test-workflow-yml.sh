@@ -34,10 +34,18 @@ inputs = trigger["workflow_dispatch"]["inputs"]
 # ⚠️ 它【不在 config-schema.json 里】—— 那是给 App 勾选 UI 用的，
 #    而这个开关不该出现在用户界面（跳过锁箱 = 产物静态可读）。
 #    只能通过 workflow input 或 trigger_build.py --no-lock 触发。
+# no_nox（2026-11-13）：测试用，完全不注入 nox。
+# 与 no_lock 不是一回事：
+#   no_lock = 注入 nox 但不加密（段明文）
+#   no_nox  = 连 nox 的 .c 都不编进 so（量模块自身体积用）
 assert set(inputs) == {"apk_url", "protect_config", "dpt_extra_args", "sign",
-                       "amice_probe", "no_lock"}, \
-    f"inputs 应为 apk_url+protect_config+dpt_extra_args+sign+amice_probe+no_lock: {list(inputs)}"
+                       "amice_probe", "no_lock", "no_nox"}, \
+    f"inputs 应为 apk_url+protect_config+dpt_extra_args+sign+amice_probe+no_lock+no_nox: {list(inputs)}"
 assert inputs["no_lock"]["default"] is False, "no_lock 必须默认 false（默认照常锁箱）"
+assert inputs["no_nox"]["default"] is False, "no_nox 必须默认 false（默认照常注入 nox）"
+assert inputs["no_nox"].get("type") == "boolean", "no_nox 应为 boolean 类型"
+assert "不可发布" in inputs["no_nox"]["description"], \
+    "no_nox 描述必须写明不可发布（无 nox = 零加壳保护）"
 assert inputs["protect_config"]["required"] is True
 assert inputs["dpt_extra_args"]["required"] is False, "dpt_extra_args 应可选(报错四十三通用通道)"
 assert "dpt.jar" in inputs["dpt_extra_args"]["description"], "dpt_extra_args 描述缺用途说明"

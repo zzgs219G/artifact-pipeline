@@ -57,6 +57,11 @@ on:
         required: false
         type: boolean
         default: false
+      no_nox:
+        description: '【测试用】完全不注入 nox（so 里不含任何 nc_guard_* 代码）。用于量模块自身体积。产物无任何加壳保护，不可发布'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   # ── 秒级回归（2026-11-01 新增）────────────────────────────────────
@@ -665,6 +670,9 @@ jobs:
       # usage 里（那会让人以为它是正式选项），也不进 config-schema
       # （App 端看不到，不会被误勾）。
       TMP_NOLOCK: ${{ inputs.no_lock && '1' || '0' }}
+      # 与 TMP_NOLOCK 不是一回事：这个连 nox 的 .c 都不编进 so。
+      # 见 protect.sh 里 TMP_NONOX 的注释（量模块体积用的那一段）。
+      TMP_NONOX: ${{ inputs.no_nox && '1' || '0' }}
       R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
       R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
       R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}

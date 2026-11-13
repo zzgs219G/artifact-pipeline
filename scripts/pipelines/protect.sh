@@ -826,7 +826,25 @@ fi
 #      会先因缺证书路径失败——两层失败叠加，构建期未必拦得住）。
 #    有 .ncx 段就可能存在（转译产物会被标段）就必须有解锁设施——
 #    设施跟随【被保护资产】走，不跟随【最先勾了哪个防御模块】走。
-if [[ -d "$WORK/project/jni/nc" || $WANT_TRANSPILE -eq 1 ]]; then
+if [[ "${TMP_NONOX:-0}" == "1" ]]; then
+  # ── TMP_NONOX：整层不注入 nox（2026-11-13）──────────────────────
+  # 与 TMP_NOLOCK 的区别（两者不是一回事，容易混）：
+  #   TMP_NOLOCK = 注入 nox，但跳过【加密】这一步（段保持明文）
+  #   TMP_NONOX  = 根本不注入 nox（一个 nc_guard_*.c 都不编进 so）
+  #
+  # 用途：量「不用 nox 时 so 多大」——即模块自己的真实体量。
+  # TMP_NOLOCK 拿不到这个数：nox 的 .c 照样编进去，占着 .text 与
+  # 各段，只是内容是明文。要"没有 nox"就必须连源文件都不拷。
+  #
+  # ⚠️ 产物不可发布：没有解锁设施，但有 .ncx 段标记（sigcheck/dex2c
+  #    标进去的函数）—— 段是普通别名段，函数照常执行，能跑；
+  #    但也完全没有加壳保护。
+  _guard_dst=""
+  echo ""
+  echo "⚠️⚠️ TMP_NONOX=1：不注入 nox（so 里不含任何 nc_guard_* 代码）"
+  echo "     用途：量模块自身体积。产物无任何加壳保护，【不可发布】"
+  echo ""
+elif [[ -d "$WORK/project/jni/nc" || $WANT_TRANSPILE -eq 1 ]]; then
   mkdir -p "$WORK/project/jni/nc"
   _guard_dst="$WORK/project/jni/nc"
 elif [[ -d "$WORK/project/jni" ]]; then
@@ -1689,7 +1707,8 @@ if [[ "${TMP_NOLOCK:-0}" == "1" ]]; then
   echo "     产物能跑，但静态可读，【不可发给终端用户】"
   echo ""
 fi
-if [[ "${TMP_NOLOCK:-0}" != "1" && -d "$WORK/project/libs" ]]; then
+# ⚠️ TMP_NONOX 也跳过锁箱：没有 nox 就没有解锁器，锁了必然运行期 SIGILL。
+if [[ "${TMP_NOLOCK:-0}" != "1" && "${TMP_NONOX:-0}" != "1" && -d "$WORK/project/libs" ]]; then
   for so in "$WORK"/project/libs/*/libnc.so; do
     [[ -f "$so" ]] || continue
     # ── .comment 段移除（2026-10-21，白嫖清单 #2——实为还债）──────
@@ -1907,8 +1926,44 @@ for k in range(en):
   done
 fi
 
+# ── TMP_NONOX 的产物断言（2026-11-13）───────────────────────────────
+# 为什么验产物而不是看日志：开关失效是静默的。若 TMP_NONOX=1 但 nox
+# 还是被编进去了，量出来的"模块体积"就凭空多出 nox 那一份，而结果看起来
+# 完全正常 —— 这种错会直接污染体积基线，比构建失败危险得多。
+#
+# 判据：so 里绝不能出现 nox 的解锁链符号 / 段。
+#   · .ncxh/.nck/.ncks/.ncxhr —— nox 独有的锁箱段
+#   · ncg_* 符号 —— nox 的函数前缀（strip 后没了，故主要看段）
+#   · .ncx 必须仍存在（sigcheck/dex2c 会标进去），但它应是普通段
+if [[ "${TMP_NONOX:-0}" == "1" ]]; then
+  for so in "$WORK"/project/libs/*/libnc.so; do
+    [[ -f "$so" ]] || continue
+    _abi=$(basename "$(dirname "$so")")
+    _bad=$(python3 -c "
+import sys
+d = open('$so','rb').read()
+sh = int.from_bytes(d[0x28:0x30],'little'); es = int.from_bytes(d[0x3a:0x3c],'little')
+en = int.from_bytes(d[0x3c:0x3e],'little'); si = int.from_bytes(d[0x3e:0x40],'little')
+o = sh + si*es; so_off = int.from_bytes(d[o+0x18:o+0x20],'little')
+names = []
+for k in range(en):
+    o = sh + k*es; no = int.from_bytes(d[o:o+4],'little')
+    names.append(d[so_off+no: d.index(b'\0', so_off+no)].decode('ascii','replace'))
+nox_only = [n for n in names if n in ('.ncxh','.nck','.ncks','.ncxhr')]
+print(','.join(nox_only))
+" 2>/dev/null || echo "读取失败")
+    if [[ -n "$_bad" ]]; then
+      echo "❌ TMP_NONOX=1 但 $_abi 的 so 里仍有 nox 段: $_bad" >&2
+      echo "   → 开关没生效，量出来的体积会混入 nox，基线不可用" >&2
+      exit 1
+    fi
+    _sz=$(stat -c%s "$so" 2>/dev/null || echo 0)
+    echo "  [nonox] $_abi: so ${_sz} 字节，无 nox 锁箱段（符合预期）"
+  done
+fi
+
 if [[ $WANT_TRANSPILE -eq 1 ]]; then
-  # native 化：把已抽进 so 的方法在 smali 里改成 native 壳，并插 System.loadLibrary("nc")
+  # native 化：把已抽进 smali 的方法改成 native 壳，并插 System.loadLibrary("nc")
   # （dcc 原版只在自带重打包路径里做壳替换且不插 loadLibrary，纯成品 APK 后处理必须自动补齐）
   python3 "$ROOT/scripts/repack/mark-native.py" \
     "$WORK/project/jni/nc/compiled_methods.txt" "$WORK/decompiled"

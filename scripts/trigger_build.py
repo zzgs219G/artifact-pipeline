@@ -719,10 +719,21 @@ def main() -> int:
     ap.add_argument("--workflow", default=DEFAULT_WORKFLOW, help="workflow 文件名")
     ap.add_argument("--name", default="", help="任务显示名（面板可见）")
     ap.add_argument("--dpt-extra", default="", help="附加 dpt.jar 参数")
+    ap.add_argument("--direct", action="store_true",
+                    help="绕过 relay，直接用 gh workflow run 触发。"
+                         "用途：relay 只转发它认识的字段（实测 no_lock 会被静默丢弃），"
+                         "需要传新参数时走这条路。要求本机已 gh auth login")
+    ap.add_argument("--repo", default="zzgs219G/artifact-pipeline",
+                    help="--direct 模式的目标仓库（默认 %(default)s）")
     ap.add_argument("--no-lock", action="store_true",
                     help="【测试用】跳过 so 锁箱（.ncx/.ncxr/.ncxh 保持明文）。"
                          "产物能跑但静态可读，不可发给终端用户。"
                          "用于对比锁箱前后差异、或排查是不是锁箱导致的问题")
+    ap.add_argument("--no-nox", action="store_true",
+                    help="【测试用】完全不注入 nox：一个 nc_guard_*.c 都不编进 so。"
+                         "用途是量「模块自己」的 so 体积（--no-lock 做不到这一点，"
+                         "它只是不加密，nox 代码照样编进去占体积）。"
+                         "产物无任何加壳保护，不可发布")
 
     g = ap.add_argument_group("模块勾选")
     g.add_argument("--sigcheck", action="store_true", help="签名校验")
@@ -863,7 +874,49 @@ def main() -> int:
         payload["sign"] = True
     if args.no_lock:
         payload["no_lock"] = True
+    if args.no_nox:
+        payload["no_nox"] = True
     print(f"  workflow: {args.workflow}")
+
+    if args.direct:
+        # ── 直连模式（2026-11-13）─────────────────────────────────────
+        # 为什么需要：relay 只转发它认识的字段，新参数（如 no_lock）会被
+        # **静默丢弃** —— 实测 payload 带了 no_lock=true，workflow 收到的
+        # 仍是默认值 0。relay 是外部服务，本仓库改不了。
+        #
+        # 直连模式：上传 R2 后直接 gh workflow run，参数原样进 workflow input。
+        # ⚠️ 要求 `gh auth login` 已登录且有 workflow 触发权限。
+        if args.dry_run:
+            cmd = ["gh", "workflow", "run", args.workflow, "-R", args.repo]
+            for k, v in payload.items():
+                if k == "workflow_file":
+                    continue
+                cmd += ["-f", "%s=%s" % (k, v)]
+            print("  direct payload:")
+            for k, v in payload.items():
+                if k != "workflow_file":
+                    print("    -f %s=%s" % (k, v))
+            print()
+            print("（dry-run：未发送任何请求）")
+            return 0
+
+        cmd = ["gh", "workflow", "run", args.workflow, "-R", args.repo]
+        for k, v in payload.items():
+            if k == "workflow_file":
+                continue
+            if isinstance(v, bool):
+                cmd += ["-f", "%s=%s" % (k, "true" if v else "false")]
+            else:
+                cmd += ["-f", "%s=%s" % (k, v)]
+        print("  direct: %s" % " ".join(cmd[:6] + ["..."]))
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            die("gh workflow run 失败：%s%s" % (r.stdout, r.stderr))
+        print("  ✅ 已直连触发（gh workflow run）")
+        print("     ⚠️ 直连模式无法回显模块勾选（relay 的 /api/jobs 不适用）")
+        print("     ⚠️ 产物不走 relay 下载，到 Actions 页面取 artifact")
+        return 0
+
     if args.dry_run:
         print(f"  config:   {config}")
         print(f"  payload:  {json.dumps(payload, ensure_ascii=False)}")
