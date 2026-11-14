@@ -187,6 +187,9 @@ WANT_CHACHA20=0
 WANT_OBFUSCATE=0
 OBF_MBA=0
 OBF_FLATTEN=0
+OBF_INDIRECT_CALL=0
+OBF_INDIRECT_BRANCH=0
+OBF_VM_FLATTEN=0
 # --dex2c-static-register（2026-11-10）：dex2c 的业务方法改用【静态短名】注册。
 #
 # 为什么需要这个开关：
@@ -212,14 +215,19 @@ OBF_FLATTEN=0
 # 风险：动态注册有真机实证（见下方 dcc.py 调用处的大段注释），静态短名
 #   注册在这条链上【没有】行过真机。开了这个开关必须真机验一遍启动不崩。
 WANT_DEX2C_STATIC_REG=0
-# --vmp（2026-11-10）：指令级虚拟化，只作用于 .ncx 里被 annotate 的业务函数。
+# --vmp（2026-11-10）：指令级虚拟化 + 附加混淆的总开关。
 #
-# 为什么要它（与 --obfuscate 的分工）：
-#   --obfuscate 实测在本项目里几乎是空的 —— NC_OBF 宏没有任何函数在用
-#   （三个解密链函数都搬去 VMP 文件了），消费方的 8 个 .c 也是零 annotate，
-#   所以只剩全局 MBA 在起作用（算术重写，化简就回来了）。强度很低。
-#   --vmp 是函数级强保护：函数体编译成自定义 VM 字节码，解锁后内存里不是
-#   明文 ARM64 → 挡住动态 dump（这是 .ncx 锁箱挡不住的那一类）。
+# 分工（2026-11-14 合并后）：
+#   VMP 部分：函数体编译成自定义 VM 字节码，解锁后内存里不是明文 ARM64
+#     → 挡住动态 dump（这是 .ncx 锁箱挡不住的那一类）。这是强度最高的
+#     一层，作用于签名校验 4 个函数 + 字符串加密 5 个算法函数。
+#   混淆部分（五个子项，可选）：VMP 只管函数体【内部】，管不了
+#     「谁调用谁」「跳到哪」—— 那是逆向分析的第一步。结构性混淆
+#     （indirect_call / indirect_branch）补的正是这个盲区，
+#     且体积与性能代价近乎为零。
+#     ⚠️ 曾经的判断是「--obfuscate 在本项目里几乎是空的（只剩 MBA 在起作用，
+#        强度很低）」—— 那句话现在只对 MBA/Flatten 成立，不适用于新增的
+#        三个结构性 pass。
 #
 # 依赖：必须配 --dex2c-static-register（动态注册的 JNINativeMethod 表取了
 #   函数地址，Amice 会静默跳过，见该变量处注释）。
@@ -297,6 +305,9 @@ while [[ $# -gt 0 ]]; do
     --vmp-keep-dynamic-register) WANT_VMP=1; shift ;;   # 历史参数，保留兼容（现等价于 --vmp）
     --obfuscate-mba) WANT_OBFUSCATE=1; OBF_MBA=1; shift ;;
     --obfuscate-flatten) WANT_OBFUSCATE=1; OBF_FLATTEN=1; shift ;;
+    --obfuscate-indirect-call) WANT_OBFUSCATE=1; OBF_INDIRECT_CALL=1; shift ;;
+    --obfuscate-indirect-branch) WANT_OBFUSCATE=1; OBF_INDIRECT_BRANCH=1; shift ;;
+    --obfuscate-vm-flatten) WANT_OBFUSCATE=1; OBF_VM_FLATTEN=1; shift ;;
     *)          log_err "未知参数: $1"; usage ;;
   esac
 done
@@ -988,11 +999,12 @@ fi
 #   ② 报错退出 —— 不做"找不到就静默跳过混淆"的降级：
 #      用户勾了混淆却没生效，比构建失败危险得多（以为防了其实没防）。
 _OBF_SPEC=""
-# ── Amice bundle 解析（--obfuscate 与 --vmp 共用，2026-11-10 抽出）──
-# 两个开关都需要「插件本体 + host libLLVM + 配套 NDK」这套环境，
-# 但需要的 pass 不同：
-#   --obfuscate → 全局 MBA / flatten（写法是环境变量，作用于所有编译单元）
-#   --vmp       → 只加载插件，靠 annotate("+vm_virtualize") 逐个函数启用
+# ── Amice bundle 解析（VMP 与混淆共用，2026-11-10 抽出）──
+# VMP 与混淆都需要「插件本体 + host libLLVM + 配套 NDK」这套环境，
+# 但启用的 pass 不同：
+#   无混淆、只 VMP → 只加载插件，靠 annotate("+vm_virtualize") 逐函数启用
+#   带混淆        → 额外用环境变量打开五个 pass（作用于所有编译单元，
+#                   但会被 amice fork 按函数注解跳过 —— 标了 VMP 的不重复加工）
 # 抽成一个函数是为了避免两份"找 bundle/校验/定位 NDK"的代码漂移
 # （本仓库吃过多次"抄一遍=制造第二份真相"的亏，见 setup-toolchain 的来历）。
 resolve_amice_bundle() {
@@ -1029,19 +1041,52 @@ resolve_amice_bundle() {
 
 if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   resolve_amice_bundle "--obfuscate（代码混淆）"
-  # 子项默认：MBA 开（低风险，默认勾选），flatten 关（高风险，显式才开）。
-  # 注意"父模块勾了但没勾任何子项"的情形：schema 里 mba 默认 true，
-  # 正常不会发生；但命令行直调时可能出现，此处按"什么都没勾=不开混淆"处理，
-  # 并明确报错而不是静默跑一遍没效果的编译。
-  if [[ $OBF_MBA -eq 0 && $OBF_FLATTEN -eq 0 ]]; then
-    log_err "勾选了代码混淆，但没选任何混淆强度（--obfuscate-mba / --obfuscate-flatten）"
+  # 五个子项，分两类：
+  #
+  #   弱混淆（可静态还原，但便宜）
+  #     mba            算术改写        —— 被 souper 类工具可还原
+  #     flatten        控制流扁平化    —— 状态码明文，配表可还原
+  #   结构性混淆（VMP 覆盖不到的那一层）
+  #     indirect_call  隐藏调用关系    —— VMP 只保护函数体内部，看不到「谁调用谁」
+  #     indirect_branch 隐藏跳转目标   —— 与上一条互补
+  #     vm_flatten     动态控制流      —— 每次运行路径都不同，唯一抗「反复跑+观察」
+  #
+  # ⚠️ 五个全勾时以 vm_flatten 替代 flatten（两者都改控制流，叠加只是
+  #    互相削弱且体积翻倍）。见下方校验。
+  if [[ $OBF_MBA -eq 0 && $OBF_FLATTEN -eq 0 && $OBF_INDIRECT_CALL -eq 0 \
+        && $OBF_INDIRECT_BRANCH -eq 0 && $OBF_VM_FLATTEN -eq 0 ]]; then
+    log_err "勾选了代码混淆，但没选任何混淆强度"
+    log_err "     可选：--obfuscate-mba / --obfuscate-flatten /"
+    log_err "           --obfuscate-indirect-call / --obfuscate-indirect-branch /"
+    log_err "           --obfuscate-vm-flatten"
     exit 1
   fi
-  [[ $OBF_MBA -eq 1 ]] && _OBF_SPEC="mba"
-  [[ $OBF_FLATTEN -eq 1 ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}flatten"
+
+  _OBF_SPEC=""
+  [[ $OBF_MBA -eq 1 ]]             && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}mba"
+  [[ $OBF_FLATTEN -eq 1 ]]         && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}flatten"
+  [[ $OBF_INDIRECT_CALL -eq 1 ]]   && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}indirect_call"
+  [[ $OBF_INDIRECT_BRANCH -eq 1 ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}indirect_branch"
+  [[ $OBF_VM_FLATTEN -eq 1 ]]      && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}vm_flatten"
+
   export AMICE_MBA="$([[ $OBF_MBA -eq 1 ]] && echo true || echo false)"
   export AMICE_FLATTEN="$([[ $OBF_FLATTEN -eq 1 ]] && echo true || echo false)"
-  log_info "代码混淆: $_OBF_SPEC（AMICE_MBA=$AMICE_MBA AMICE_FLATTEN=$AMICE_FLATTEN）"
+  export AMICE_INDIRECT_CALL="$([[ $OBF_INDIRECT_CALL -eq 1 ]] && echo true || echo false)"
+  export AMICE_INDIRECT_BRANCH="$([[ $OBF_INDIRECT_BRANCH -eq 1 ]] && echo true || echo false)"
+  export AMICE_VM_FLATTEN="$([[ $OBF_VM_FLATTEN -eq 1 ]] && echo true || echo false)"
+
+  # vm_flatten 与 flatten 都改控制流：叠加会互相削弱（后者把 CFG 摊平后，
+  # 前者的「每次运行路径不同」就没多少跳转点可用了），且体积白白翻倍。
+  # 两者都勾时保留 vm_flatten —— 它是动态的，抗分析能力严格更强。
+  if [[ $OBF_VM_FLATTEN -eq 1 && $OBF_FLATTEN -eq 1 ]]; then
+    export AMICE_FLATTEN=false
+    log_warn "同时勾了 flatten 与 vm_flatten → 只保留 vm_flatten（动态版严格更强）"
+  fi
+
+  log_info "代码混淆: $_OBF_SPEC"
+  log_info "  AMICE_MBA=$AMICE_MBA AMICE_FLATTEN=$AMICE_FLATTEN"
+  log_info "  AMICE_INDIRECT_CALL=$AMICE_INDIRECT_CALL AMICE_INDIRECT_BRANCH=$AMICE_INDIRECT_BRANCH"
+  log_info "  AMICE_VM_FLATTEN=$AMICE_VM_FLATTEN"
   log_info "混淆用 NDK: $AMICE_NDK_HOME（bundle 自带，与插件配套）"
 fi
 
@@ -1073,14 +1118,12 @@ if [[ $WANT_VMP -eq 1 ]]; then
   resolve_amice_bundle "--vmp（指令级虚拟化）"
   if [[ "${TMP_VMP_ONLY:-1}" == "1" && $WANT_OBFUSCATE -eq 1 ]]; then
     # 用户【勾了】代码混淆 + 开了 VMP → 按函数分流：
-    # 混淆全局生效，但 Amice 内部跳过标了 +vm_virtualize 的函数。
+    # 混淆全局生效（沿用上面 OBF_* 解析出的具体值），
+    # 但 Amice 内部跳过标了 +vm_virtualize 的函数。
     #
-    # ⚠️ 必须要求 WANT_OBFUSCATE -eq 1：初版无条件开 AMICE_MBA=true，
-    #    结果用户没勾混淆也被强行混淆 —— 且实测导致 sig_verify 从
-    #    "VMP 成功" 退回 "undef/poison 被跳过"（改动前 2 个跳过，
-    #    改动后 3 个）。没勾的模块不能因为内部实现细节被悄悄打开。
-    export AMICE_MBA="${AMICE_MBA:-true}"
-    export AMICE_FLATTEN="${AMICE_FLATTEN:-true}"
+    # ⚠️ 这里【不能】再按 -true 兜底：那会让「没勾混淆」的分支也打开混淆
+    #    （2026-11-14 踩过 —— 导致 sig_verify 从 VMP 成功退回被跳过）。
+    #    具体开关值已在上方 WANT_OBFUSCATE 分支里设好，这里只说明策略。
     log_info "混淆与 VMP 按函数分流（标了 +vm_virtualize 的函数不上混淆）"
   else
     # 两种情况走这里：
@@ -1090,6 +1133,9 @@ if [[ $WANT_VMP -eq 1 ]]; then
     # 两种情况结论相同，故不拆分支。
     export AMICE_MBA=false
     export AMICE_FLATTEN=false
+    export AMICE_INDIRECT_CALL=false
+    export AMICE_INDIRECT_BRANCH=false
+    export AMICE_VM_FLATTEN=false
     log_info "不做混淆（未勾选代码混淆，或按函数分流的开关已关闭），只保留 VMP"
   fi
   # ⚠️⚠️ 2026-11-11 修（VMP 空转的真因）：必须设 AMICE_VM_VIRTUALIZE=true。

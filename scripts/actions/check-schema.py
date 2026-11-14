@@ -88,10 +88,10 @@ assert len(keys) == len(set(keys)), "模块 key 重复"
 #   → mark-native → stringenc → anti-diff → 回编 → packer。
 #   envcheck 在 NDK 组装阶段并入 so，与 packer 一样排在列表末位。）
 # ⚠️ 旧引擎 dcc 已于 2026-12 下线、2026-10 从 schema 移除，此处断言不得再要求它。
-# obfuscate（2026-11-05）：so 层混淆，编译期生效 → 紧跟 dex2c 之后
-#（两者都作用于 so 产物；它必须排在 NDK 编译之前的参数汇总里）。
-# vmp（2026-11-10）：指令级虚拟化，同样是编译期 pass、同样作用于 so，
-# 排在 obfuscate 之后（与它并列在"编译期 so 变换"这一组里）。
-assert keys == ["sigcheck", "dex2c", "obfuscate", "vmp", "stringenc", "antidiff",
+# obfuscate（2026-11-05）曾是独立模块；2026-11-14 并入 vmp ——
+# 两者都作用于同一批 so 函数，且必须同时加载 Amice 插件，分成两个
+# 顶层勾选框只会让用户以为「开了 VMP 就能不开混淆」或反之。
+# 现在 vmp 是 parent：VMP 是主体，混淆是它的子项（VMP 覆盖不到的盲区）。
+assert keys == ["sigcheck", "dex2c", "vmp", "stringenc", "antidiff",
                 "envcheck", "packer"], keys
 print("schema OK:", keys)

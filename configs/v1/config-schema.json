@@ -30,13 +30,12 @@
       ]
     },
     {
-      "key": "obfuscate",
-      "label": "代码混淆",
-      "desc": "用 MBA/扁平化改写 so 里的解密逻辑，让逆向者难以读懂。性能：启动稍慢（首次解锁时执行的代码变大）",
+      "key": "vmp",
+      "label": "so层保护",
+      "desc": "so 层保护总开关 —— 两层防护合在一起：\n① VMP 虚拟化（不可关）：把关键函数编译成自定义 VM 字节码，解锁后内存里不是明文 ARM64，挡住动态 dump。保护对象：签名校验 4 个函数 + 字符串加密 5 个算法函数。\n② 附加混淆（可选）：VMP 覆盖不到的那一层 —— 它只管函数体内部，管不了「谁调用谁」「跳到哪」。结构性混淆补的正是这个盲区。\n体积：VMP 约 +470KB；结构性混淆几乎零增量。性能：启动稍慢。",
       "type": "parent",
-      "default": false,
-      "arg": "--obfuscate",
-      "group_label": "混淆强度",
+      "default": true,
+      "arg": "--vmp",
       "children": [
         {
           "key": "mba",
@@ -50,21 +49,41 @@
         {
           "key": "flatten",
           "label": "控制流扁平化",
-          "desc": "把代码块顺序打散成状态机。强度最高，但风险也最高——出问题极难排查，建议先用 MBA 验证真机稳定后再开",
+          "desc": "把代码块顺序打散成状态机。状态码是明文，配张表能还原，强度中等。性能：轻微",
           "type": "checkbox",
           "default": false,
           "value_kind": "flag",
           "arg_on": "--obfuscate-flatten"
+        },
+        {
+          "key": "indirect_call",
+          "label": "隐藏调用关系",
+          "desc": "把直接调用改写成函数表索引的间接调用 —— 逆向者看不出「谁调用了谁」。这补上了 VMP 覆盖不到的那一层（VMP 只保护函数体内部）。体积几乎零增量，性能几乎零损失",
+          "type": "checkbox",
+          "default": true,
+          "value_kind": "flag",
+          "arg_on": "--obfuscate-indirect-call"
+        },
+        {
+          "key": "indirect_branch",
+          "label": "隐藏跳转目标",
+          "desc": "把分支跳转改写成 indirectbr（跳转表 + 索引加密）。与「隐藏调用关系」互补：一个管调用、一个管跳转。体积小，性能几乎零损失",
+          "type": "checkbox",
+          "default": true,
+          "value_kind": "flag",
+          "arg_on": "--obfuscate-indirect-branch"
+        },
+        {
+          "key": "vm_flatten",
+          "label": "动态控制流（抗动态分析）",
+          "desc": "每次运行的控制流都不同 —— 跳转目标由运行时随机种子与调用状态共同决定。这是唯一能对抗「在模拟器里反复跑、观察路径再针对性 patch」的手段。体积与编译开销高于普通扁平化",
+          "type": "checkbox",
+          "default": false,
+          "value_kind": "flag",
+          "arg_on": "--obfuscate-vm-flatten"
         }
-      ]
-    },
-    {
-      "key": "vmp",
-      "label": "so层保护",
-      "desc": "so 层保护总开关：把 so 里的关键函数编译成自定义 VM 字节码，由内置解释器执行 —— 解锁后内存里不是明文 ARM64，挡住动态 dump。这是本项目当前强度最高的一层（比代码混淆强得多）。保护对象：签名校验（sig_verify 等 4 个）+ 字符串加密的 5 个算法函数（Base64/密钥流/UTF-8）。⚠️ dex2c 抽出的业务方法【保护不了】：实测 4/4 因寄存器预算被跳过（Amice 的 VM 只有 32 个虚拟寄存器，而 dex2c 把 Dalvik 每个局部变量映射成一个 C 变量，Dalvik 最多 255 个局部变量，天生超限）。体积：实测 .so 约 +470KB（两套 VMP 的解释器 + 字节码）。性能：启动稍慢（首次解锁时执行 VM 解释器）。",
-      "type": "leaf",
-      "default": true,
-      "arg": "--vmp"
+      ],
+      "group_label": "混淆与虚拟化"
     },
     {
       "key": "stringenc",

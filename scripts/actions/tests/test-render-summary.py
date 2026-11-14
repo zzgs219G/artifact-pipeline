@@ -66,9 +66,8 @@ md = render({
     "schema_version": 1,
     "sigcheck": True,
     "dex2c": {"enabled": False},
-    "vmp": True,
+    "vmp": {"enabled": True},
     "stringenc": {"enabled": False},
-    "obfuscate": {"enabled": False},
     "antidiff": False,
     "envcheck": False,
     "packer": {"enabled": False},
@@ -76,7 +75,7 @@ md = render({
 check("摘要含「启用 2 个模块」", "启用 2 个模块" in md, md[:200])
 check("启用列表含 签名校验", "签名校验" in md)
 check("启用列表含 so层保护", "so层保护" in md)
-check("未启用列表含 Dex2C", "未启用 6 个" in md and "Dex2C" in md)
+check("未启用列表含 Dex2C", "未启用 5 个" in md and "Dex2C" in md)
 
 print("── ② 未启用的模块也要出现在表格里 ──")
 # Dex2C 未启用，但它必须有一行（否则读者无法判断"没勾"还是"漏渲染"）
@@ -87,13 +86,18 @@ print("── ③ 子选项渲染 ──")
 md2 = render({
     "schema_version": 1,
     "sigcheck": True,
-    "obfuscate": {"enabled": True, "mba": True, "flatten": False},
+    "vmp": {"enabled": True, "mba": True, "flatten": False,
+            "indirect_call": True, "indirect_branch": False,
+            "vm_flatten": False},
     "stringenc": {"enabled": True, "stub_impl": "native", "algo": "chacha20",
                   "dex2c_stub": True, "rules_file": "com.a.**\ncom.b.**"},
 })
 check("flag 开 → ✅ 开", "| ✅ 开 | `--obfuscate-mba` |" in md2,
       [l for l in md2.splitlines() if "mba" in l])
 check("flag 关 → ⬜ 关", "⬜ 关" in md2)
+check("结构性混淆也在表格里且带参数",
+      "| ✅ 开 | `--obfuscate-indirect-call` |" in md2,
+      [l for l in md2.splitlines() if "indirect" in l])
 check("rules_file 显示行数", "已填（2 行规则）" in md2,
       [l for l in md2.splitlines() if "rules_file" in l])
 check("text 值原样", "| chacha20 |" in md2)

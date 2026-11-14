@@ -167,7 +167,17 @@ def build_config(args) -> str:
         "schema_version": 1,
         "sigcheck": on["sigcheck"],
         "dex2c": {"enabled": on["dex2c"]},
-        "vmp": on["vmp"],
+        # vmp 自 2026-11-14 起是 parent（so层保护总开关），混淆是它的子项。
+        # ⚠️ 必须写成对象：写成裸 true 时 read_enabled 虽能兜底，
+        #    但子项就完全无法表达 —— 等于把混淆能力关死了。
+        "vmp": {
+            "enabled": on["vmp"],
+            "mba": bool(getattr(args, "obf_mba", False)),
+            "flatten": bool(getattr(args, "obf_flatten", False)),
+            "indirect_call": bool(getattr(args, "obf_indirect_call", False)),
+            "indirect_branch": bool(getattr(args, "obf_indirect_branch", False)),
+            "vm_flatten": bool(getattr(args, "obf_vm_flatten", False)),
+        },
         "stringenc": {"enabled": on["stringenc"]},
         "antidiff": on["antidiff"],
         "envcheck": on["envcheck"],
@@ -743,9 +753,20 @@ def main() -> int:
     g.add_argument("--envcheck", action="store_true", help="环境检测")
     g.add_argument("--packer", action="store_true", help="基础加壳")
     g.add_argument("--vmp", action="store_true",
-                   help="指令级 VMP 虚拟化（把 dex2c 业务方法编成 VM 字节码）。"
-                        "自动关掉动态注册（静态短名），.ncx 体积约 10-20 倍。"
-                        "不在 --all 里，需显式指定")
+                   help="so层保护总开关：VMP 虚拟化（核心）+ 可选附加混淆。"
+                        "本轮不勾任何 --obf-* 时只有 VMP")
+    # 附加混淆（vmp 的子项）。不指定时只做 VMP —— 与 schema 的
+    # 「结构性混淆默认开」不同，CLI 走显式路径，避免 --vmp 意外带来体积变化。
+    g.add_argument("--obf-mba", action="store_true",
+                   help="算术混淆（MBA）：表达式改写成难读形式。可被 souper 类工具还原")
+    g.add_argument("--obf-flatten", action="store_true",
+                   help="控制流扁平化：状态码明文，配表可还原")
+    g.add_argument("--obf-indirect-call", action="store_true",
+                   help="隐藏调用关系：看不出谁调用了谁（VMP 覆盖不到的盲区）")
+    g.add_argument("--obf-indirect-branch", action="store_true",
+                   help="隐藏跳转目标：分支改写成 indirectbr")
+    g.add_argument("--obf-vm-flatten", action="store_true",
+                   help="动态控制流：每次运行路径都不同，抗「反复跑+观察」")
     g.add_argument("--all", action="store_true", help="全选（含 packer，慢；不含 vmp）")
 
     p = ap.add_argument_group("预设（互斥，优先于逐个开关）")

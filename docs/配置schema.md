@@ -303,7 +303,7 @@ state["模块.子项"] = "java"       ← 两种渲染的状态模型完全相�
 **模块顺序不是排版，是执行顺序**：`check-schema.py` 断言
 
 ```python
-keys == ["sigcheck", "dex2c", "obfuscate", "vmp", "stringenc",
+keys == ["sigcheck", "dex2c", "vmp", "stringenc",
          "antidiff", "envcheck", "packer"]
 ```
 
@@ -312,6 +312,11 @@ keys == ["sigcheck", "dex2c", "obfuscate", "vmp", "stringenc",
 
 > 例外：`envcheck` 的实际落点在 NDK 组装阶段（检测代码并入 `libnc.so`），
 > 列表末位只是展示顺序。
+>
+> **2026-11-14**：`obfuscate` 已并入 `vmp`（改名「so层保护」并升为 parent）。
+> 两者都作用于同一批 so 函数、都要求加载 Amice 插件，分成两个顶层勾选框
+> 只会让人误以为「开了 VMP 就不必开混淆」。现在 VMP 是主体，混淆是它的
+> 五个子项（补 VMP 覆盖不到的「函数之间」那一层）。
 
 ### 5.3 `desc` 的写法约定
 

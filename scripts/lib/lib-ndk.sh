@@ -384,6 +384,9 @@ ndk_build() {
       LD_LIBRARY_PATH="$AMICE_LLVM_LIB:${LD_LIBRARY_PATH:-}" \
       AMICE_MBA="${AMICE_MBA:-false}" \
       AMICE_FLATTEN="${AMICE_FLATTEN:-false}" \
+      AMICE_INDIRECT_CALL="${AMICE_INDIRECT_CALL:-false}" \
+      AMICE_INDIRECT_BRANCH="${AMICE_INDIRECT_BRANCH:-false}" \
+      AMICE_VM_FLATTEN="${AMICE_VM_FLATTEN:-false}" \
       "$bundle_ndk/ndk-build" -j"$(nproc)" -C "$project"
     return $?
   fi

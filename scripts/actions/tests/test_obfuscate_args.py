@@ -97,20 +97,33 @@ def main():
     ndk = read(LIBNDK)
 
     print("[1/5] schema 结构")
-    check("obfuscate 模块存在", 'obfuscate' in mods)
-    ob = mods.get('obfuscate', {})
-    check("是 parent（有子项）", ob.get('type') == 'parent', ob.get('type'))
-    check("arg 是 --obfuscate", ob.get('arg') == '--obfuscate', ob.get('arg'))
-    check("默认关闭（混淆有风险，不能默认开）", ob.get('default') is False,
+    check("obfuscate 已并入 vmp（不再有独立顶层项）", 'obfuscate' not in mods)
+    ob = mods.get('vmp', {})
+    check("vmp 是 parent（有子项）", ob.get('type') == 'parent', ob.get('type'))
+    check("arg 是 --vmp", ob.get('arg') == '--vmp', ob.get('arg'))
+    check("默认开启（so 层保护是核心防护）", ob.get('default') is True,
           str(ob.get('default')))
     kids = {c['key']: c for c in ob.get('children', [])}
-    check("有 mba 与 flatten 两个子项",
-          set(kids) == {'mba', 'flatten'}, str(sorted(kids)))
+    check("五个混淆子项齐全（弱混淆 2 + 结构性 3）",
+          set(kids) == {'mba', 'flatten', 'indirect_call',
+                        'indirect_branch', 'vm_flatten'},
+          str(sorted(kids)))
     check("mba 默认开启（低风险）", kids.get('mba', {}).get('default') is True)
-    check("flatten 默认关闭（高风险，必须显式开）",
+    check("flatten 默认关闭（与 vm_flatten 争控制流，不默认开）",
           kids.get('flatten', {}).get('default') is False)
+    # 结构性混淆（VMP 覆盖不到的那一层）默认开：体积/性能代价近乎为零，
+    # 而「谁调用谁」「跳到哪」是逆向分析的第一步，关掉等于白送。
+    check("indirect_call 默认开启（零代价，补 VMP 盲区）",
+          kids.get('indirect_call', {}).get('default') is True)
+    check("indirect_branch 默认开启（零代价，补 VMP 盲区）",
+          kids.get('indirect_branch', {}).get('default') is True)
+    check("vm_flatten 默认关闭（体积与编译开销大，需显式开）",
+          kids.get('vm_flatten', {}).get('default') is False)
     for k, want in (('mba', '--obfuscate-mba'),
-                    ('flatten', '--obfuscate-flatten')):
+                    ('flatten', '--obfuscate-flatten'),
+                    ('indirect_call', '--obfuscate-indirect-call'),
+                    ('indirect_branch', '--obfuscate-indirect-branch'),
+                    ('vm_flatten', '--obfuscate-vm-flatten')):
         check(f"{k} 的 arg_on == {want}",
               kids.get(k, {}).get('arg_on') == want,
               str(kids.get(k, {}).get('arg_on')))
@@ -133,27 +146,39 @@ def main():
     print("[3/5] resolve-config 转 argv")
     rc, lines, out = resolve({
         'schema_version': 1, 'sigcheck': True,
-        'obfuscate': {'enabled': True, 'mba': True},
+        'vmp': {'enabled': True, 'mba': True},
     })
-    check("mba 勾选 → 生成 --obfuscate + --obfuscate-mba",
-          rc == 0 and '--obfuscate' in lines and '--obfuscate-mba' in lines,
+    check("mba 勾选 → 生成 --vmp + --obfuscate-mba",
+          rc == 0 and '--vmp' in lines and '--obfuscate-mba' in lines,
           f"rc={rc} lines={lines}")
     check("未勾 flatten 时不出现 --obfuscate-flatten",
           '--obfuscate-flatten' not in lines, str(lines))
 
     rc, lines, out = resolve({
         'schema_version': 1, 'sigcheck': True,
-        'obfuscate': {'enabled': True, 'mba': False, 'flatten': True},
+        'vmp': {'enabled': True, 'mba': False, 'flatten': True},
     })
-    check("flatten 勾选 → 生成 --obfuscate + --obfuscate-flatten",
+    check("flatten 勾选 → 生成 --obfuscate-flatten",
           rc == 0 and '--obfuscate-flatten' in lines, f"lines={lines}")
+
+    # 新增的三个结构性混淆
+    rc, lines, out = resolve({
+        'schema_version': 1, 'sigcheck': True,
+        'vmp': {'enabled': True, 'mba': False,
+                'indirect_call': True, 'indirect_branch': True,
+                'vm_flatten': True},
+    })
+    for a in ('--obfuscate-indirect-call', '--obfuscate-indirect-branch',
+              '--obfuscate-vm-flatten'):
+        check(f"勾选后生成 {a}", rc == 0 and a in lines, f"lines={lines}")
 
     rc, lines, out = resolve({
         'schema_version': 1, 'sigcheck': True,
-        'obfuscate': {'enabled': False},
+        'vmp': {'enabled': False},
     })
     check("父模块关闭 → 完全不出现在 args",
-          rc == 0 and not any('obfuscate' in x for x in lines), str(lines))
+          rc == 0 and not any('obfuscate' in x for x in lines)
+          and '--vmp' not in lines, str(lines))
 
     print("[4/5] protect.sh 认识三个参数")
     for a in ('--obfuscate', '--obfuscate-mba', '--obfuscate-flatten'):
