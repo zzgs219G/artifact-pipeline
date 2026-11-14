@@ -760,11 +760,16 @@ jobs:
               d = json.loads(os.environ.get('CFG') or '{}')
           except Exception:
               print('false'); raise SystemExit
-          ob = d.get('obfuscate')
-          obf_on = bool(ob.get('enabled')) if isinstance(ob, dict) else bool(ob)
-          vmp = d.get('vmp')
-          vmp_on = bool(vmp.get('enabled')) if isinstance(vmp, dict) else bool(vmp)
-          print('true' if (obf_on or vmp_on) else 'false')
+
+          def on(v):
+              return bool(v.get('enabled')) if isinstance(v, dict) else bool(v)
+
+          # soguard（2026-11-14 由 vmp 改名）= so层保护。它的子项里
+          # vm（VMP）与各混淆 pass 都要 Amice 插件，所以只要父模块开就取 bundle。
+          # ⚠️ 同时认旧 key `vmp`：旧 App 快照仍发这个名字，漏认会让
+          #    老用户构建时拿不到 bundle → 直接失败。
+          need = on(d.get('soguard')) or on(d.get('vmp')) or on(d.get('obfuscate'))
+          print('true' if need else 'false')
           PY
           )
           echo "enabled=$flag" >> "$GITHUB_OUTPUT"
