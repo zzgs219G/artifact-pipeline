@@ -1177,6 +1177,35 @@ static void sig_kill_via(int variant) {
  *   ③ killvar 语义不变：失败分支自己决定走哪个处置变体
  */
 
+/* ── 给 VMP 目标函数用的 close/free 出口（2026-11-14）────────────────
+ *
+ * 同理：`close()` 与 `free()` 都是外部调用，Amice 的 native call 检查
+ * 一律当 intrinsic（callee + intrinsic_id=0）。挪一层即可。 */
+__attribute__((noinline))
+static void nc_close_fd(int fd) {
+    if (fd >= 0) close(fd);
+}
+
+__attribute__((noinline))
+static void nc_free_ptr(void *p) {
+    free(p);
+}
+
+/* ── 给 VMP 目标函数用的 errno 读取（2026-11-14）─────────────────────
+ *
+ * `errno` 不是变量，是宏 —— 展开成 `__errno()` 函数调用。
+ * Amice 的 native call 检查把它也当 intrinsic，于是 sig_collect_fp 在
+ * 修掉 __open_2 之后又卡在 __errno 上：
+ *
+ *     [amice] VMP skipped: "sig_collect_fp"
+ *       (callee="__errno", intrinsic_id=0)
+ *
+ * 同样挪到一层 noinline 外面。⚠️ 必须 noinline，内联回去等于没做。 */
+__attribute__((noinline))
+static int nc_errno(void) {
+    return errno;
+}
+
 /* ── 给 VMP 目标函数用的 open 出口（2026-11-14）────────────────────────
  *
  * 为什么需要：`sig_collect_fp` 是签名校验的数据入口（读 APK → 提证书 →
@@ -1228,17 +1257,19 @@ static int sig_collect_fp(unsigned char actual[32]) {
 
     fd = nc_open_ro(apk_path);
     if (fd < 0) {
-        /* 三参数 → 先拼一次，再走单参数版本（siglog 是 varargs，VMP 不支持）*/
-        { char _b[256]; snprintf(_b, sizeof(_b), "open apk failed: %s errno=%d(%s)", apk_path, errno, strerror(errno)); LOGE_S(_b); }
+        /* 三参数 → 先拼一次，再走单参数版本（siglog 是 varargs，VMP 不支持）
+         * ⚠️ errno 走 nc_errno()：它是宏，展开成 __errno() 调用，
+         *    VMP 会当成 intrinsic 而跳过本函数（实测过）。 */
+        { int _e = nc_errno(); char _b[256]; snprintf(_b, sizeof(_b), "open apk failed: %s errno=%d(%s)", apk_path, _e, strerror(_e)); LOGE_S(_b); }
         /*LSG:OPEN_ERR|【失败】打开 APK 失败 open()*/
-        LSGE(LSG_OPEN_ERR, "%s errno=%d", apk_path, errno);
+        LSGE(LSG_OPEN_ERR, "%s errno=%d", apk_path, nc_errno());
         return -1;            /* 环境异常类 → variant 0 */
     }
     /*LSG:OPEN_OK|【成功】APK 已打开*/
     LSGI(LSG_OPEN_OK, "%s", apk_path);
 
     if (extract_cert_der(fd, &der, &der_len) != 0) {
-        close(fd);
+        nc_close_fd(fd);
         /* LSGS 密文化(2026-10-16):原文案暴露"这是签名校验"+教会攻击者怎么重签。 */
         {
             char m[128];
@@ -1252,8 +1283,8 @@ static int sig_collect_fp(unsigned char actual[32]) {
     }
 
     sha256(der, der_len, actual);
-    free(der);
-    close(fd);
+    nc_free_ptr(der);
+    nc_close_fd(fd);
     return 0;
 }
 
