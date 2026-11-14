@@ -277,10 +277,25 @@ if python3 -c "
 import json,sys
 d=json.load(open('$ROOT/configs/v1/config-schema.json'))
 ks=[m.get('key') for m in d['modules']]
-sys.exit(0 if 'vmp' in ks else 1)"; then
-  ok "T12a schema 有 vmp 模块"
+sys.exit(0 if 'soguard' in ks else 1)"; then
+  ok "T12a schema 有 soguard 模块（so层保护，2026-11-14 由 vmp 改名）"
 else
-  bad "T12a schema 缺 vmp 模块"
+  bad "T12a schema 缺 soguard 模块"
+fi
+
+# T12b：VMP 是 soguard 的第一等子项，默认开、可关（--vmp-vm）
+if python3 -c "
+import json,sys
+d=json.load(open('$ROOT/configs/v1/config-schema.json'))
+m=[x for x in d['modules'] if x.get('key')=='soguard']
+if not m: sys.exit(1)
+kids={c['key']:c for c in m[0].get('children',[])}
+v=kids.get('vm')
+sys.exit(0 if (v and v.get('default') is True
+               and v.get('arg_on')=='--vmp-vm') else 1)"; then
+  ok "T12b VMP 是 soguard 子项且默认开、可关（--vmp-vm）"
+else
+  bad "T12b VMP 子项缺失或默认值/参数不对"
 fi
 
 # T13 --vmp + 保留动态注册 必须 fail-fast

@@ -92,6 +92,6 @@ assert len(keys) == len(set(keys)), "模块 key 重复"
 # 两者都作用于同一批 so 函数，且必须同时加载 Amice 插件，分成两个
 # 顶层勾选框只会让用户以为「开了 VMP 就能不开混淆」或反之。
 # 现在 vmp 是 parent：VMP 是主体，混淆是它的子项（VMP 覆盖不到的盲区）。
-assert keys == ["sigcheck", "dex2c", "vmp", "stringenc", "antidiff",
+assert keys == ["sigcheck", "dex2c", "soguard", "stringenc", "antidiff",
                 "envcheck", "packer"], keys
 print("schema OK:", keys)

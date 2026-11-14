@@ -232,6 +232,12 @@ WANT_DEX2C_STATIC_REG=0
 # 依赖：必须配 --dex2c-static-register（动态注册的 JNINativeMethod 表取了
 #   函数地址，Amice 会静默跳过，见该变量处注释）。
 WANT_VMP=0
+# VMP 虚拟化本体是否启用（--vmp-vm）。与 WANT_VMP 分开：
+#   WANT_VMP=1, WANT_VMP_VM=0 → 只做附加混淆，不做虚拟化（省约 470KB）
+#   WANT_VMP=1, WANT_VMP_VM=1 → 虚拟化 + （可选）混淆
+# ⚠️ 命令行直调 --vmp 而不带 --vmp-vm 时按「只要混淆」处理；
+#    resolve-config 走 schema 时会显式产出 --vmp-vm（vm 子项默认 true）。
+WANT_VMP_VM=0
 # NC_VMP_CSTUB（2026-11-11）：是否给 stringenc 的【密钥流函数】打 VMP 注解。
 # 默认 1 = 打（只打 3 个最值钱的，不是全部 6 个 —— 见下）。
 #
@@ -294,6 +300,11 @@ while [[ $# -gt 0 ]]; do
     # Amice 混淆（2026-11-05）。子复选框隐含父模块开启（与 --packer-smaller 同惯例）。
     # 值为空时由 lib-ndk.sh 按"父模块开、子项默认"取默认组合（MBA on / flatten off）。
     --obfuscate) WANT_OBFUSCATE=1; shift ;;
+    # --vmp-vm（2026-11-14）：VMP 虚拟化本体（默认开，可关）。
+    # 与 --vmp 的关系：--vmp 是「so层保护」父模块，--vmp-vm 是它的
+    # 第一个子项。只勾 --vmp 而不勾 --vmp-vm = 只做附加混淆、不做虚拟化
+    # （省约 470KB，但签名校验就只剩弱混淆保护）。
+    --vmp-vm) WANT_VMP=1; WANT_VMP_VM=1; shift ;;
     --dex2c-static-register) WANT_DEX2C_STATIC_REG=1; shift ;;
     --vmp) WANT_VMP=1; shift
            # ⚠️ 2026-11-11 调整：不再自动联动 --dex2c-static-register。
@@ -1153,7 +1164,15 @@ if [[ $WANT_VMP -eq 1 ]]; then
   #   对照 nox 的 make-zip-lib.sh:163 是
   #       AMICE_VM_VIRTUALIZE=true AMICE_VM_PROFILE_PATH="$prof" "$CC" ...
   #   两个变量必须成对出现。
-  export AMICE_VM_VIRTUALIZE=true
+  #
+  # ⚠️ 2026-11-14：VMP 现在是可关的子项（--vmp-vm）。关掉时不设这两个
+  #    变量 = 不装 pass = 不做虚拟化，只留附加混淆。省约 470KB。
+  if [[ $WANT_VMP_VM -eq 1 ]]; then
+    export AMICE_VM_VIRTUALIZE=true
+  else
+    export AMICE_VM_VIRTUALIZE=false
+    log_warn "VMP 虚拟化已关闭（只做附加混淆）—— 签名校验将失去最强的保护层"
+  fi
   # VM profile：默认用包内自带的 nox-vmp-func（函数级隔离：每函数独立
   # 分派运行时 + 独立 handler 副本）。内置 amice-simple-vmp 是 module 级
   # 共享，攻击者逆一套 VM 语义就能读全部受保护函数。

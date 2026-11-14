@@ -87,6 +87,29 @@ if not isinstance(cfg_version, int):
 if cfg_version > SCHEMA_VERSION:
     die(f"App 使用的 schema 版本较新（v{cfg_version} > 流水线 v{SCHEMA_VERSION}），请更新流水线仓库")
 
+# ── 旧 key 兼容（2026-11-14）────────────────────────────────────────
+# `vmp` 这个 key 已改名为 `soguard`（显示名一直是「so层保护」，key 与语义
+# 不符，且 VMP 只是其中一项）。但旧版 App 发来的快照里仍是 `{"vmp": ...}`
+# —— 直接不认会让老用户的构建静默丢失整层防护。
+#
+# ⚠️ 必须放在【保险丝 a：未知 key 拒绝】之前，否则旧快照会先被拒。
+# ⚠️ 只在「新 key 缺失」时搬：两者都存在时以新 key 为准，避免旧客户端
+#    的残留字段覆盖用户本次的选择。
+_LEGACY_KEYS = {"vmp": "soguard"}
+for _old, _new in _LEGACY_KEYS.items():
+    if _old in config and _new not in config:
+        _v = config.pop(_old)
+        # 旧快照是布尔 `"vmp": true`：用户当时勾的就是「VMP 虚拟化」这一项，
+        # 而新结构里它是子项 `vm`。直接搬布尔会让 vm 子项走 schema default，
+        # 而 default 恰好也是 true —— 但那纯属巧合，不能依赖。
+        # 显式展开，语义才明确。
+        if isinstance(_v, bool):
+            config[_new] = {"enabled": _v, "vm": _v}
+        else:
+            config[_new] = _v
+    elif _old in config:
+        config.pop(_old)      # 新 key 已存在时，旧字段直接丢弃
+
 # ── 保险丝 a：未知 key 拒绝（白名单）────────────────────────────────
 # 注（设计方案审查 #4）：schema 与解析器同仓库同 commit，此检查防的是
 # App assets 快照过期，不是仓库内部漂移。

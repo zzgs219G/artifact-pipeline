@@ -98,16 +98,23 @@ def main():
 
     print("[1/5] schema 结构")
     check("obfuscate 已并入 vmp（不再有独立顶层项）", 'obfuscate' not in mods)
-    ob = mods.get('vmp', {})
+    ob = mods.get('soguard', {})
     check("vmp 是 parent（有子项）", ob.get('type') == 'parent', ob.get('type'))
     check("arg 是 --vmp", ob.get('arg') == '--vmp', ob.get('arg'))
     check("默认开启（so 层保护是核心防护）", ob.get('default') is True,
           str(ob.get('default')))
     kids = {c['key']: c for c in ob.get('children', [])}
-    check("五个混淆子项齐全（弱混淆 2 + 结构性 3）",
-          set(kids) == {'mba', 'flatten', 'indirect_call',
+    check("六个子项齐全（VMP 本体 + 弱混淆 2 + 结构性 3）",
+          set(kids) == {'vm', 'mba', 'flatten', 'indirect_call',
                         'indirect_branch', 'vm_flatten'},
           str(sorted(kids)))
+    # VMP 是 so层保护的第一等子项：默认开、可关。
+    # 「可关」不是随手加的 —— 它占约 470KB，小包或压测时需要能关掉。
+    check("vm（VMP 虚拟化）默认开启",
+          kids.get('vm', {}).get('default') is True)
+    check("vm 的 arg_on == --vmp-vm",
+          kids.get('vm', {}).get('arg_on') == '--vmp-vm',
+          str(kids.get('vm', {}).get('arg_on')))
     check("mba 默认开启（低风险）", kids.get('mba', {}).get('default') is True)
     check("flatten 默认关闭（与 vm_flatten 争控制流，不默认开）",
           kids.get('flatten', {}).get('default') is False)
@@ -151,7 +158,7 @@ def main():
     print("[3/5] resolve-config 转 argv")
     rc, lines, out = resolve({
         'schema_version': 1, 'sigcheck': True,
-        'vmp': {'enabled': True, 'mba': True},
+        'soguard': {'enabled': True, 'mba': True},
     })
     check("mba 勾选 → 生成 --vmp + --obfuscate-mba",
           rc == 0 and '--vmp' in lines and '--obfuscate-mba' in lines,
@@ -161,7 +168,7 @@ def main():
 
     rc, lines, out = resolve({
         'schema_version': 1, 'sigcheck': True,
-        'vmp': {'enabled': True, 'mba': False, 'flatten': True},
+        'soguard': {'enabled': True, 'mba': False, 'flatten': True},
     })
     check("flatten 勾选 → 生成 --obfuscate-flatten",
           rc == 0 and '--obfuscate-flatten' in lines, f"lines={lines}")
@@ -169,7 +176,7 @@ def main():
     # 新增的三个结构性混淆
     rc, lines, out = resolve({
         'schema_version': 1, 'sigcheck': True,
-        'vmp': {'enabled': True, 'mba': False,
+        'soguard': {'enabled': True, 'mba': False,
                 'indirect_call': True, 'indirect_branch': True,
                 'vm_flatten': True},
     })
@@ -179,7 +186,7 @@ def main():
 
     rc, lines, out = resolve({
         'schema_version': 1, 'sigcheck': True,
-        'vmp': {'enabled': False},
+        'soguard': {'enabled': False},
     })
     check("父模块关闭 → 完全不出现在 args",
           rc == 0 and not any('obfuscate' in x for x in lines)

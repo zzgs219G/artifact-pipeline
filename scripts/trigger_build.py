@@ -167,11 +167,13 @@ def build_config(args) -> str:
         "schema_version": 1,
         "sigcheck": on["sigcheck"],
         "dex2c": {"enabled": on["dex2c"]},
-        # vmp 自 2026-11-14 起是 parent（so层保护总开关），混淆是它的子项。
+        # soguard（原 key `vmp`，2026-11-14 改名）= so层保护总开关：
+        # VMP 是一等子项（默认开、可关），混淆是其余子项。
         # ⚠️ 必须写成对象：写成裸 true 时 read_enabled 虽能兜底，
-        #    但子项就完全无法表达 —— 等于把混淆能力关死了。
-        "vmp": {
+        #    但子项就完全无法表达 —— 等于把 VMP 和混淆都关死了。
+        "soguard": {
             "enabled": on["vmp"],
+            "vm": not getattr(args, "no_vm", False),
             "mba": bool(getattr(args, "obf_mba", False)),
             "flatten": bool(getattr(args, "obf_flatten", False)),
             "indirect_call": bool(getattr(args, "obf_indirect_call", False)),
@@ -767,6 +769,10 @@ def main() -> int:
                    help="隐藏跳转目标：分支改写成 indirectbr")
     g.add_argument("--obf-vm-flatten", action="store_true",
                    help="动态控制流：每次运行路径都不同，抗「反复跑+观察」")
+    g.add_argument("--no-vm", action="store_true",
+                   help="关掉 VMP 虚拟化（--vmp 仍可带混淆）。省约 470KB，"
+                        "但签名校验就只剩混淆保护了。"
+                        "⚠️ 与 --obf-indirect-call/--obf-indirect-branch 搭配时才该关")
     g.add_argument("--all", action="store_true", help="全选（含 packer，慢；不含 vmp）")
 
     p = ap.add_argument_group("预设（互斥，优先于逐个开关）")

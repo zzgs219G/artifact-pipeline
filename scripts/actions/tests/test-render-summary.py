@@ -66,7 +66,7 @@ md = render({
     "schema_version": 1,
     "sigcheck": True,
     "dex2c": {"enabled": False},
-    "vmp": {"enabled": True},
+    "soguard": {"enabled": True},
     "stringenc": {"enabled": False},
     "antidiff": False,
     "envcheck": False,
@@ -86,7 +86,7 @@ print("── ③ 子选项渲染 ──")
 md2 = render({
     "schema_version": 1,
     "sigcheck": True,
-    "vmp": {"enabled": True, "mba": True, "flatten": False,
+    "soguard": {"enabled": True, "vm": True, "mba": True, "flatten": False,
             "indirect_call": True, "indirect_branch": False,
             "vm_flatten": False},
     "stringenc": {"enabled": True, "stub_impl": "native", "algo": "chacha20",
