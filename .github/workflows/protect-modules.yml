@@ -178,6 +178,12 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/actions/tests/test_protect_sh_vars.py
 
+      # 任务页摘要是"给人看"的功能，退化不会让构建红 —— 只有几个月后
+      # 有人点开任务页才发现模块列表不对。用断言钉住渲染契约。
+      - name: 任务页模块摘要渲染（16 断言）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/actions/tests/test-render-summary.py
+
       - name: obfuscate 参数契约（schema→resolver→protect.sh 三处同步）
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/actions/tests/test_obfuscate_args.py
@@ -682,6 +688,25 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+
+      # ── 模块勾选摘要（2026-11-14）─────────────────────────────────
+      # 为什么需要：任务页此前只能看到整篇构建日志，想知道「这次勾了哪些
+      # 模块」得翻日志或去 App 里回看 —— 用户的原话是「根本找不到勾选了
+      # 什么模块的那个展示，为什么还要自己去日志里找」。
+      #
+      # GitHub Actions 的 $GITHUB_STEP_SUMMARY 会渲染成 run 页面顶部的
+      # Markdown（不是日志），点开任务第一眼就能看到表格。
+      #
+      # ⚠️ 放在 checkout 之后、工具链之前：即使后面构建失败，摘要也已写
+      #    入，仍然能看到本次的勾选。
+      # ⚠️ 只读 protect_config 与 config-schema，不依赖任何构建产物。
+      - name: 模块勾选摘要
+        env:
+          PROTECT_CONFIG: ${{ inputs.protect_config }}
+          DISPLAY_NAME: ${{ inputs.display_name }}
+          NO_LOCK: ${{ inputs.no_lock }}
+          NO_NOX: ${{ inputs.no_nox }}
+        run: python3 scripts/actions/render-summary.py
 
       # 环境准备与 test job 共用同一个 composite action（唯一真相）。
       # 曾经这里是 5 个手写步骤、test job 又抄了一遍，导致两边漂移
