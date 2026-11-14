@@ -1177,6 +1177,32 @@ static void sig_kill_via(int variant) {
  *   ③ killvar 语义不变：失败分支自己决定走哪个处置变体
  */
 
+/* ── 给 VMP 目标函数用的 open 出口（2026-11-14）────────────────────────
+ *
+ * 为什么需要：`sig_collect_fp` 是签名校验的数据入口（读 APK → 提证书 →
+ * 算指纹），价值最高的几个函数之一，但一直上不了 VMP：
+ *
+ *     [amice] VMP skipped: "sig_collect_fp"
+ *       (LLVM intrinsic calls are not supported by vm_virtualize
+ *        (callee="__open_2", intrinsic_id=0))
+ *
+ * `__open_2` 不是我们写的 —— 是 NDK r27d 的 _FORTIFY_SOURCE 把
+ * `open(path, O_RDONLY)` 换成了带边界检查的 `__open_2`。而 Amice 的
+ * native call 检查把任何「不认识的被调方」都当成 intrinsic（同一个 bug
+ * 让 __android_log_write 也被误判，见 siglog_android 的注释）。
+ *
+ * 修法与 siglog_fmt1 / siglog_android 完全一致：把那个调用挪到一层
+ * noinline 外面，VMP 只看到对本函数的普通调用。
+ *
+ * ⚠️ 不用 syscall(SYS_openat,...) 直投：部分 ROM 的 seccomp 会拦，
+ *    而这行代码跑在 constructor 早期（进程刚起来），失败即 fail-closed
+ *    杀进程，代价太高。挪一层只多一条 bl，语义完全不变。
+ * ⚠️ 必须 noinline：内联回去等于没做，VMP 又看得见 __open_2 了。 */
+__attribute__((noinline))
+static int nc_open_ro(const char *path) {
+    return open(path, O_RDONLY);
+}
+
 /* 采集 APK 证书指纹：定位 → 打开 → 提取证书 → SHA256。
  * 成功返回 0 并把 32 字节指纹写进 actual；失败返回该走的 killvar 变体（≥0）
  * 或 -1 表示"环境异常类，走 variant 0"。 */
@@ -1200,7 +1226,7 @@ static int sig_collect_fp(unsigned char actual[32]) {
         return -1;            /* 环境异常类 → variant 0 */
     }
 
-    fd = open(apk_path, O_RDONLY);
+    fd = nc_open_ro(apk_path);
     if (fd < 0) {
         /* 三参数 → 先拼一次，再走单参数版本（siglog 是 varargs，VMP 不支持）*/
         { char _b[256]; snprintf(_b, sizeof(_b), "open apk failed: %s errno=%d(%s)", apk_path, errno, strerror(errno)); LOGE_S(_b); }

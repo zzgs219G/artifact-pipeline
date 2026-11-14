@@ -306,6 +306,34 @@ else
   bad "T13 历史参数被删 —— 旧调用方会报 unknown option"
 fi
 
+# ── T14：VMP 与间接混淆互斥（2026-11-14 实测）─────────────────────
+# 实测：开 indirect_call/branch 会让 VMP 成功函数从 9 降到 5。
+# protect.sh 必须自动忽略它们（而不是让用户踩坑）。
+echo "── T14 VMP 与间接混淆互斥 ──"
+if grep -q 'AMICE_INDIRECT_CALL=false' "$ROOT/scripts/pipelines/protect.sh" \
+   && grep -q 'AMICE_INDIRECT_BRANCH=false' "$ROOT/scripts/pipelines/protect.sh"; then
+  ok "T14a protect.sh 在 VMP 开时关掉 indirect_call/branch"
+else
+  bad "T14a 缺互斥处理 —— 用户同时勾会白丢 4 个 VMP 函数"
+fi
+if grep -q 'VMP 与「隐藏调用关系/隐藏跳转目标」冲突' \
+     "$ROOT/scripts/pipelines/protect.sh"; then
+  ok "T14b 互斥时打 warn 说明原因"
+else
+  bad "T14b 缺 warn —— 用户不知道自己勾的选项被忽略了"
+fi
+# 冲突项必须排在子项列表末尾（顺序即 UI 展示顺序，把风险项放最后）
+if python3 -c "
+import json,sys
+d=json.load(open('$ROOT/configs/v1/config-schema.json'))
+m=[x for x in d['modules'] if x.get('key')=='soguard'][0]
+ks=[c['key'] for c in m.get('children',[])]
+sys.exit(0 if ks[-2:]==['indirect_call','indirect_branch'] else 1)"; then
+  ok "T14c 冲突项排在子项末尾"
+else
+  bad "T14c 冲突项没排在末尾 —— 用户会先看到风险项"
+fi
+
 echo ""
 echo "════════════════════════════════════════"
 if [ "$FAIL" -eq 0 ]; then
