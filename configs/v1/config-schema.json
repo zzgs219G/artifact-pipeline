@@ -57,19 +57,19 @@
         },
         {
           "key": "indirect_call",
-          "label": "隐藏调用关系",
-          "desc": "把直接调用改写成函数表索引的间接调用 —— 逆向者看不出「谁调用了谁」。这补上了 VMP 覆盖不到的那一层（VMP 只保护函数体内部）。体积几乎零增量，性能几乎零损失",
+          "label": "隐藏调用关系（⚠️ 与 VMP 冲突）",
+          "desc": "把直接调用改写成函数表索引的间接调用 —— 逆向者看不出「谁调用了谁」。⚠️ 实测与 VMP 冲突：开启后 VMP 成功的函数从 9 个降到 5 个（IndirectCall 在别的函数上产生的地址引用，让 sig_verify 等函数的地址「逃逸」，触发 VMP 的 non-call address uses 跳过）。要用请确认 VMP 覆盖度可接受",
           "type": "checkbox",
-          "default": true,
+          "default": false,
           "value_kind": "flag",
           "arg_on": "--obfuscate-indirect-call"
         },
         {
           "key": "indirect_branch",
-          "label": "隐藏跳转目标",
-          "desc": "把分支跳转改写成 indirectbr（跳转表 + 索引加密）。与「隐藏调用关系」互补：一个管调用、一个管跳转。体积小，性能几乎零损失",
+          "label": "隐藏跳转目标（⚠️ 与 VMP 冲突）",
+          "desc": "把分支跳转改写成 indirectbr（跳转表 + 索引加密）。⚠️ 与「隐藏调用关系」同一问题：实测开启后 VMP 成功的函数从 9 个降到 5 个。体积小、性能几乎零损失，但会让 VMP 白跑",
           "type": "checkbox",
-          "default": true,
+          "default": false,
           "value_kind": "flag",
           "arg_on": "--obfuscate-indirect-branch"
         },

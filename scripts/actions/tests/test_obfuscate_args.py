@@ -111,12 +111,17 @@ def main():
     check("mba 默认开启（低风险）", kids.get('mba', {}).get('default') is True)
     check("flatten 默认关闭（与 vm_flatten 争控制流，不默认开）",
           kids.get('flatten', {}).get('default') is False)
-    # 结构性混淆（VMP 覆盖不到的那一层）默认开：体积/性能代价近乎为零，
-    # 而「谁调用谁」「跳到哪」是逆向分析的第一步，关掉等于白送。
-    check("indirect_call 默认开启（零代价，补 VMP 盲区）",
-          kids.get('indirect_call', {}).get('default') is True)
-    check("indirect_branch 默认开启（零代价，补 VMP 盲区）",
-          kids.get('indirect_branch', {}).get('default') is True)
+    # ⚠️ 结构性混淆（indirect_call / indirect_branch）实测与 VMP 冲突：
+    #    开启后 VMP 成功函数 9 → 5。所以默认关闭，并在 label/desc 里
+    #    写明冲突，不能让人以为「默认开的一定是净收益」。
+    check("indirect_call 默认关闭（实测与 VMP 冲突）",
+          kids.get('indirect_call', {}).get('default') is False)
+    check("indirect_branch 默认关闭（实测与 VMP 冲突）",
+          kids.get('indirect_branch', {}).get('default') is False)
+    check("indirect_call 的 label 标注了冲突",
+          '冲突' in kids.get('indirect_call', {}).get('label', ''))
+    check("indirect_branch 的 label 标注了冲突",
+          '冲突' in kids.get('indirect_branch', {}).get('label', ''))
     check("vm_flatten 默认关闭（体积与编译开销大，需显式开）",
           kids.get('vm_flatten', {}).get('default') is False)
     for k, want in (('mba', '--obfuscate-mba'),
