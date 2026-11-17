@@ -87,17 +87,17 @@ md2 = render({
     "schema_version": 1,
     "sigcheck": True,
     "soguard": {"enabled": True, "vm": True, "mba": True, "flatten": False,
-            "indirect_call": True, "indirect_branch": False,
-            "vm_flatten": False},
+            "vm_flatten": True},
     "stringenc": {"enabled": True, "stub_impl": "native", "algo": "chacha20",
                   "dex2c_stub": True, "rules_file": "com.a.**\ncom.b.**"},
 })
 check("flag 开 → ✅ 开", "| ✅ 开 | `--obfuscate-mba` |" in md2,
       [l for l in md2.splitlines() if "mba" in l])
 check("flag 关 → ⬜ 关", "⬜ 关" in md2)
-check("结构性混淆也在表格里且带参数",
-      "| ✅ 开 | `--obfuscate-indirect-call` |" in md2,
-      [l for l in md2.splitlines() if "indirect" in l])
+# 2026-11-18：indirect_call/branch 已删除，改验 vm_flatten 出现在表格里
+check("动态控制流也在表格里且带参数",
+      "| ✅ 开 | `--obfuscate-vm-flatten` |" in md2,
+      [l for l in md2.splitlines() if "vm_flatten" in l])
 check("rules_file 显示行数", "已填（2 行规则）" in md2,
       [l for l in md2.splitlines() if "rules_file" in l])
 check("text 值原样", "| chacha20 |" in md2)

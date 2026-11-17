@@ -187,8 +187,6 @@ WANT_CHACHA20=0
 WANT_OBFUSCATE=0
 OBF_MBA=0
 OBF_FLATTEN=0
-OBF_INDIRECT_CALL=0
-OBF_INDIRECT_BRANCH=0
 OBF_VM_FLATTEN=0
 # --dex2c-static-register（2026-11-10）：dex2c 的业务方法改用【静态短名】注册。
 #
@@ -316,8 +314,6 @@ while [[ $# -gt 0 ]]; do
     --vmp-keep-dynamic-register) WANT_VMP=1; shift ;;   # 历史参数，保留兼容（现等价于 --vmp）
     --obfuscate-mba) WANT_OBFUSCATE=1; OBF_MBA=1; shift ;;
     --obfuscate-flatten) WANT_OBFUSCATE=1; OBF_FLATTEN=1; shift ;;
-    --obfuscate-indirect-call) WANT_OBFUSCATE=1; OBF_INDIRECT_CALL=1; shift ;;
-    --obfuscate-indirect-branch) WANT_OBFUSCATE=1; OBF_INDIRECT_BRANCH=1; shift ;;
     --obfuscate-vm-flatten) WANT_OBFUSCATE=1; OBF_VM_FLATTEN=1; shift ;;
     *)          log_err "未知参数: $1"; usage ;;
   esac
@@ -1058,32 +1054,23 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   #     mba            算术改写        —— 被 souper 类工具可还原
   #     flatten        控制流扁平化    —— 状态码明文，配表可还原
   #   结构性混淆（VMP 覆盖不到的那一层）
-  #     indirect_call  隐藏调用关系    —— VMP 只保护函数体内部，看不到「谁调用谁」
-  #     indirect_branch 隐藏跳转目标   —— 与上一条互补
   #     vm_flatten     动态控制流      —— 每次运行路径都不同，唯一抗「反复跑+观察」
   #
-  # ⚠️ 五个全勾时以 vm_flatten 替代 flatten（两者都改控制流，叠加只是
-  #    互相削弱且体积翻倍）。见下方校验。
-  if [[ $OBF_MBA -eq 0 && $OBF_FLATTEN -eq 0 && $OBF_INDIRECT_CALL -eq 0 \
-        && $OBF_INDIRECT_BRANCH -eq 0 && $OBF_VM_FLATTEN -eq 0 ]]; then
+  # ⚠️ flatten 与 vm_flatten 全勾时以 vm_flatten 替代 flatten（两者都改
+  #    控制流，叠加只是互相削弱且体积翻倍）。见下方校验。
+  if [[ $OBF_MBA -eq 0 && $OBF_FLATTEN -eq 0 && $OBF_VM_FLATTEN -eq 0 ]]; then
     log_err "勾选了代码混淆，但没选任何混淆强度"
-    log_err "     可选：--obfuscate-mba / --obfuscate-flatten /"
-    log_err "           --obfuscate-indirect-call / --obfuscate-indirect-branch /"
-    log_err "           --obfuscate-vm-flatten"
+    log_err "     可选：--obfuscate-mba / --obfuscate-flatten / --obfuscate-vm-flatten"
     exit 1
   fi
 
   _OBF_SPEC=""
   [[ $OBF_MBA -eq 1 ]]             && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}mba"
   [[ $OBF_FLATTEN -eq 1 ]]         && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}flatten"
-  [[ $OBF_INDIRECT_CALL -eq 1 ]]   && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}indirect_call"
-  [[ $OBF_INDIRECT_BRANCH -eq 1 ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}indirect_branch"
   [[ $OBF_VM_FLATTEN -eq 1 ]]      && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}vm_flatten"
 
   export AMICE_MBA="$([[ $OBF_MBA -eq 1 ]] && echo true || echo false)"
   export AMICE_FLATTEN="$([[ $OBF_FLATTEN -eq 1 ]] && echo true || echo false)"
-  export AMICE_INDIRECT_CALL="$([[ $OBF_INDIRECT_CALL -eq 1 ]] && echo true || echo false)"
-  export AMICE_INDIRECT_BRANCH="$([[ $OBF_INDIRECT_BRANCH -eq 1 ]] && echo true || echo false)"
   export AMICE_VM_FLATTEN="$([[ $OBF_VM_FLATTEN -eq 1 ]] && echo true || echo false)"
 
   # ── 混淆只作用于明文段，不作用于 .ncx（2026-11-18）─────────────────
@@ -1116,32 +1103,6 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   if [[ $OBF_VM_FLATTEN -eq 1 && $OBF_FLATTEN -eq 1 ]]; then
     export AMICE_FLATTEN=false
     log_warn "同时勾了 flatten 与 vm_flatten → 只保留 vm_flatten（动态版严格更强）"
-  fi
-
-  # ── VMP 与「间接调用/跳转」互斥（2026-11-14 实测）──────────────────
-  #
-  # 实测数据（同一份代码，只改这个开关）：
-  #   只 VMP                     → VMP 成功 9 个
-  #   VMP + indirect_call/branch → VMP 成功 5 个
-  #
-  # 为什么会互相拆台：IndirectCall 把调用改成「函数表 + 索引」，
-  # 也就是【取函数地址】。而 VMP 的跳过判据正是
-  # has_unsupported_function_uses ——「函数地址被非调用用途引用」。
-  # 我在 indirect_* 的 do_pass 里加了「见 +vm_virtualize 就跳过」，
-  # 但那只能保护被标记的函数【本身】不被改；保护不了「它们调用的函数
-  # 被改成取地址」——地址沿调用链逃逸，VMP 照样放弃。
-  #
-  # 所以二者是【二选一】而非并存：
-  #   VMP 开 → 关掉这两个（VMP 强度高一个数量级，不能为它让路）
-  #   VMP 关 → 保留这两个（此时它们是净收益：体积/性能近乎零代价）
-  #
-  # ⚠️ 不直接报错退出：用户可能只是「都想要」，静默降级 + 明确 warn
-  #    比让构建红更有用（他下次就知道该怎么选了）。
-  if [[ $WANT_VMP_VM -eq 1 && ( $OBF_INDIRECT_CALL -eq 1 || $OBF_INDIRECT_BRANCH -eq 1 ) ]]; then
-    export AMICE_INDIRECT_CALL=false
-    export AMICE_INDIRECT_BRANCH=false
-    log_warn "VMP 与「隐藏调用关系/隐藏跳转目标」冲突（实测会让 VMP 从 9 个函数降到 5 个）"
-    log_warn "   → 已自动忽略这两项，保留 VMP。要用它们请先关掉 VMP 虚拟化"
   fi
 
   # ── VMP 与 vm_flatten 互斥（2026-11-17 实测）─────────────────────
@@ -1185,15 +1146,12 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   [[ "$AMICE_MBA"       == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}mba"
   [[ "$AMICE_FLATTEN"   == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}flatten"
   [[ "$AMICE_VM_FLATTEN" == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}vm_flatten"
-  [[ "$AMICE_INDIRECT_CALL"   == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}indirect_call"
-  [[ "$AMICE_INDIRECT_BRANCH" == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}indirect_branch"
 
   log_info "代码混淆: $_OBF_SPEC"
   if [[ -n "$AMICE_OBF_SKIP_SECTIONS" ]]; then
     log_info "  ⚠️ 混淆不作用于这些段（密文不可压缩，收益为零）: $AMICE_OBF_SKIP_SECTIONS"
   fi
   log_info "  AMICE_MBA=$AMICE_MBA AMICE_FLATTEN=$AMICE_FLATTEN"
-  log_info "  AMICE_INDIRECT_CALL=$AMICE_INDIRECT_CALL AMICE_INDIRECT_BRANCH=$AMICE_INDIRECT_BRANCH"
   log_info "  AMICE_VM_FLATTEN=$AMICE_VM_FLATTEN"
   log_info "混淆用 NDK: $AMICE_NDK_HOME（bundle 自带，与插件配套）"
 fi
@@ -1241,8 +1199,6 @@ if [[ $WANT_VMP -eq 1 ]]; then
     # 两种情况结论相同，故不拆分支。
     export AMICE_MBA=false
     export AMICE_FLATTEN=false
-    export AMICE_INDIRECT_CALL=false
-    export AMICE_INDIRECT_BRANCH=false
     export AMICE_VM_FLATTEN=false
     log_info "不做混淆（未勾选代码混淆，或按函数分流的开关已关闭），只保留 VMP"
   fi

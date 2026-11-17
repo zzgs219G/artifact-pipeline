@@ -104,9 +104,11 @@ def main():
     check("默认开启（so 层保护是核心防护）", ob.get('default') is True,
           str(ob.get('default')))
     kids = {c['key']: c for c in ob.get('children', [])}
-    check("六个子项齐全（VMP 本体 + 弱混淆 2 + 结构性 3）",
-          set(kids) == {'vm', 'mba', 'flatten', 'indirect_call',
-                        'indirect_branch', 'vm_flatten'},
+    # 2026-11-18：indirect_call / indirect_branch 已删除（用户口径
+    # 「VMP + 下面三个」）。它们与 VMP 实测冲突（成功数 9→5），
+    # 且在 UI 上一直是默认关闭的死选项，直接移除而不是留着做互斥。
+    check("四个子项齐全（VMP 本体 + 混淆 3）",
+          set(kids) == {'vm', 'mba', 'flatten', 'vm_flatten'},
           str(sorted(kids)))
     # VMP 是 so层保护的第一等子项：默认开、可关。
     # 「可关」不是随手加的 —— 它占约 470KB，小包或压测时需要能关掉。
@@ -118,23 +120,15 @@ def main():
     check("mba 默认开启（低风险）", kids.get('mba', {}).get('default') is True)
     check("flatten 默认关闭（与 vm_flatten 争控制流，不默认开）",
           kids.get('flatten', {}).get('default') is False)
-    # ⚠️ 结构性混淆（indirect_call / indirect_branch）实测与 VMP 冲突：
-    #    开启后 VMP 成功函数 9 → 5。所以默认关闭，并在 label/desc 里
-    #    写明冲突，不能让人以为「默认开的一定是净收益」。
-    check("indirect_call 默认关闭（实测与 VMP 冲突）",
-          kids.get('indirect_call', {}).get('default') is False)
-    check("indirect_branch 默认关闭（实测与 VMP 冲突）",
-          kids.get('indirect_branch', {}).get('default') is False)
-    check("indirect_call 的 label 标注了冲突",
-          '冲突' in kids.get('indirect_call', {}).get('label', ''))
-    check("indirect_branch 的 label 标注了冲突",
-          '冲突' in kids.get('indirect_branch', {}).get('label', ''))
+    # 防回归：被删掉的两项不得复活（复活必然重演 VMP 掉 4 个函数的回归）
+    check("indirect_call 已彻底移除",
+          'indirect_call' not in kids)
+    check("indirect_branch 已彻底移除",
+          'indirect_branch' not in kids)
     check("vm_flatten 默认关闭（体积与编译开销大，需显式开）",
           kids.get('vm_flatten', {}).get('default') is False)
     for k, want in (('mba', '--obfuscate-mba'),
                     ('flatten', '--obfuscate-flatten'),
-                    ('indirect_call', '--obfuscate-indirect-call'),
-                    ('indirect_branch', '--obfuscate-indirect-branch'),
                     ('vm_flatten', '--obfuscate-vm-flatten')):
         check(f"{k} 的 arg_on == {want}",
               kids.get(k, {}).get('arg_on') == want,
@@ -173,16 +167,13 @@ def main():
     check("flatten 勾选 → 生成 --obfuscate-flatten",
           rc == 0 and '--obfuscate-flatten' in lines, f"lines={lines}")
 
-    # 新增的三个结构性混淆
+    # vm_flatten（动态控制流）
     rc, lines, out = resolve({
         'schema_version': 1, 'sigcheck': True,
-        'soguard': {'enabled': True, 'mba': False,
-                'indirect_call': True, 'indirect_branch': True,
-                'vm_flatten': True},
+        'soguard': {'enabled': True, 'mba': False, 'vm_flatten': True},
     })
-    for a in ('--obfuscate-indirect-call', '--obfuscate-indirect-branch',
-              '--obfuscate-vm-flatten'):
-        check(f"勾选后生成 {a}", rc == 0 and a in lines, f"lines={lines}")
+    check("勾选后生成 --obfuscate-vm-flatten",
+          rc == 0 and '--obfuscate-vm-flatten' in lines, f"lines={lines}")
 
     rc, lines, out = resolve({
         'schema_version': 1, 'sigcheck': True,

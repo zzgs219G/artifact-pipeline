@@ -306,32 +306,35 @@ else
   bad "T13 历史参数被删 —— 旧调用方会报 unknown option"
 fi
 
-# ── T14：VMP 与间接混淆互斥（2026-11-14 实测）─────────────────────
-# 实测：开 indirect_call/branch 会让 VMP 成功函数从 9 降到 5。
-# protect.sh 必须自动忽略它们（而不是让用户踩坑）。
-echo "── T14 VMP 与间接混淆互斥 ──"
-if grep -q 'AMICE_INDIRECT_CALL=false' "$ROOT/scripts/pipelines/protect.sh" \
-   && grep -q 'AMICE_INDIRECT_BRANCH=false' "$ROOT/scripts/pipelines/protect.sh"; then
-  ok "T14a protect.sh 在 VMP 开时关掉 indirect_call/branch"
+# ── T14：indirect_call / indirect_branch 已从产品中移除（2026-11-18）──
+# 历史：这两项与 VMP 实测冲突（VMP 成功数 9→5），protect.sh 曾做二选一。
+# 用户决定直接删掉它们（UI 上一直是默认关闭的死选项）。
+# 本组断言防止它们被误加回来 —— 加回来必然重演 VMP 掉 4 个函数的回归。
+echo "── T14 indirect_* 已移除（防回归）──"
+if ! grep -q 'AMICE_INDIRECT_CALL\|AMICE_INDIRECT_BRANCH' "$ROOT/scripts/pipelines/protect.sh"; then
+  ok "T14a protect.sh 已无 indirect_* 处理逻辑"
 else
-  bad "T14a 缺互斥处理 —— 用户同时勾会白丢 4 个 VMP 函数"
+  bad "T14a protect.sh 仍有 indirect_* —— 死选项被加回来了"
 fi
-if grep -q 'VMP 与「隐藏调用关系/隐藏跳转目标」冲突' \
-     "$ROOT/scripts/pipelines/protect.sh"; then
-  ok "T14b 互斥时打 warn 说明原因"
-else
-  bad "T14b 缺 warn —— 用户不知道自己勾的选项被忽略了"
-fi
-# 冲突项必须排在子项列表末尾（顺序即 UI 展示顺序，把风险项放最后）
 if python3 -c "
 import json,sys
 d=json.load(open('$ROOT/configs/v1/config-schema.json'))
 m=[x for x in d['modules'] if x.get('key')=='soguard'][0]
 ks=[c['key'] for c in m.get('children',[])]
-sys.exit(0 if ks[-2:]==['indirect_call','indirect_branch'] else 1)"; then
-  ok "T14c 冲突项排在子项末尾"
+sys.exit(0 if 'indirect_call' not in ks and 'indirect_branch' not in ks else 1)"; then
+  ok "T14b schema 里已无 indirect_* 子项"
 else
-  bad "T14c 冲突项没排在末尾 —— 用户会先看到风险项"
+  bad "T14b schema 仍暴露 indirect_* —— UI 会出现与 VMP 冲突的死选项"
+fi
+if python3 -c "
+import json,sys
+d=json.load(open('$ROOT/configs/v1/config-schema.json'))
+m=[x for x in d['modules'] if x.get('key')=='soguard'][0]
+ks=[c['key'] for c in m.get('children',[])]
+sys.exit(0 if ks==['vm','mba','flatten','vm_flatten'] else 1)"; then
+  ok "T14c soguard 子项恰为 vm/mba/flatten/vm_flatten 四项"
+else
+  bad "T14c soguard 子项被改动 —— 用户口径是「VMP + 下面三个」"
 fi
 
 echo "── T15 VMP 与 vm_flatten 互斥（2026-11-17 实测全灭回归）──"

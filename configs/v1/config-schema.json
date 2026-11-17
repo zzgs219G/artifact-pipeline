@@ -73,27 +73,8 @@
           "default": false,
           "value_kind": "flag",
           "arg_on": "--obfuscate-vm-flatten"
-        },
-        {
-          "key": "indirect_call",
-          "label": "隐藏调用关系（⚠️ 与 VMP 冲突）",
-          "desc": "把直接调用改写成函数表索引的间接调用 —— 逆向者看不出「谁调用了谁」。⚠️ 实测与 VMP 冲突：开启后 VMP 成功的函数从 9 个降到 5 个（它在别的函数上产生地址引用，让 sig_verify 等的地址「逃逸」，触发 VMP 的 non-call address uses 跳过）。代码会自动处理：VMP 开着时这两项被忽略",
-          "type": "checkbox",
-          "default": false,
-          "value_kind": "flag",
-          "arg_on": "--obfuscate-indirect-call"
-        },
-        {
-          "key": "indirect_branch",
-          "label": "隐藏跳转目标（⚠️ 与 VMP 冲突）",
-          "desc": "把分支跳转改写成 indirectbr（跳转表 + 索引加密）。⚠️ 与「隐藏调用关系」同一问题：VMP 开着时同样会被自动忽略。价值场景是【不开 VMP】时补调用图模糊",
-          "type": "checkbox",
-          "default": false,
-          "value_kind": "flag",
-          "arg_on": "--obfuscate-indirect-branch"
         }
-      ],
-      "group_label": "防护层（VMP 默认开，可关）"
+      ]
     },
     {
       "key": "stringenc",
