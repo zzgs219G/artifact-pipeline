@@ -569,6 +569,10 @@ def build_report(marks, vmp_skips, pass_skips, vmflatten, seg_notes, file_counts
           f'其中可统计段合计 **{tot_raw/1024:.1f} KB** → '
           f'压缩后 **{tot_comp/1024:.1f} KB**（压比 **{tot_comp/tot_raw*100:.0f}%**）。')
         A('')
+        A('> ⚠️ 本表在【锁箱 + --strip-meta 之前】生成（那时才能扫函数），')
+        A('> 所以 `.eh_frame` / `.comment` 等段还在表里 —— 它们在最终产物中')
+        A('> 已被删除，实际 APK 体积会比这里的「合计」更小。')
+        A('>')
         A('> 判据：逐段 zlib -9 压缩后与原大小之比 > 95% 视为「密文/不可压」。')
         A('> 加密段（熵 8.0）压不动 → 它涨多少，APK 就涨多少；')
         A('> 明文段能压到 20~50% → 体积代价被打折。')
