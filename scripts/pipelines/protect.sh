@@ -1598,60 +1598,59 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   if [[ $WANT_VMP -eq 1 ]]; then
     echo "[mark] VMP: dex2c 产物【不】打注解（实测 4/4 因寄存器预算被跳过，见 protect.sh 注释）"
   fi
-  python3 "$GUARD_SRC/so_section_mark.py" "$WORK/project/jni" \
-    --rule dex2c-jni \
-    --rule dynamic-register-jni \
-    --exclude nc_guard_jni.c \
-    --exclude-func ncVerify \
-    --exclude-func heartbeat \
-    --exclude-func JNI_OnLoad \
-    --exclude-func selftest \
-    "${_MARK_EXTRA[@]}" \
-    -v 2>&1 | sed 's/^/  [mark] /' || {
-    echo "❌ 段标记失败——dex2c 转译产物未吃上加密（用户明确要求）" >&2
-    exit 1
-  }
+  # ═══ 2026-11-18：dex2c 产物【不再】进 .ncx ═══════════════════════
+  #
+  # 用户决策：撤掉 dex2c 产物的加密，改留 .text 明文。
+  #
+  # 依据（实测，不是推断）：
+  #   ① dex2c 不是混淆、不是加密，只是"换个执行形态"（解释器 → native）。
+  #      解开 .ncx 后读明文 ARM64，类名/方法名/签名全是 .rodata 里的明文常量。
+  #      实测 attachBaseContext 的反汇编里直接可读出：
+  #         adrp/add → "java/lang/Object" "getClass" "()Ljava/lang/Class;"
+  #      攻击者把 blr 序列翻译回 Java 调用的成本 ≈ 读 jadx 输出。
+  #   ② 也就是说加密只把"1 小时"变成"2 小时"（多一道解锁手续），
+  #      而解锁链本身是可脚本化的（nox 文档 §15.7 已记载）。
+  #   ③ 这 4 个方法实测内容是纯 UI：
+  #        k(1336B)               → theme_prefs / theme_mode / SYSTEM /
+  #                                 theme_color / DYNAMIC / custom_seed_color
+  #        attachBaseContext(198B)→ "[StartTheme] App" + uiMode
+  #        onCreate(358B)         → show_crash / crash_info
+  #        onConfigurationChanged → 空
+  #      无密钥、无校验、无业务核心 → 明文暴露无实质损失。
+  #   ④ 体积：这 4 个方法转译后 31,228 B，占 .ncx 55,636 B 的 56%。
+  #      而 .ncx 是密文（熵 8.0），zlib 完全压不动 → 线性增加 APK 体积；
+  #      留在 .text（明文）则能正常压缩。
+  #
+  # 所以这里【故意不调用】so_section_mark.py 对 dex2c 产物打标记。
+  # dex2c 产物由 Dex2C 引擎生成，本身不带 section 属性 → 自动落 .text。
+  #
+  # ⚠️ 仍保留 sig_check.c / sig_guard2.c 的段标记：它们是【源码内】
+  #    的 SIG_SEC_MARKED / G2_SEC_MARKED 宏，不经过本工具。
+  # ⚠️ 下面的守卫语义已反转：从"必须标记"改为"必须不标记"。
+  echo "[mark] dex2c 产物：不标记 → 留 .text 明文（实测明文可还原，加密收益仅多一道解锁手续）"
 
-  # 静默失防检测：有 JNI 头却没标上任何一个 → 规则与产物形态脱节
-  # （例如 writer.py 改了函数头格式）。此时不能放行——那等于"以为防了
-  # 其实没防"，正是本机制最该避免的假绿。
-  # ⚠️ 段名必须与 so_section_mark.py 的 SECTION 常量一致（2026-10-19 已改 .ncx）。
-  #    这里曾经写死旧段名，段名中性化后漏改 → MARKED=0 → 下面的
-  #    "静默失防"守卫 fail-fast（CI 39171457222 实证）。守卫本身是对的，
-  #    但漏改段名等于把自己的守卫变成误报源。
+  # ── 守卫（2026-11-18 语义反转）───────────────────────────────────
+  #
+  # 原守卫：「dex2c 产物必须都标进 .ncx，漏标 = 静默失防 → fail-fast」。
+  # 现在故意不标记，所以改成反向断言：**不该有** dex2c 产物被标进 .ncx。
+  #
+  # 为什么仍需要守卫：so_section_mark.py 的两个内置规则（dex2c-jni /
+  # dynamic-register-jni）没删，只是不再调用。万一将来有人加回来，
+  # 或 writer.py 自己往函数上加 section 属性，体积会静默涨回去。
   MARKED=$(grep -rc 'section(".ncx")' "$WORK/project/jni" \
            --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null \
            | awk -F: '{s+=$2} END {print s+0}')
-  if [[ $JNI_HDRS -gt 0 && $MARKED -eq 0 ]]; then
-    echo "❌ 检出 $JNI_HDRS 个 JNI 函数定义（静态 $JNI_STATIC / 动态 $JNI_DYNAMIC），但段标记命中 0" >&2
-    echo "   → dex2c 的 writer.py 的函数头形态变了，两条规则都已脱节" >&2
-    echo "   → 修 nox 仓库的 so_section_mark.py（dex2c-jni / dynamic-register-jni），" >&2
-    echo "     不许静默放行：那等于 dex2c 抽走的业务逻辑全部以明文留在 .text" >&2
+  if [[ $MARKED -gt 0 ]]; then
+    echo "❌ 检出 $MARKED 处 .ncx 段标记，但 dex2c 产物【不应】再进加密段" >&2
+    echo "   → 2026-11-18 决策：dex2c 明文可还原，加密只为体积埋单（31KB 不可压缩）" >&2
+    echo "   → 谁把标记加回来的？检查 so_section_mark.py 调用是否被恢复" >&2
+    echo "   → 若确需改回加密，先看 protect.sh 该段落上方记录的实测依据" >&2
     exit 1
   fi
-  # 配对断言：检出的定义数必须与标记数【对得上】。
-  # 只查"MARKED==0"不够 —— 3187 个方法里标上 3 个也能通过，实质仍是失防。
-  #
-  # ⚠️ 2026-11-10 修正分母：必须扣掉【被 --exclude-func 显式排除】的函数。
-  #   首版把 JNI_OnLoad 算进分母 → CI 报「检出 8 个，只标上 6 个（要求 ≥7）」
-  #   而实际是 100% 覆盖。JNI_OnLoad 是 unlock 的调用方，锁进 .ncx 会
-  #   "解锁前执行密文" → 死锁，它【必须】留在明文 .text。
-  #   把故意不标的算作漏标，等于把守卫变成误报源 —— 这正是本文件
-  #   反复记的那条教训（守卫本身是对的，判据写错就成噪音源）。
-  _EXCLUDED=$(grep -rhoE '(JNI_OnLoad|ncVerify|heartbeat|selftest)[[:space:]]*\(' \
-              "$WORK/project/jni" --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null \
-              | sort -u | wc -l || true)
-  _EXCLUDED=${_EXCLUDED:-0}
-  _EXPECT=$(( JNI_HDRS - _EXCLUDED ))
-  [[ $_EXPECT -lt 0 ]] && _EXPECT=0
-  if [[ $_EXPECT -gt 0 && $MARKED -lt $_EXPECT ]]; then
-    echo "❌ 段标记覆盖不足：应标 $_EXPECT 个（检出 $JNI_HDRS，显式排除 $_EXCLUDED），" >&2
-    echo "   实际只标上 $MARKED 个" >&2
-    echo "   → 有 dex2c 产物仍在明文 .text，攻击者 objdump 即可读" >&2
-    echo "   → 若排除名单（JNI_OnLoad/ncVerify/heartbeat/selftest）与实际不符，先修名单" >&2
-    exit 1
-  fi
-  echo "[mark] 完成：$MARKED 处 .ncx 标记 / 应标 $_EXPECT 个（检出 $JNI_HDRS，排除 $_EXCLUDED）"
+  # 反向确认：dex2c 产物必须仍在 .text（没有 section 属性）
+  _DEX2C_NOATTR=$(grep -rLE 'section\(' "$WORK/project/jni" \
+                  --include='Java_*.cpp' --include='Dex2C.cpp' 2>/dev/null | wc -l || true)
+  echo "[mark] dex2c 产物无段属性（→ .text 明文）：${_DEX2C_NOATTR:-0} 个文件"
 
 fi
 
