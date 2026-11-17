@@ -1105,37 +1105,32 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
     log_warn "同时勾了 flatten 与 vm_flatten → 只保留 vm_flatten（动态版严格更强）"
   fi
 
-  # ── VMP 与 vm_flatten 互斥（2026-11-17 实测）─────────────────────
+  # ── vm_flatten 与 VMP 可以共存（2026-11-18 修正）────────────────
   #
-  # 实测数据（同一份代码，只改这个开关；run 43586459800 vs 44082797350）：
-  #   vm_flatten 关 → VMP 跳过 1 个（find_apk_path，老误报），.nct/.ncv/.ncw 齐全
-  #   vm_flatten 开 → VMP 跳过 13 个（全灭），三个段都不生成
+  # ⚠️ 此前这里是「二选一，取 VMP」，把 vm_flatten 全局关掉了。
+  #    用户指出问题：「没有被 VMP 保护的函数用这个不行吗？」
+  #    —— 对。冲突只发生在【VMP 目标函数】上，不该一刀切关掉整个 pass。
   #
-  # 为什么：Amice 的 pass 优先级 VmFlatten=960 > VmVirtualize=955，
-  # 所以 VmFlatten 【先】把函数 CFG 换成状态机，VmVirtualize 后跑时
-  # 看到的是已经摊平的控制流 → 寄存器压力爆掉：
-  #   values=15 aggregates=0 temps=5 vregs=32 free=0
-  #   → "VM x-register budget exceeded"  整函数跳过
+  # 实测依据（当时代码注释写错的点）：
+  #   注释说「VmFlatten 是 FullLtoLast、VmVirtualize 是 OptimizerLast，
+  #   不同阶段所以白名单不够」—— 但看实际 flag：
+  #     VmFlatten    = OptimizerLast | FullLtoLast | FunctionLevel  (priority 960)
+  #     VmVirtualize = OptimizerLast                  | FunctionLevel  (priority 955)
+  #   两者【都跑 OptimizerLast】，同一阶段内按 priority 排序 960 → 955。
+  #   所以 vm_flatten 的 do_pass 里那句「见 +vm_virtualize 就 continue」
+  #   【是有效的】—— 同阶段顺序执行，跳过就是跳过。
+  #   FullLtoLast 是额外阶段，那里没有 VmVirtualize，不构成干扰。
   #
-  # ⚠️ 为什么不是"给 vm_flatten 补 annotate 白名单"就够：
-  #    VmFlatten 的 flag 是 FullLtoLast，VmVirtualize 是 OptimizerLast，
-  #    两者在不同 pipeline 阶段。白名单只能让 VmFlatten 跳过【本阶段】，
-  #    用户在【另一个阶段】仍会跑它 → 冲突依旧。所以必须在这里二选一。
-  #    （amice fork 侧仍会补白名单，作为绕过 protect.sh 时的兜底。）
+  # 现在的分流（由 amice 侧逐函数判断，不是全局开关）：
+  #   VMP 目标函数（带 +vm_virtualize）→ vm_flatten 跳过 → 只吃 VMP
+  #   其它 .text 函数             → 吃 vm_flatten（动态控制流）
+  #   dex2c 产物（带 +no_obf）     → 跳过（避免体积膨胀 3.7 倍）
+  #   .ncx 段                     → 跳过（密文，混淆无意义）
   #
-  # 取 VMP：sigcheck 侧 10 个函数从"逆 VM 要几天"降到"改一条指令几分钟"，
-  # 而 vm_flatten 只是一层状态机改写（souper 类工具可自动化简）。
+  # 前提：amice fork 的 vm_flatten/mod.rs 必须保留 annotate 白名单
+  # （commit 1a6beb9 加的，兜底作用）。若换回上游 amice，这里要改回关掉。
   if [[ $WANT_VMP_VM -eq 1 && $OBF_VM_FLATTEN -eq 1 ]]; then
-    export AMICE_VM_FLATTEN=false
-    log_warn "VMP 与「动态控制流(vm_flatten)」冲突（实测会让 VMP 从 10 个函数降到 0 个）"
-    log_warn "   → 已自动忽略 vm_flatten，保留 VMP。要用它请先关掉 VMP 虚拟化"
-    # 上方「flatten 与 vm_flatten 同时勾 → 只保留 vm_flatten」把 flatten 关掉了。
-    # 现在 vm_flatten 也被关，若不回退就会两者皆无。flatten 尊重 annotate
-    # （日志可见 skip Flatten for VMP function），与 VMP 可共存，所以退回它。
-    if [[ $OBF_FLATTEN -eq 1 ]]; then
-      export AMICE_FLATTEN=true
-      log_warn "   → 已把 flatten（静态版，尊重 VMP 标注）恢复为 true"
-    fi
+    log_info "vm_flatten 与 VMP 按函数分流（VMP 目标跳过 vm_flatten，其余照吃）"
   fi
 
   # ⚠️ 上面三处互斥会改 AMICE_* 环境变量，_OBF_SPEC 是按【原始勾选】
