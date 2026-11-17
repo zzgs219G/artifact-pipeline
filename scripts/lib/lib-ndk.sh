@@ -387,6 +387,7 @@ ndk_build() {
       AMICE_INDIRECT_CALL="${AMICE_INDIRECT_CALL:-false}" \
       AMICE_INDIRECT_BRANCH="${AMICE_INDIRECT_BRANCH:-false}" \
       AMICE_VM_FLATTEN="${AMICE_VM_FLATTEN:-false}" \
+      AMICE_OBF_SKIP_SECTIONS="${AMICE_OBF_SKIP_SECTIONS-.ncx}" \
       "$bundle_ndk/ndk-build" -j"$(nproc)" -C "$project"
     return $?
   fi

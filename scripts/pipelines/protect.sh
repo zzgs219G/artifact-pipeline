@@ -1086,6 +1086,30 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   export AMICE_INDIRECT_BRANCH="$([[ $OBF_INDIRECT_BRANCH -eq 1 ]] && echo true || echo false)"
   export AMICE_VM_FLATTEN="$([[ $OBF_VM_FLATTEN -eq 1 ]] && echo true || echo false)"
 
+  # ── 混淆只作用于明文段，不作用于 .ncx（2026-11-18）─────────────────
+  # 为什么：`.ncx` 锁箱后是密文，熵 8.0、zlib 完全压不动 → 任何让 .ncx
+  # 变大的 pass 都是【线性增加 APK 体积】，而同样操作在 .text（明文）
+  # 上只需几 KB。
+  #
+  # 实测（简盒样本）：
+  #   混淆关  .text 67,668 B  .ncx  49,192 B
+  #   混淆开  .text 109,524 B（+42 KB，可压）
+  #           .ncx 190,324 B（+141 KB，不可压）← 主因是 dex2c 巨型函数
+  #
+  # 而 .ncx 里的膨胀收益为零：
+  #   · dex2c 产物保护的是"Java 方法的执行形态"，不是藏代码 ——
+  #     原 Java 代码仍在 classes.dex 明文可读（只被改成 native 声明）
+  #   · dex2c 产物因寄存器天然超限（Dalvik 255 变量 > VM 32 寄存器），
+  #     从来没被 VMP 保护过（见本文件 1600 行的完整记录）
+  #   · 未被 VMP 覆盖的 sig_check/stringenc 函数仍会吃 Flatten+Mba，
+  #     但它们本身很小（合计 < 30 KB），混淆增益与体积代价不成比例
+  #
+  # 实现：amice fork 的 aotu/obf_skip.rs 读这个变量，在 7 个混淆 pass
+  # 的循环开头按函数所属段跳过。默认 `.ncx`；设为空串 = 恢复旧行为。
+  #
+  # ⚠️ 用 ${VAR-.ncx} 而非 ${VAR:-.ncx}：要允许"显式设为空"表示不排除。
+  export AMICE_OBF_SKIP_SECTIONS="${AMICE_OBF_SKIP_SECTIONS-.ncx}"
+
   # vm_flatten 与 flatten 都改控制流：叠加会互相削弱（后者把 CFG 摊平后，
   # 前者的「每次运行路径不同」就没多少跳转点可用了），且体积白白翻倍。
   # 两者都勾时保留 vm_flatten —— 它是动态的，抗分析能力严格更强。
@@ -1165,6 +1189,9 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   [[ "$AMICE_INDIRECT_BRANCH" == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}indirect_branch"
 
   log_info "代码混淆: $_OBF_SPEC"
+  if [[ -n "$AMICE_OBF_SKIP_SECTIONS" ]]; then
+    log_info "  ⚠️ 混淆不作用于这些段（密文不可压缩，收益为零）: $AMICE_OBF_SKIP_SECTIONS"
+  fi
   log_info "  AMICE_MBA=$AMICE_MBA AMICE_FLATTEN=$AMICE_FLATTEN"
   log_info "  AMICE_INDIRECT_CALL=$AMICE_INDIRECT_CALL AMICE_INDIRECT_BRANCH=$AMICE_INDIRECT_BRANCH"
   log_info "  AMICE_VM_FLATTEN=$AMICE_VM_FLATTEN"
