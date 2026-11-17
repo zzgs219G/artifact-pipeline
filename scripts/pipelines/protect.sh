@@ -1095,7 +1095,9 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   # 的循环开头按函数所属段跳过。默认 `.ncx`；设为空串 = 恢复旧行为。
   #
   # ⚠️ 用 ${VAR-.ncx} 而非 ${VAR:-.ncx}：要允许"显式设为空"表示不排除。
-  export AMICE_OBF_SKIP_SECTIONS="${AMICE_OBF_SKIP_SECTIONS-.ncx}"
+  # ⚠️ .d2c 段（dex2c 转译产物）也要排除：它既不加密也不该混淆 ——
+  #    实测 Flatten 会把 k 方法从 22,716 撑到 84,648 B（3.7 倍）。
+  export AMICE_OBF_SKIP_SECTIONS="${AMICE_OBF_SKIP_SECTIONS-.ncx,.d2c}"
 
   # vm_flatten 与 flatten 都改控制流：叠加会互相削弱（后者把 CFG 摊平后，
   # 前者的「每次运行路径不同」就没多少跳转点可用了），且体积白白翻倍。
@@ -1627,39 +1629,66 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   # ⚠️ 仍保留 sig_check.c / sig_guard2.c 的段标记：它们是【源码内】
   #    的 SIG_SEC_MARKED / G2_SEC_MARKED 宏，不经过本工具。
   # ⚠️ 下面的守卫语义已反转：从"必须标记"改为"必须不标记"。
-  echo "[mark] dex2c 产物：不标记 → 留 .text 明文（实测明文可还原，加密收益仅多一道解锁手续）"
+  # ⚠️⚠️ 2026-11-18 二次修正（run 44148280741 实测）：
+  #   首版是「完全不标记 → 落 .text」，结果 dex2c 产物在 .text 里
+  #   被 Flatten 混淆，膨胀 3.7 倍（k 方法 22,716 → 84,648 B），
+  #   .text 从 107,764 涨到 228,772 B，APK 反而大 82 KB。
+  #
+  #   也就是说：只把"加密"撤掉不够 —— 还必须同时阻止混淆。
+  #   而 AMICE_OBF_SKIP_SECTIONS 是按【段】排除的，dex2c 产物若在
+  #   .text 就与正常代码同段，无法区分。
+  #
+  #   解法：给它们打一个【非加密的专属段】 .d2c，然后把它加进
+  #   AMICE_OBF_SKIP_SECTIONS。这样既不加密、也不混淆。
+  #
+  #   为什么专属段不会泄露：段名本身没有语义（.d2c 不比 .text 更醒目），
+  #   而且 dex2c 产物本来就是"能读的"（实测明文可还原）。
+  if [[ $WANT_TRANSPILE -eq 1 ]]; then
+    echo "[mark] dex2c 产物 → 段 .d2c（不加密、不混淆）"
+    python3 "$GUARD_SRC/so_section_mark.py" "$WORK/project/jni" \
+      --rule dex2c-jni \
+      --rule dynamic-register-jni \
+      --section .d2c \
+      --exclude nc_guard_jni.c \
+      2>&1 | sed 's/^/  [mark] /' || {
+      echo "❌ dex2c 产物打 .d2c 段失败" >&2
+      exit 1
+    }
+  fi
 
-  # ── 守卫（2026-11-18 语义反转）───────────────────────────────────
+  # ── 守卫（2026-11-18 二版）───────────────────────────────────────
   #
-  # 原守卫：「dex2c 产物必须都标进 .ncx，漏标 = 静默失防 → fail-fast」。
-  # 现在故意不标记，所以改成反向断言：**不该有** dex2c 产物被标进 .ncx。
+  # 判据：dex2c 产物必须标在 .d2c（专属段），且【不得】标在 .ncx（加密段）。
+  # 两者都不满足 → fail-fast。
   #
-  # 为什么仍需要守卫：so_section_mark.py 的两个内置规则（dex2c-jni /
-  # dynamic-register-jni）没删，只是不再调用。万一将来有人加回来，
-  # 或 writer.py 自己往函数上加 section 属性，体积会静默涨回去。
-  # ⚠️ 只查 dex2c 产物（Java_*.cpp / Dex2C.cpp），不查 sig_check.c 等。
-  #    首版用 --include='*.c' 扫全目录 → 把 nc_strdec.c 的明文段标记
-  #    也算进来，误报"dex2c 产物进了 .ncx"（run 44147441797 实测假红）。
-  #    守卫的判据必须精确对应它要防的那件事，否则就是噪音源。
-  # ⚠️ grep 无匹配时返回 1，在 set -e 下会直接杀掉脚本
-  #    （run 44147865538 实测：行号 1646 异常退出）。
-  #    管道里 awk 是最后一段，但 pipefail 把 grep 的 1 传了上来。
-  #    这是本项目反复踩的坑型：判据本身没错，退出码语义没处理。
-  MARKED=$( grep -rc 'section(' "$WORK/project/jni" \
-              --include='Java_*.cpp' --include='Dex2C.cpp' --include='*.cc' \
-              2>/dev/null | awk -F: '{s+=$2} END {print s+0}' ) || true
-  MARKED=${MARKED:-0}
-  if [[ $MARKED -gt 0 ]]; then
-    echo "❌ 检出 $MARKED 处 .ncx 段标记，但 dex2c 产物【不应】再进加密段" >&2
-    echo "   → 2026-11-18 决策：dex2c 明文可还原，加密只为体积埋单（31KB 不可压缩）" >&2
-    echo "   → 谁把标记加回来的？检查 so_section_mark.py 调用是否被恢复" >&2
-    echo "   → 若确需改回加密，先看 protect.sh 该段落上方记录的实测依据" >&2
+  # 历史（两次翻车都记在这）：
+  #   ① 原守卫：「必须都标进 .ncx」→ 与新的"不加密"决策冲突，需要反转
+  #   ② 首版反转：「不许有任何 .ncx 标记」→ 用 --include='*.c' 扫全目录，
+  #      把 nc_strdec.c 的明文标记算进来 → 假红（run 44147441797）
+  #   ③ grep 无匹配返回 1 在 set -e 下杀脚本（run 44147865538）
+  #   所以现在：判据精确到 dex2c 文件 + 退出码显式兜底。
+  _D2C_MARKED=$( grep -rc 'section(".d2c")' "$WORK/project/jni" \
+                   --include='Java_*.cpp' --include='Dex2C.cpp' 2>/dev/null \
+                   | awk -F: '{s+=$2} END {print s+0}' ) || true
+  _D2C_IN_NCX=$( grep -rlc 'section(".ncx")' "$WORK/project/jni" \
+                   --include='Java_*.cpp' --include='Dex2C.cpp' 2>/dev/null \
+                   | wc -l ) || true
+  _D2C_MARKED=${_D2C_MARKED:-0}
+  _D2C_IN_NCX=${_D2C_IN_NCX:-0}
+
+  if [[ $WANT_TRANSPILE -eq 1 && $_D2C_MARKED -eq 0 ]]; then
+    echo "❌ 勾了 dex2c 但没有任何产物标进 .d2c 段" >&2
+    echo "   → 2026-11-18 决策：dex2c 产物进 .d2c（不加密、不混淆）" >&2
+    echo "   → 检查 so_section_mark.py 的 dex2c-jni / dynamic-register-jni 规则" >&2
     exit 1
   fi
-  # 反向确认：dex2c 产物必须仍在 .text（没有 section 属性）
-  _DEX2C_NOATTR=$( grep -rLE 'section\(' "$WORK/project/jni" \
-                     --include='Java_*.cpp' --include='Dex2C.cpp' 2>/dev/null | wc -l ) || true
-  echo "[mark] dex2c 产物无段属性（→ .text 明文）：${_DEX2C_NOATTR:-0} 个文件"
+  if [[ $_D2C_IN_NCX -gt 0 ]]; then
+    echo "❌ 检出 $_D2C_IN_NCX 个 dex2c 文件被标进 .ncx（加密段）" >&2
+    echo "   → 2026-11-18 决策：dex2c 明文可还原，加密只为体积埋单" >&2
+    echo "   → .ncx 熵 8.0 压不动，31 KB 会线性进 APK" >&2
+    exit 1
+  fi
+  echo "[mark] dex2c 产物：.d2c 段 $_D2C_MARKED 处（不加密、不混淆），.ncx 0 处"
 
 fi
 
