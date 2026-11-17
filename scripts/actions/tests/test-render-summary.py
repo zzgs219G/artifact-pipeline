@@ -86,7 +86,8 @@ print("── ③ 子选项渲染 ──")
 md2 = render({
     "schema_version": 1,
     "sigcheck": True,
-    "soguard": {"enabled": True, "vm": True, "mba": True, "flatten": False,
+    # bcf=False 用于验证「flag 关 → ⬜ 关」这条断言（要有至少一个关闭的子项）
+    "soguard": {"enabled": True, "vm": True, "mba": True, "bcf": False,
             "vm_flatten": True},
     "stringenc": {"enabled": True, "stub_impl": "native", "algo": "chacha20",
                   "dex2c_stub": True, "rules_file": "com.a.**\ncom.b.**"},

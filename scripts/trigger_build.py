@@ -176,6 +176,7 @@ def build_config(args) -> str:
             "vm": not getattr(args, "no_vm", False),
             "mba": bool(getattr(args, "obf_mba", False)),
             "flatten": bool(getattr(args, "obf_flatten", False)),
+            "bcf": bool(getattr(args, "obf_bcf", False)),
             "indirect_call": bool(getattr(args, "obf_indirect_call", False)),
             "indirect_branch": bool(getattr(args, "obf_indirect_branch", False)),
             "vm_flatten": bool(getattr(args, "obf_vm_flatten", False)),
@@ -762,7 +763,9 @@ def main() -> int:
     g.add_argument("--obf-mba", action="store_true",
                    help="算术混淆（MBA）：表达式改写成难读形式。可被 souper 类工具还原")
     g.add_argument("--obf-flatten", action="store_true",
-                   help="控制流扁平化：状态码明文，配表可还原")
+                   help="控制流扁平化：状态码明文，配表可还原（已被 --obf-bcf 取代，保留兼容）")
+    g.add_argument("--obf-bcf", action="store_true",
+                   help="虚假控制流：永假分支 + 不透明谓词，改分支条件（与 vm_flatten 跨类互补）")
     g.add_argument("--obf-indirect-call", action="store_true",
                    help="隐藏调用关系：看不出谁调用了谁（VMP 覆盖不到的盲区）")
     g.add_argument("--obf-indirect-branch", action="store_true",

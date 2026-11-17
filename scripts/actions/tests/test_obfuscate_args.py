@@ -107,8 +107,11 @@ def main():
     # 2026-11-18：indirect_call / indirect_branch 已删除（用户口径
     # 「VMP + 下面三个」）。它们与 VMP 实测冲突（成功数 9→5），
     # 且在 UI 上一直是默认关闭的死选项，直接移除而不是留着做互斥。
+    # 2026-11-18：flatten 换成 bcf（虚假控制流）。
+    # 理由：flatten 与 vm_flatten 都是「状态机」类，跨类收益低；
+    # BCF 改的是分支条件（整数区域重写 + 带守卫副本），与 vm_flatten 互补。
     check("四个子项齐全（VMP 本体 + 混淆 3）",
-          set(kids) == {'vm', 'mba', 'flatten', 'vm_flatten'},
+          set(kids) == {'vm', 'mba', 'bcf', 'vm_flatten'},
           str(sorted(kids)))
     # VMP 是 so层保护的第一等子项：默认开、可关。
     # 「可关」不是随手加的 —— 它占约 470KB，小包或压测时需要能关掉。
@@ -118,8 +121,8 @@ def main():
           kids.get('vm', {}).get('arg_on') == '--vmp-vm',
           str(kids.get('vm', {}).get('arg_on')))
     check("mba 默认开启（低风险）", kids.get('mba', {}).get('default') is True)
-    check("flatten 默认关闭（与 vm_flatten 争控制流，不默认开）",
-          kids.get('flatten', {}).get('default') is False)
+    check("bcf 默认开启（与 vm_flatten 跨类互补，不像 flatten 争控制流）",
+          kids.get('bcf', {}).get('default') is True)
     # 防回归：被删掉的两项不得复活（复活必然重演 VMP 掉 4 个函数的回归）
     check("indirect_call 已彻底移除",
           'indirect_call' not in kids)
@@ -128,7 +131,7 @@ def main():
     check("vm_flatten 默认关闭（体积与编译开销大，需显式开）",
           kids.get('vm_flatten', {}).get('default') is False)
     for k, want in (('mba', '--obfuscate-mba'),
-                    ('flatten', '--obfuscate-flatten'),
+                    ('bcf', '--obfuscate-bcf'),
                     ('vm_flatten', '--obfuscate-vm-flatten')):
         check(f"{k} 的 arg_on == {want}",
               kids.get(k, {}).get('arg_on') == want,
@@ -162,10 +165,10 @@ def main():
 
     rc, lines, out = resolve({
         'schema_version': 1, 'sigcheck': True,
-        'soguard': {'enabled': True, 'mba': False, 'flatten': True},
+        'soguard': {'enabled': True, 'mba': False, 'bcf': True},
     })
-    check("flatten 勾选 → 生成 --obfuscate-flatten",
-          rc == 0 and '--obfuscate-flatten' in lines, f"lines={lines}")
+    check("bcf 勾选 → 生成 --obfuscate-bcf",
+          rc == 0 and '--obfuscate-bcf' in lines, f"lines={lines}")
 
     # vm_flatten（动态控制流）
     rc, lines, out = resolve({
