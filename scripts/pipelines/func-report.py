@@ -39,6 +39,7 @@ import json
 import os
 import re
 import struct
+import zlib
 import sys
 from collections import OrderedDict, defaultdict
 
@@ -332,13 +333,52 @@ def elf_sections(so_bytes):
 
         strtab_off = sh(shstr)[4]
         for k in range(shnum):
-            name_off, _t, flags, addr, off, size = sh(k)
+            name_off, sh_type, flags, addr, off, size = sh(k)
             end = so_bytes.index(b'\0', strtab_off + name_off)
             nm = so_bytes[strtab_off + name_off:end].decode('latin1')
-            out[nm] = (off, size, addr, flags)
+            out[nm] = (off, size, addr, flags, sh_type)
     except (struct.error, IndexError, ValueError):
         return out
     return out
+
+
+def volume_table(so_bytes, sections):
+    """逐段算出「原始 / 压缩后 / 压比」，并给出 so 总计。
+
+    为什么需要（用户原话：『我想知道比如600多kb，有多少被压缩，
+    有多少没被压缩，这里也没显示呀』）：
+      · 之前报告只有字节数，读者要自己换算单位
+      · 更关键：看不到「加密段压不动」这个事实 —— 而它正是所有
+        体积决策的依据（.ncx 熵 8.0，zlib 100% 压不动；.text 能压到 51%）
+
+    判据：zlib.compress(data, 9) 后与原大小之比 > 95% → 密文/不可压。
+    这不是精确的 APK 内 deflate（那是整包流式压缩），但足以区分
+    「加密段」与「明文段」——本项目所有体积决策都基于这个区分。
+
+    返回 (rows, total_raw, total_comp, so_size)
+      rows: [(name, raw, comp, ratio_pct, is_cipher), ...] 按 raw 降序
+    """
+    rows = []
+    for name, meta in sections.items():
+        off, size, _addr, _flags = meta[0], meta[1], meta[2], meta[3]
+        sh_type = meta[4] if len(meta) > 4 else 1
+        # ⚠️ SHT_NOBITS(8) = .bss，不占磁盘空间（sh_size 只是运行期需求）
+        #    首版把它当实体段算 → 合计 1373.9 KB 超过 so 本身 699 KB（实测假数）
+        if sh_type == 8:
+            continue
+        if size == 0 or name.startswith('.debug') or name in ('.comment',):
+            continue
+        blob = so_bytes[off:off + size]
+        try:
+            comp = len(zlib.compress(blob, 9))
+        except Exception:
+            continue
+        ratio = (comp / size * 100.0) if size else 0.0
+        rows.append((name, size, comp, ratio, ratio > 95.0))
+    rows.sort(key=lambda r: -r[1])
+    total_raw = sum(r[1] for r in rows)
+    total_comp = sum(r[2] for r in rows)
+    return rows, total_raw, total_comp, len(so_bytes)
 
 
 def scan_ncx(so_bytes, sections):
@@ -357,7 +397,7 @@ def scan_ncx(so_bytes, sections):
     sec = sections.get('.ncx')
     if not sec:
         return stat
-    off, size, _addr, _flags = sec
+    off, size, _addr, _flags = sec[0], sec[1], sec[2], sec[3]
     blob = so_bytes[off:off + size]
     stat['ncx_size'] = len(blob)
     if not blob:
@@ -434,7 +474,7 @@ def redact_name(name, salt):
 
 def build_report(marks, vmp_skips, pass_skips, vmflatten, seg_notes, file_counts,
                  totals, scan, sections, vmp_targets, cfg_hint='',
-                 redact=True, redact_salt='nc-func-report'):
+                 redact=True, redact_salt='nc-func-report', volume=None):
     L = []
     A = L.append
     # ⚠️ .nct 的判定必须是【三态】，不能是布尔：
@@ -495,6 +535,44 @@ def build_report(marks, vmp_skips, pass_skips, vmflatten, seg_notes, file_counts
     A(f'| `.ncx` 函数起点（估算） | {scan["starts"]} | 指令模式扫描 |')
     A(f'| `.ncx` 疑似 VMP wrapper（估算） | {scan["wrappers"]} | 小帧 + ≥2 个 bl |')
     A('')
+
+    # ── 体积与压缩对照 ────────────────────────────────────────────
+    # 用户原话："我想知道比如600多kb，有多少被压缩，有多少没被压缩"
+    # 这里逐段给「原始 / 压缩后 / 压比」，并明确标出哪些压不动。
+    if volume:
+        rows, tot_raw, tot_comp, so_size = volume
+        A('## 体积与压缩')
+        A('')
+        A(f'so 磁盘大小 **{so_size/1024:.1f} KB**，'
+          f'其中可统计段合计 **{tot_raw/1024:.1f} KB** → '
+          f'压缩后 **{tot_comp/1024:.1f} KB**（压比 **{tot_comp/tot_raw*100:.0f}%**）。')
+        A('')
+        A('> 判据：逐段 zlib -9 压缩后与原大小之比 > 95% 视为「密文/不可压」。')
+        A('> 加密段（熵 8.0）压不动 → 它涨多少，APK 就涨多少；')
+        A('> 明文段能压到 20~50% → 体积代价被打折。')
+        A('')
+        A('| 段 | 原始 | 压缩后 | 压比 | 性质 |')
+        A('|:---|--:|--:|--:|:---|')
+        for name, raw, comp, ratio, cipher in rows:
+            if raw < 512:
+                continue
+            kind = '🔒 **密文（压不动）**' if cipher else '✅ 明文（可压）'
+            A(f'| `{name}` | {raw/1024:.1f} KB | {comp/1024:.1f} KB '
+              f'| {ratio:.0f}% | {kind} |')
+        A(f'| **合计** | **{tot_raw/1024:.1f} KB** | **{tot_comp/1024:.1f} KB** '
+          f'| **{tot_comp/tot_raw*100:.0f}%** | |')
+        A('')
+        # 明确点出加密段的绝对代价 —— 这是最该被记住的数字
+        cipher_raw = sum(r[1] for r in rows if r[4])
+        if cipher_raw:
+            A(f'> ⚠️ 加密段合计 **{cipher_raw/1024:.1f} KB**，这部分体积'
+              f'**无法被压缩吸收**，会原样进入 APK。')
+            A('')
+        # 明确指出报告覆盖范围（防止"以为都查了"）
+        A('> 📋 本报告的段表覆盖以下段：' +
+          ' '.join(f'`{r[0]}`' for r in rows if r[1] >= 512) + '。')
+        A('> `.eh_frame` / `.comment` 等在构建期已被 `--strip-meta` 删除，故不出现。')
+        A('')
 
     if scan['encrypted_guess']:
         A('> ⚠️ `.ncx` 扫描到 0 个函数起点且段不小 —— 大概率是**已锁箱的密文**。')
@@ -657,11 +735,13 @@ def main(argv=None):
 
     sections, scan = {}, {'ncx_size': 0, 'starts': 0, 'wrappers': 0,
                           'bl_total': 0, 'encrypted_guess': False}
+    volume = None
     if args.so and os.path.exists(args.so):
         try:
             so_bytes = open(args.so, 'rb').read()
             sections = elf_sections(so_bytes)
             scan = scan_ncx(so_bytes, sections)
+            volume = volume_table(so_bytes, sections)
         except OSError as e:
             print(f'[func-report] 读 so 失败: {e}', file=sys.stderr)
     elif args.so:
@@ -670,7 +750,7 @@ def main(argv=None):
     md = build_report(marks, vmp_skips, pass_skips, vmflatten, seg_notes,
                       file_counts, totals, scan, sections, vmp_targets,
                       args.cfg_hint, redact=not args.no_redact,
-                      redact_salt=args.redact_salt)
+                      redact_salt=args.redact_salt, volume=volume)
 
     if args.out:
         try:
@@ -699,6 +779,15 @@ def main(argv=None):
                 'ncx_wrappers_est': scan['wrappers'],
                 'ncx_looks_encrypted': scan['encrypted_guess'],
             },
+            # 体积摘要（供 protect.sh 打一行日志用）
+            # 用户口径："600 多 KB 有多少被压缩、多少没被压缩"
+            'volume': ({
+                'so_kb': round(volume[3] / 1024, 1),
+                'raw_kb': round(volume[1] / 1024, 1),
+                'comp_kb': round(volume[2] / 1024, 1),
+                'ratio_pct': round(volume[2] / volume[1] * 100) if volume[1] else 0,
+                'cipher_kb': round(sum(r[1] for r in volume[0] if r[4]) / 1024, 1),
+            } if volume else None),
             'functions': [
                 {
                     'name': f,

@@ -2036,12 +2036,19 @@ if [[ $WANT_VMP -eq 1 && -d "$WORK/project/libs" ]]; then
       _fr_sum=$(python3 - "$_fr_json" <<'PYEOF' 2>/dev/null || true
 import json, sys
 try:
-    d = json.load(open(sys.argv[1], encoding='utf-8'))['summary']
+    d = json.load(open(sys.argv[1], encoding='utf-8'))
 except Exception:
     raise SystemExit
-print('标记 %d / VMP目标 %d / 成功 %d / 跳过 %d / .nct=%s'
-      % (d.get('marked', 0), d.get('vmp_targets', 0), d.get('vmp_ok', 0),
-         d.get('vmp_skipped', 0), '有' if d.get('has_nct') else '无'))
+line = ('标记 %d / VMP目标 %d / 成功 %d / 跳过 %d / .nct=%s'
+        % (d.get('marked', 0), d.get('vmp_targets', 0), d.get('vmp_ok', 0),
+           d.get('vmp_skipped', 0), '有' if d.get('has_nct') else '无'))
+# 体积摘要：用户口径"600 多 KB 有多少被压缩、多少没被压缩"
+_v = d.get('volume') or {}
+if _v:
+    line += (' | so %.1fKB→压缩后 %.1fKB(%d%%) / 密文不可压 %.1fKB'
+             % (_v.get('so_kb', 0), _v.get('comp_kb', 0),
+                _v.get('ratio_pct', 0), _v.get('cipher_kb', 0)))
+print(line)
 PYEOF
 )
       log_info "函数级报告: ${_fr_sum:-已生成 $FUNC_REPORT}"
