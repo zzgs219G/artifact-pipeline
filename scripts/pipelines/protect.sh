@@ -1637,9 +1637,13 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   # 为什么仍需要守卫：so_section_mark.py 的两个内置规则（dex2c-jni /
   # dynamic-register-jni）没删，只是不再调用。万一将来有人加回来，
   # 或 writer.py 自己往函数上加 section 属性，体积会静默涨回去。
-  MARKED=$(grep -rc 'section(".ncx")' "$WORK/project/jni" \
-           --include='*.cpp' --include='*.cc' --include='*.c' 2>/dev/null \
-           | awk -F: '{s+=$2} END {print s+0}')
+  # ⚠️ 只查 dex2c 产物（Java_*.cpp / Dex2C.cpp），不查 sig_check.c 等。
+  #    首版用 --include='*.c' 扫全目录 → 把 nc_strdec.c 的明文段标记
+  #    也算进来，误报"dex2c 产物进了 .ncx"（run 44147441797 实测假红）。
+  #    守卫的判据必须精确对应它要防的那件事，否则就是噪音源。
+  MARKED=$(grep -rc 'section(' "$WORK/project/jni" \
+           --include='Java_*.cpp' --include='Dex2C.cpp' --include='*.cc' \
+           2>/dev/null | awk -F: '{s+=$2} END {print s+0}')
   if [[ $MARKED -gt 0 ]]; then
     echo "❌ 检出 $MARKED 处 .ncx 段标记，但 dex2c 产物【不应】再进加密段" >&2
     echo "   → 2026-11-18 决策：dex2c 明文可还原，加密只为体积埋单（31KB 不可压缩）" >&2
