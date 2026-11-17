@@ -334,6 +334,46 @@ else
   bad "T14c 冲突项没排在末尾 —— 用户会先看到风险项"
 fi
 
+echo "── T15 VMP 与 vm_flatten 互斥（2026-11-17 实测全灭回归）──"
+# 实测（run 43586459800 vs 44082797350，同一份代码只改此开关）：
+#   vm_flatten 关 → VMP 跳过 1 个，.nct/.ncv/.ncw 齐全
+#   vm_flatten 开 → VMP 跳过 13 个（全灭），三个段都不生成
+# 根因：Amice 的 VmFlatten priority=960 > VmVirtualize priority=955，
+# 先摊平 CFG 后 VMP 就只剩"寄存器预算超限"。
+if grep -q 'AMICE_VM_FLATTEN=false' "$ROOT/scripts/pipelines/protect.sh"; then
+  ok "T15a protect.sh 在 VMP 开时关掉 vm_flatten"
+else
+  bad "T15a 缺互斥 —— 用户同时勾会让 VMP 全灭（13/13 跳过）"
+fi
+if grep -q 'VMP 与「动态控制流(vm_flatten)」冲突' \
+     "$ROOT/scripts/pipelines/protect.sh"; then
+  ok "T15b 互斥时打 warn 说明原因"
+else
+  bad "T15b 缺 warn —— 用户不知道 vm_flatten 被忽略了"
+fi
+# 关掉 vm_flatten 后必须回退 flatten，否则两者皆无（上方 flatten 已被关）
+if grep -q 'AMICE_FLATTEN=true' "$ROOT/scripts/pipelines/protect.sh"; then
+  ok "T15c 关 vm_flatten 后回退打开 flatten（避免两者皆无）"
+else
+  bad "T15c 缺回退 —— 会静默丢掉 flatten 这层控制流保护"
+fi
+# 反向验证：把互斥代码块删掉/注释掉，上面三条必须红。
+# 这里用"块内不含 AMICE_VM_FLATTEN=false 以外的写法"锚定存在性，
+# 并在 testing 说明里留反向验证步骤（见文件末尾注释）。
+if python3 - "$ROOT/scripts/pipelines/protect.sh" <<'PY'
+import re, sys
+src = open(sys.argv[1], encoding='utf-8').read()
+# 找 T15 互斥块，确认它在 vm_flatten 被 export 之后（顺序错=用旧值判断）
+i_export = src.find('export AMICE_VM_FLATTEN=')
+i_block = src.find('AMICE_VM_FLATTEN=false')
+sys.exit(0 if i_export != -1 and i_block > i_export else 1)
+PY
+then
+  ok "T15d 互斥块位于 AMICE_VM_FLATTEN 导出之后（顺序正确）"
+else
+  bad "T15d 互斥块在导出之前 —— 判断的是未初始化的旧值"
+fi
+
 echo ""
 echo "════════════════════════════════════════"
 if [ "$FAIL" -eq 0 ]; then

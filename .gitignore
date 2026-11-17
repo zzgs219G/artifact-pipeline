@@ -32,3 +32,10 @@ dist/
 # 它是 configs/ → protect.sh 的参数传递通道，不是配置源；改配置请改 configs/。
 # 提交它会造成每次构建都产生无意义 diff（同 /scripts/string-enc/tests/work/ 一类）。
 /schema_rules/
+
+# 函数级防护报告（2026-11-17）：protect.sh 在【仓库根目录】生成。
+# ⚠️ 绝不入库 —— 内容是「哪些函数被保护、哪些被跳过、跳过原因（含寄存器数值）」，
+#    等于一份现成的「防护清单 + 弱点清单」。攻击者拿到它就知道该重点逆哪几个函数、
+#    哪几个压根没防护。它只该出现在 CI 的 Step Summary 与短期 artifact 里。
+/protect-report.md
+/protect-report.json

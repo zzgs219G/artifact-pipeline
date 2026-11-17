@@ -1120,6 +1120,50 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
     log_warn "   → 已自动忽略这两项，保留 VMP。要用它们请先关掉 VMP 虚拟化"
   fi
 
+  # ── VMP 与 vm_flatten 互斥（2026-11-17 实测）─────────────────────
+  #
+  # 实测数据（同一份代码，只改这个开关；run 43586459800 vs 44082797350）：
+  #   vm_flatten 关 → VMP 跳过 1 个（find_apk_path，老误报），.nct/.ncv/.ncw 齐全
+  #   vm_flatten 开 → VMP 跳过 13 个（全灭），三个段都不生成
+  #
+  # 为什么：Amice 的 pass 优先级 VmFlatten=960 > VmVirtualize=955，
+  # 所以 VmFlatten 【先】把函数 CFG 换成状态机，VmVirtualize 后跑时
+  # 看到的是已经摊平的控制流 → 寄存器压力爆掉：
+  #   values=15 aggregates=0 temps=5 vregs=32 free=0
+  #   → "VM x-register budget exceeded"  整函数跳过
+  #
+  # ⚠️ 为什么不是"给 vm_flatten 补 annotate 白名单"就够：
+  #    VmFlatten 的 flag 是 FullLtoLast，VmVirtualize 是 OptimizerLast，
+  #    两者在不同 pipeline 阶段。白名单只能让 VmFlatten 跳过【本阶段】，
+  #    用户在【另一个阶段】仍会跑它 → 冲突依旧。所以必须在这里二选一。
+  #    （amice fork 侧仍会补白名单，作为绕过 protect.sh 时的兜底。）
+  #
+  # 取 VMP：sigcheck 侧 10 个函数从"逆 VM 要几天"降到"改一条指令几分钟"，
+  # 而 vm_flatten 只是一层状态机改写（souper 类工具可自动化简）。
+  if [[ $WANT_VMP_VM -eq 1 && $OBF_VM_FLATTEN -eq 1 ]]; then
+    export AMICE_VM_FLATTEN=false
+    log_warn "VMP 与「动态控制流(vm_flatten)」冲突（实测会让 VMP 从 10 个函数降到 0 个）"
+    log_warn "   → 已自动忽略 vm_flatten，保留 VMP。要用它请先关掉 VMP 虚拟化"
+    # 上方「flatten 与 vm_flatten 同时勾 → 只保留 vm_flatten」把 flatten 关掉了。
+    # 现在 vm_flatten 也被关，若不回退就会两者皆无。flatten 尊重 annotate
+    # （日志可见 skip Flatten for VMP function），与 VMP 可共存，所以退回它。
+    if [[ $OBF_FLATTEN -eq 1 ]]; then
+      export AMICE_FLATTEN=true
+      log_warn "   → 已把 flatten（静态版，尊重 VMP 标注）恢复为 true"
+    fi
+  fi
+
+  # ⚠️ 上面三处互斥会改 AMICE_* 环境变量，_OBF_SPEC 是按【原始勾选】
+  #    拼的字符串 → 日志会说谎。这里按最终生效值重算一遍，单一时相。
+  #    （_OBF_SPEC 只用于日志与 ndk_write_mk 的 -D 宏，不影响 pass 装载，
+  #      但日志与实际不符会让人误判"混淆到底开没开"。）
+  _OBF_SPEC=""
+  [[ "$AMICE_MBA"       == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}mba"
+  [[ "$AMICE_FLATTEN"   == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}flatten"
+  [[ "$AMICE_VM_FLATTEN" == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}vm_flatten"
+  [[ "$AMICE_INDIRECT_CALL"   == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}indirect_call"
+  [[ "$AMICE_INDIRECT_BRANCH" == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}indirect_branch"
+
   log_info "代码混淆: $_OBF_SPEC"
   log_info "  AMICE_MBA=$AMICE_MBA AMICE_FLATTEN=$AMICE_FLATTEN"
   log_info "  AMICE_INDIRECT_CALL=$AMICE_INDIRECT_CALL AMICE_INDIRECT_BRANCH=$AMICE_INDIRECT_BRANCH"
@@ -1925,6 +1969,74 @@ if [[ "${TMP_NOLOCK:-0}" == "1" ]]; then
   echo "     产物能跑，但静态可读，【不可发给终端用户】"
   echo ""
 fi
+
+# ── 函数级防护报告（2026-11-17）────────────────────────────────────
+# 为什么必须在【锁箱之前】生成：锁箱后 .ncx 是密文，指令模式扫描全废。
+#
+# 解决什么问题：ncguard_log.md（运行期自检）只到【段】粒度，回答不了
+# 「到底哪个函数被 VMP 了 / 哪个被混淆了 / 为什么没有」。而 amice 的
+# skip 日志【只有失败没有成功】，成功清单只能靠源码注解 + 产物交叉验证。
+#
+# 四源合并：①[mark]日志 ②amice skip日志 ③源码 annotate("+vm_virtualize")
+#           ④.ncx 指令扫描
+# ③ 是关键 —— 只看 ② 会把「压根没打算 VMP 的函数」误判成「VMP 失败」。
+#
+# ⚠️ gated on WANT_VMP：不做 so 加固时没有 VMP/混淆语义可报，
+#    而且 --sigcheck 单独跑时也不产 libnc.so，白跑一次遍历。
+#
+# ⚠️ 输出路径必须落在【当前工作目录】而不是 $WORK：
+#    $WORK 是临时目录，CI 的 upload-artifact / Step Summary 都读不到。
+#    用 ${FUNC_REPORT_OUT:-./protect-report.md} 让调用方可覆盖（测试用）。
+if [[ $WANT_VMP -eq 1 && -d "$WORK/project/libs" ]]; then
+  _fr_so="$WORK/project/libs/arm64-v8a/libnc.so"
+  [[ -f "$_fr_so" ]] || _fr_so=$(ls "$WORK"/project/libs/*/libnc.so 2>/dev/null | head -1)
+  _fr_src="$WORK/project/jni"
+  [[ -d "$WORK/project/jni/nc" ]] && _fr_src="$WORK/project/jni/nc"
+  if [[ -f "$_fr_so" ]]; then
+    FUNC_REPORT="${FUNC_REPORT_OUT:-./protect-report.md}"
+    _fr_json="${FUNC_REPORT%.md}.json"
+    # ⚠️ 本仓库可能是【公开】的 —— 报告内容是「防护清单 + 弱点清单」，
+    #    函数名/寄存器数值等于给攻击者发"该攻哪里"的路线图。
+    #    所以默认脱敏（func-report.py 的 --no-redact 才出细节，仅供本地排查）。
+    #    salt 用 commit SHA：同一次构建内哈希稳定（可跨函数/跨 ABI 对比），
+    #    但不同 commit 之间不可关联 —— 不给攻击者做版本差分的机会。
+    _fr_salt="${GITHUB_SHA:-$(git rev-parse --short HEAD 2>/dev/null || echo local)}"
+    python3 "$ROOT/scripts/pipelines/func-report.py" \
+      --build-log "$WORK/ndk-build.log" \
+      --so "$_fr_so" \
+      --src-dir "$_fr_src" \
+      --out "$FUNC_REPORT" \
+      --json-out "$_fr_json" \
+      --redact-salt "$_fr_salt" \
+      --cfg-hint "vm=$WANT_VMP_VM mba=$OBF_MBA flatten=$OBF_FLATTEN vm_flatten=$OBF_VM_FLATTEN" \
+      2>&1 | sed 's/^/  [report] /' || true
+    if [[ -f "$FUNC_REPORT" ]]; then
+      # 把「几个函数成功 VMP / 几个被跳过」提炼成一行进构建日志 ——
+      # 读日志的人不必翻 200 行 Markdown 才知道 VMP 有没有生效。
+      _fr_sum=$(python3 - "$_fr_json" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding='utf-8'))['summary']
+except Exception:
+    raise SystemExit
+print('标记 %d / VMP目标 %d / 成功 %d / 跳过 %d / .nct=%s'
+      % (d.get('marked', 0), d.get('vmp_targets', 0), d.get('vmp_ok', 0),
+         d.get('vmp_skipped', 0), '有' if d.get('has_nct') else '无'))
+PYEOF
+)
+      log_info "函数级报告: ${_fr_sum:-已生成 $FUNC_REPORT}"
+      _fr_bad=$(python3 -c "
+import json
+d=json.load(open('$_fr_json',encoding='utf-8'))['summary']
+print(d.get('vmp_targets',0)-d.get('vmp_ok',0))
+" 2>/dev/null || echo 0)
+      if [[ "${_fr_bad:-0}" -gt 0 ]]; then
+        log_warn "VMP: ${_fr_bad} 个标注函数未生效 —— 详见 $FUNC_REPORT"
+      fi
+    fi
+  fi
+fi
+
 # ⚠️ TMP_NONOX 也跳过锁箱：没有 nox 就没有解锁器，锁了必然运行期 SIGILL。
 if [[ "${TMP_NOLOCK:-0}" != "1" && "${TMP_NONOX:-0}" != "1" && -d "$WORK/project/libs" ]]; then
   for so in "$WORK"/project/libs/*/libnc.so; do

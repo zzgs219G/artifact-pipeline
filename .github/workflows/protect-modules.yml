@@ -1059,6 +1059,44 @@ jobs:
           if-no-files-found: warn
           retention-days: 1
 
+      # ── 函数级防护报告（2026-11-17）─────────────────────────────────
+      # 为什么需要：构建日志能看 skip 清单，但那是 200 多行原始日志；
+      # 而运行期自检 ncguard_log.md 只到【段】粒度，回答不了「哪个函数
+      # 被 VMP 了 / 哪个被混淆了 / 为什么没有」。
+      #
+      # 这份报告由 protect.sh 在【锁箱前】生成（锁箱后 .ncx 是密文，
+      # 指令扫描全废），四源交叉：mark 日志 + amice skip 日志 +
+      # 源码 annotate + .ncx 指令扫描。
+      #
+      # 两处落地：① 渲染到 run 页面顶部（点开任务第一眼就看到）
+      #          ② 存成 artifact（事后追溯，不用翻日志）
+      - name: 函数级防护报告
+        if: always()
+        run: |
+          set -o pipefail
+          if [[ ! -f protect-report.md ]]; then
+            echo "## ⚠️ 未生成函数级报告" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "未勾选 so层保护（VMP），或本次构建未产出 libnc.so。" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # 报告本身就是 Markdown，直接追加进 Step Summary
+          cat protect-report.md >> "$GITHUB_STEP_SUMMARY"
+          echo "" | tee -a build.log
+          echo "── 函数级报告摘要 ──" | tee -a build.log
+          grep -E '^\| (打进|源码标注|VMP |第二套)' protect-report.md | tee -a build.log || true
+
+      - name: 上传函数级防护报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 函数级防护报告
+          path: |
+            protect-report.md
+            protect-report.json
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Artifact 备用
         uses: actions/upload-artifact@v4
         with:
