@@ -1050,15 +1050,6 @@ jobs:
         run: |
           echo "::notice title=📥 模块勾选加固包(未签名,请自行重签)::${{ steps.upload-r2.outputs.download_url }}"
 
-      - name: 上传构建日志（无论成败都可下载）
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: 构建日志-build.log
-          path: build.log
-          if-no-files-found: warn
-          retention-days: 1
-
       # ── 函数级防护报告（2026-11-17）─────────────────────────────────
       # 为什么需要：构建日志能看 skip 清单，但那是 200 多行原始日志；
       # 而运行期自检 ncguard_log.md 只到【段】粒度，回答不了「哪个函数
@@ -1094,6 +1085,15 @@ jobs:
           echo "【体积与压缩】" | tee -a build.log
           sed -n '/^## 体积与压缩/,/^## /p' protect-report.md \
             | grep -E '^\||^so 磁盘|^> ⚠️' | tee -a build.log || true
+
+      - name: 上传构建日志（无论成败都可下载）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 构建日志-build.log
+          path: build.log
+          if-no-files-found: warn
+          retention-days: 1
 
       - name: 上传函数级防护报告
         if: always()
