@@ -550,6 +550,32 @@ static void g2_fail(void) {
 
 /* ═══════════════════════ 校验主逻辑 ═══════════════════════ */
 
+/* ── 2026-11-18：open 的隔离层，为让 g2_verify 能上 VMP ─────────────
+ *
+ * 症状（实测 run 44124418486）：
+ *   VMP skipped: "g2_verify" (LLVM intrinsic calls are not supported
+ *                by vm_virtualize (callee="__open_2", intrinsic_id=0)
+ *
+ * 根因：bionic 的 open() 在 _FORTIFY_SOURCE 下展开成 __open_2，
+ * 而 amice 的 callee.is_llvm_function() 对 libc 函数会误判为 true
+ * （`intrinsic_id=0` 就是"不是 intrinsic"的铁证）。
+ * 同一坑第一线踩过（见 sig_check.c 的 nc_open_ro 与 amice-fork改造记录 §7.2.1），
+ * 当时的结论是：
+ *
+ *   「只要 VMP 目标函数【直接调用外部库函数】，就可能被这条误判打死。
+ *     换具体函数解决不了 —— 必须改变调用层次，让 amice 看不到那个调用。」
+ *
+ * 所以这里照 nc_open_ro 的做法包一层。
+ *
+ * ⚠️ noinline 不可省：-Oz 会把它内联回 g2_verify，误判照样发生，
+ *    且拆分等于没做（文档 §7.2 的拆分纪律②）。
+ * ⚠️ 不带 G2_SEC_MARKED：这层是纯转发，没有配方价值；让它留在 .text
+ *    明文即可，标了反而多点开销。 */
+__attribute__((noinline))
+static int g2_open_ro(const char *path) {
+    return open(path, O_RDONLY);
+}
+
 /* 独立派生(与 make-sig-hash.sh 生成侧逐字节一致):
  *   t2 = SHA256(b"G2" || fp)
  *   expected[i] = t2[i] ^ salt2[(i*7)%16] ^ ((i*0x5B+0x3D)&0xFF)  */
@@ -585,7 +611,7 @@ static void g2_verify(void) {
     if (!slot_configured) return;
 
     if (g2_find_apk(apk, sizeof(apk)) != 0) return;   /* 定位失败 → 未检出 */
-    fd = open(apk, O_RDONLY);
+    fd = g2_open_ro(apk);   /* 隔离层：见 g2_open_ro 注释 */
     if (fd < 0) return;
     if (g2_extract_cert(fd, &der, &der_len) != 0) { close(fd); return; }
     close(fd);
