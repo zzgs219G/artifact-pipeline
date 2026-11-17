@@ -437,7 +437,14 @@ def build_report(marks, vmp_skips, pass_skips, vmflatten, seg_notes, file_counts
                  redact=True, redact_salt='nc-func-report'):
     L = []
     A = L.append
-    has_nct = '.nct' in sections
+    # ⚠️ .nct 的判定必须是【三态】，不能是布尔：
+    #    True  = 有解释器段（VMP 生效）
+    #    False = 读了 so，确认没有该段（VMP 真没生效）
+    #    None  = 没读到 so（sections 为空）→ 无法判断
+    #    2026-11-17 踩过：只用布尔时，--so 路径给错会让报告写
+    #    「❌ 不存在 —— 消费方 VMP 整个没生效」，而实际 .nct 是有的。
+    #    这是典型的「拿不到数据就当失败」假阴性，必须区分。
+    has_nct = ('.nct' in sections) if sections else None
 
     A('# 函数级防护报告（构建期）')
     A('')
@@ -454,20 +461,36 @@ def build_report(marks, vmp_skips, pass_skips, vmflatten, seg_notes, file_counts
     # 统计
     marked = [k for k in marks]
     annotated = [f for f in vmp_targets]
-    vmp_ok = [f for f in annotated if f not in vmp_skips] if has_nct else []
     vmp_bad = [f for f in annotated if f in vmp_skips]
+    if has_nct is True:
+        vmp_ok = [f for f in annotated if f not in vmp_skips]
+    elif has_nct is False:
+        vmp_ok = []          # 确认无解释器段 → 一个都没成功
+    else:
+        vmp_ok = []          # 未知：既不算成功也不算确认失败（见下方措辞）
 
     A('## 汇总')
     A('')
     A('| 指标 | 值 | 说明 |')
     A('|:---|:---|:---|')
-    A(f'| 打进 `.ncx` 的函数 | **{len(marked)}** | 来自 `[mark]` 日志；'
-      f'日志自称合计 {sum(totals) if totals else "?"} 处 |')
-    A(f'| 源码标注 VMP 的函数 | **{len(annotated)}** | `annotate("+vm_virtualize")` |')
+    # ⚠️ 两个标记来源必须分开报，别混成一个"打进 .ncx 的函数"：
+    #   ① so_section_mark.py 打的（dex2c 转译产物 / stringenc C 桩）→ 有 [mark] 日志
+    #   ② 源码里直接用宏标记的（sig_check.c 的 SIG_SEC_MARKED）→ 没有 [mark] 日志
+    #   2026-11-17 实测踩过：只统计 ①，在「只勾 sigcheck+vmp」的构建里
+    #   会显示"打进 .ncx 的函数 = 0"，而实际有 11 个函数进了 .ncx。
+    #   真相是 sig_check.c 自己带 section 属性，压根不经过 so_section_mark.py。
+    A(f'| 源码标注 VMP 的函数 | **{len(annotated)}** | `annotate("+vm_virtualize")`（权威口径）|')
+    A(f'| 经 `[mark]` 工具标记的函数 | **{len(marked)}** | 仅覆盖 dex2c/stringenc；'
+      f'sig_check.c 自带属性，不在此列 |')
     A(f'| VMP 虚拟化成功 | **{len(vmp_ok)}** | 有注解且未出现在 skip 清单 |')
     A(f'| VMP 被跳过 | **{len(vmp_bad)}** | 有注解但出现在 skip 清单 |')
-    A(f'| 第二套 VMP 解释器段 `.nct` | {"✅ 存在" if has_nct else "❌ **不存在**"} | '
-      f'{"消费方 VMP 已生成" if has_nct else "消费方 VMP 整个没生效"} |')
+    if has_nct is True:
+        _nct_cell, _nct_note = '✅ 存在', '消费方 VMP 已生成'
+    elif has_nct is False:
+        _nct_cell, _nct_note = '❌ **不存在**', '消费方 VMP 整个没生效'
+    else:
+        _nct_cell, _nct_note = '⚠️ 未知', '未读到 so，无法判断（不是失败）'
+    A(f'| 第二套 VMP 解释器段 `.nct` | {_nct_cell} | {_nct_note} |')
     A(f'| `.ncx` 段大小 | {scan["ncx_size"]:,} B | |')
     A(f'| `.ncx` 函数起点（估算） | {scan["starts"]} | 指令模式扫描 |')
     A(f'| `.ncx` 疑似 VMP wrapper（估算） | {scan["wrappers"]} | 小帧 + ≥2 个 bl |')
@@ -479,7 +502,7 @@ def build_report(marks, vmp_skips, pass_skips, vmflatten, seg_notes, file_counts
         A('> `_size_report "编译后"` 之后、`so-section-lock.py` 之前生成报告。')
         A('')
 
-    if annotated and not vmp_ok:
+    if annotated and not vmp_ok and has_nct is False:
         A(f'> ❌ **{len(annotated)} 个标注了 VMP 的函数，0 个成功虚拟化。**')
         A('> 常见原因：同时开了 `vm_flatten`（pass priority 960 > VmVirtualize 955，')
         A('> 先摊平 CFG → VMP 拿到的控制流寄存器压力超限 → 整函数跳过）。')
@@ -523,11 +546,14 @@ def build_report(marks, vmp_skips, pass_skips, vmflatten, seg_notes, file_counts
                 if fname in vmp_skips:
                     res = '❌ 跳过'
                     reason = vmp_skips[fname]
-                elif has_nct:
+                elif has_nct is True:
                     res, reason = '✅', ''
-                else:
+                elif has_nct is False:
                     res = '⚠️ 未生效'
                     reason = '产物无 .nct（VMP pass 未运行）'
+                else:
+                    res = '❔ 未知'
+                    reason = '未读到 so，无法确认是否虚拟化'
             if fname in pass_skips:
                 obf = '跳过 ' + '/'.join(sorted(pass_skips[fname]))
             elif fname in vmflatten:
