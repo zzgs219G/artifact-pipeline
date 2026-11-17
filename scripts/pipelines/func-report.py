@@ -260,11 +260,14 @@ def scan_sources_vmp_targets(src_dir):
             return nm
         return None
 
+    _visited = 0
+    _vmp_macro_files = 0
     for path in files:
         try:
             text = open(path, 'r', encoding='utf-8', errors='replace').read()
         except OSError:
             continue
+        _visited += 1
 
         # ── 形态 A：定位「定义里含 +vm_virtualize 的宏」──
         vmp_macros = set()
@@ -285,6 +288,8 @@ def scan_sources_vmp_targets(src_dir):
                     break
             if RE_ANNOTATE_VMP.search(text[block_start:end]):
                 vmp_macros.add(m.group('name'))
+        if vmp_macros:
+            _vmp_macro_files += 1
 
         # ── 形态 A 用法：宏名独占一行（或行首），下一行起是函数定义 ──
         for macro in vmp_macros:
@@ -304,6 +309,11 @@ def scan_sources_vmp_targets(src_dir):
             if same_line:
                 targets.add(same_line)
 
+    # 诊断输出（2026-11-18）：CI 上曾出现"扫了目录但 0 个目标"，
+    # 没有这行就完全看不出是"没找到文件"还是"找到了但注解形态变了"。
+    print(f'[func-report] 源码扫描: {_visited} 个文件, '
+          f'含 +vm_virtualize 宏的文件 {_vmp_macro_files} 个, '
+          f'解析出 {len(targets)} 个 VMP 目标', file=sys.stderr)
     return targets
 
 
