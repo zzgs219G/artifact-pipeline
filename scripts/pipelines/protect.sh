@@ -1641,9 +1641,14 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
   #    首版用 --include='*.c' 扫全目录 → 把 nc_strdec.c 的明文段标记
   #    也算进来，误报"dex2c 产物进了 .ncx"（run 44147441797 实测假红）。
   #    守卫的判据必须精确对应它要防的那件事，否则就是噪音源。
-  MARKED=$(grep -rc 'section(' "$WORK/project/jni" \
-           --include='Java_*.cpp' --include='Dex2C.cpp' --include='*.cc' \
-           2>/dev/null | awk -F: '{s+=$2} END {print s+0}')
+  # ⚠️ grep 无匹配时返回 1，在 set -e 下会直接杀掉脚本
+  #    （run 44147865538 实测：行号 1646 异常退出）。
+  #    管道里 awk 是最后一段，但 pipefail 把 grep 的 1 传了上来。
+  #    这是本项目反复踩的坑型：判据本身没错，退出码语义没处理。
+  MARKED=$( grep -rc 'section(' "$WORK/project/jni" \
+              --include='Java_*.cpp' --include='Dex2C.cpp' --include='*.cc' \
+              2>/dev/null | awk -F: '{s+=$2} END {print s+0}' ) || true
+  MARKED=${MARKED:-0}
   if [[ $MARKED -gt 0 ]]; then
     echo "❌ 检出 $MARKED 处 .ncx 段标记，但 dex2c 产物【不应】再进加密段" >&2
     echo "   → 2026-11-18 决策：dex2c 明文可还原，加密只为体积埋单（31KB 不可压缩）" >&2
@@ -1652,8 +1657,8 @@ if [[ $WANT_TRANSPILE -eq 1 ]]; then
     exit 1
   fi
   # 反向确认：dex2c 产物必须仍在 .text（没有 section 属性）
-  _DEX2C_NOATTR=$(grep -rLE 'section\(' "$WORK/project/jni" \
-                  --include='Java_*.cpp' --include='Dex2C.cpp' 2>/dev/null | wc -l || true)
+  _DEX2C_NOATTR=$( grep -rLE 'section\(' "$WORK/project/jni" \
+                     --include='Java_*.cpp' --include='Dex2C.cpp' 2>/dev/null | wc -l ) || true
   echo "[mark] dex2c 产物无段属性（→ .text 明文）：${_DEX2C_NOATTR:-0} 个文件"
 
 fi
