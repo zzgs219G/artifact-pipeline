@@ -594,14 +594,50 @@ static void g2_derive(const unsigned char fp[32], unsigned char out[32]) {
     }
 }
 
-G2_SEC_MARKED
-static void g2_verify(void) {
+/* ── 2026-11-18：拆出「取指纹」以降低 g2_verify 的寄存器压力 ──────────
+ *
+ * 实测（run 44126516332）：
+ *   VMP skipped: "g2_verify" (register pressure while lowering Some(Store):
+ *                values=13 aggregates=0 temps=6 vregs=32 free=0)
+ *
+ * values(13) + temps(6) = 19 已到预算边缘。amice-fork改造记录 §7.2 的
+ * 方法论原话：「values=21 被跳过不是原理限制，是工程问题 —— 拆函数就能
+ * 解决。nox 自己的 ncg_stub_recover 当初 values=22，拆了四次才过。」
+ *
+ * 拆法：把「依赖链前面那四步」（定位→打开→提证书→算指纹）整体抽出去，
+ * g2_verify 只剩「派生 + 比对 + 处置」—— 那才是判定本体，也是唯一值得
+ * VMP 保护的部分。取指纹那段即使明文可读，攻击者改它只会让指纹错 →
+ * 比对失败 → 走 g2_fail 被杀，不是绕过。
+ *
+ * ⚠️ noinline 不可省：-Oz 会把两段重新内联回一起，寄存器压力原地复原
+ *    （文档 §7.2 拆分纪律②：拆完要先看 values 有没有真的降）。
+ * ⚠️ 不带 G2_SEC_MARKED：这段是支撑逻辑，让它吃 Flatten+Mba 即可。
+ *
+ * 返回：0 = 成功拿到指纹；非 0 = 环境异常（调用方静默返回，不误伤）。 */
+__attribute__((noinline))
+static int g2_collect_fp(unsigned char fp[32]) {
     char apk[1024];
     int fd;
     unsigned char *der = NULL;
     size_t der_len = 0;
-    unsigned char fp[32], expected[32];
     g2_sha_ctx c;
+
+    if (g2_find_apk(apk, sizeof(apk)) != 0) return -1;   /* 定位失败 → 未检出 */
+    fd = g2_open_ro(apk);   /* 隔离层：见 g2_open_ro 注释 */
+    if (fd < 0) return -1;
+    if (g2_extract_cert(fd, &der, &der_len) != 0) { close(fd); return -1; }
+    close(fd);
+
+    g2_sha_init(&c);
+    g2_sha_update(&c, der, der_len);
+    g2_sha_final(&c, fp);
+    free(der);
+    return 0;
+}
+
+G2_SEC_MARKED
+static void g2_verify(void) {
+    unsigned char fp[32], expected[32];
     int i, mismatch = 0, slot_configured = 0;
 
     /* 调试模式:标准答案全零(流水线未注入) → 跳过,不误伤 */
@@ -610,16 +646,7 @@ static void g2_verify(void) {
     }
     if (!slot_configured) return;
 
-    if (g2_find_apk(apk, sizeof(apk)) != 0) return;   /* 定位失败 → 未检出 */
-    fd = g2_open_ro(apk);   /* 隔离层：见 g2_open_ro 注释 */
-    if (fd < 0) return;
-    if (g2_extract_cert(fd, &der, &der_len) != 0) { close(fd); return; }
-    close(fd);
-
-    g2_sha_init(&c);
-    g2_sha_update(&c, der, der_len);
-    g2_sha_final(&c, fp);
-    free(der);
+    if (g2_collect_fp(fp) != 0) return;   /* 环境异常 → 未检出 */
 
     g2_derive(fp, expected);
     for (i = 0; i < 32; i++) mismatch |= expected[i] ^ SG2_STORED[i];
