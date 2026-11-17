@@ -352,6 +352,13 @@ def elf_sections(so_bytes):
     return out
 
 
+# 这些段在【锁箱后】会变成密文（熵 8.0，zlib 100% 压不动）。
+# 而本报告在锁箱【前】生成 —— 那时它们还是明文，压缩比看起来很正常。
+# 若不修正，读者会以为 .ncx 能压到 51%，实际它在 APK 里一点都压不动。
+# 2026-11-18 实测：报告显示 .ncx 51%，最终产物 100%，差了一倍。
+_ENCRYPTED_AT_LOCK = ('.ncx', '.ncxr', '.ncxh', '.ncxhr')
+
+
 def volume_table(so_bytes, sections):
     """逐段算出「原始 / 压缩后 / 压比」，并给出 so 总计。
 
@@ -384,7 +391,12 @@ def volume_table(so_bytes, sections):
         except Exception:
             continue
         ratio = (comp / size * 100.0) if size else 0.0
-        rows.append((name, size, comp, ratio, ratio > 95.0))
+        will_encrypt = name in _ENCRYPTED_AT_LOCK
+        # 锁箱后必为密文 → 按 100% 计算（不可压），并标记来源
+        eff_ratio = 100.0 if will_encrypt else ratio
+        eff_comp = size if will_encrypt else comp
+        rows.append((name, size, eff_comp, eff_ratio,
+                     will_encrypt or ratio > 95.0, will_encrypt, ratio))
     rows.sort(key=lambda r: -r[1])
     total_raw = sum(r[1] for r in rows)
     total_comp = sum(r[2] for r in rows)
@@ -563,12 +575,23 @@ def build_report(marks, vmp_skips, pass_skips, vmflatten, seg_notes, file_counts
         A('')
         A('| 段 | 原始 | 压缩后 | 压比 | 性质 |')
         A('|:---|--:|--:|--:|:---|')
-        for name, raw, comp, ratio, cipher in rows:
+        for name, raw, comp, ratio, cipher, will_enc, plain_ratio in rows:
             if raw < 512:
                 continue
-            kind = '🔒 **密文（压不动）**' if cipher else '✅ 明文（可压）'
+            if will_enc:
+                kind = '🔒 **锁箱后密文**'
+                # 只在"当前还是明文"时给出对照，避免锁箱后重复说 100%
+                note = (f'（锁箱前明文能压到 {plain_ratio:.0f}%，'
+                        f'锁箱后一点都压不动）'
+                        if plain_ratio < 95 else '（已锁箱）')
+            elif cipher:
+                kind = '🔒 密文（压不动）'
+                note = ''
+            else:
+                kind = '✅ 明文（可压）'
+                note = ''
             A(f'| `{name}` | {raw/1024:.1f} KB | {comp/1024:.1f} KB '
-              f'| {ratio:.0f}% | {kind} |')
+              f'| {ratio:.0f}% | {kind}{note} |')
         A(f'| **合计** | **{tot_raw/1024:.1f} KB** | **{tot_comp/1024:.1f} KB** '
           f'| **{tot_comp/tot_raw*100:.0f}%** | |')
         A('')

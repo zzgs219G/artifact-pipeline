@@ -2039,9 +2039,14 @@ try:
     d = json.load(open(sys.argv[1], encoding='utf-8'))
 except Exception:
     raise SystemExit
+# ⚠️ 字段在 d['summary'] 里，不是顶层 —— 我上一版把 json.load 的 ['summary']
+#    去掉时忘了同步改取值，导致日志永远打 0（run 44163612408 实测：
+#    JSON 里 vmp_targets=7 而日志显示 0）。这类"取错层级"是最难发现的
+#    静默错误：不报异常、格式正确、数字全错。
+_s = d.get('summary') or {}
 line = ('标记 %d / VMP目标 %d / 成功 %d / 跳过 %d / .nct=%s'
-        % (d.get('marked', 0), d.get('vmp_targets', 0), d.get('vmp_ok', 0),
-           d.get('vmp_skipped', 0), '有' if d.get('has_nct') else '无'))
+        % (_s.get('marked', 0), _s.get('vmp_targets', 0), _s.get('vmp_ok', 0),
+           _s.get('vmp_skipped', 0), '有' if _s.get('has_nct') else '无'))
 # 体积摘要：用户口径"600 多 KB 有多少被压缩、多少没被压缩"
 _v = d.get('volume') or {}
 if _v:
