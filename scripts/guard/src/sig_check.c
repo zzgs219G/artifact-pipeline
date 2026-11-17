@@ -232,13 +232,47 @@ static void siglog(const char *prio, const char *fmt, ...) {
 #    define SIG_SEC_MARKED \
        __attribute__((section(NC_SEC_CODE), used, retain, noinline, \
                       annotate("+vm_virtualize")))
+#    define SIG_SEC_MARKED_NOVMP \
+       __attribute__((section(NC_SEC_CODE), used, retain, noinline))
 #  else
 #    define SIG_SEC_MARKED \
+       __attribute__((section(NC_SEC_CODE), used, retain, noinline))
+#    define SIG_SEC_MARKED_NOVMP \
        __attribute__((section(NC_SEC_CODE), used, retain, noinline))
 #  endif
 #else
 #  define SIG_SEC_MARKED
+#  define SIG_SEC_MARKED_NOVMP
 #endif
+
+/* ── 2026-11-17：区分"判定点"与"支撑函数" ────────────────────────────
+ *
+ * 依据：本模块是【链式依赖】，不是单点判定。攻击者要绕过必须改
+ * derive_expected 的派生公式或 SIG_HASH_STORED 的数据，改中间解析函数
+ * 只会让解析失败 → 返回 -1 → 走进 fail 分支被处置。所以 VMP 应该只给
+ * 判定点，不该铺满全部函数：
+ *
+ *   SIG_SEC_MARKED       = 段 + VMP     ← 判定点（改了就能绕过）
+ *   SIG_SEC_MARKED_NOVMP = 段，无 VMP   ← 支撑函数（改了只会失败）
+ *
+ * 为什么支撑函数要【主动去掉】VMP 而不是留着：
+ *   ① VMP 的收益是"让攻击者分辨不出哪个是判定点"。但如果 11 个全上，
+ *      寄存器预算逼得 amice 逐个 skip（实测 find_apk_path / sig_verify
+ *      被跳过），日志里反而暴露了"哪些没保护"——收益为负。
+ *   ② 一个函数吃不到 VMP 时，它连混淆也吃不到（TMP_VMP_ONLY 分流语义：
+ *      标了 +vm_virtualize 就跳过 Mba/Flatten）。结果是【VMP 没上、
+ *      混淆也没有】的真裸奔 —— 实测 sig_verify 就是这种状态。
+ *      主动去掉 VMP 标注后，它能吃到 Flatten+Mba，反而比现在强。
+ *   ③ 减少 amice 的寄存器预算竞争，让真正的判定点更容易通过。
+ *
+ * 判定点（保留 VMP）：
+ *   derive_expected   —— 派生公式（"正确答案怎么算"）
+ *   sig_compare_fp    —— 比对逻辑 + 恒定时间累或
+ * 支撑函数（去掉 VMP，改吃混淆）：
+ *   find_apk_path / sig_find_eocd / sig_check_block_magic / sig_scan_pairs
+ *   sig_read_v2block / sig_parse_first_cert / extract_cert_der
+ *   sig_collect_fp / sig_verify
+ */
 
 /* ── T5（2026-10-28）：签名校验主干进加密段 ──────────────────────────
  *
@@ -570,7 +604,7 @@ static int get_pkg_name(char *out, size_t outlen) {
  *   3. 最后兜底遍历 /data/app/（Android 11+ 因 SELinux 大概率 EACCES，
  *      保留兼容旧机型）。
  */
-SIG_SEC_MARKED
+SIG_SEC_MARKED_NOVMP
 static int find_apk_path(char *out, size_t outlen) {
     FILE *fp;
     char line[512];
@@ -775,7 +809,7 @@ static int find_apk_path(char *out, size_t outlen) {
  */
 
 /* 找 EOCD（End of Central Directory）。成功把 22 字节 EOCD 写进 out，返回 0。 */
-SIG_SEC_MARKED
+SIG_SEC_MARKED_NOVMP
 static int sig_find_eocd(int fd, off_t fsize, unsigned char out[22]) {
     off_t search_start, pos;
     if (fsize < 22) return -1;
@@ -792,7 +826,7 @@ static int sig_find_eocd(int fd, off_t fsize, unsigned char out[22]) {
 
 /* 定位 APK Signing Block 并取出 v2/v3 块内容。成功返回长度（>0）。 */
 /* 校验 Signing Block magic（同时把 16 字节读进 out_magic）。成功返回 0。 */
-SIG_SEC_MARKED
+SIG_SEC_MARKED_NOVMP
 static int sig_check_block_magic(int fd, off_t cd_off, unsigned char out_magic[16]) {
     unsigned char want[17];   /* 16 magic + 1 NUL（lsg_s 是 C 字符串语义，见上） */
     const unsigned char *wm;
@@ -809,7 +843,7 @@ static int sig_check_block_magic(int fd, off_t cd_off, unsigned char out_magic[1
 }
 
 /* 遍历 ID-value pairs，取出 v2/v3 块内容。成功返回长度（>0）。 */
-SIG_SEC_MARKED
+SIG_SEC_MARKED_NOVMP
 static int sig_scan_pairs(int fd, off_t cd_off, off_t block_start,
                           unsigned long long block_size, unsigned char **out_value) {
     off_t pair_pos;
@@ -841,7 +875,7 @@ static int sig_scan_pairs(int fd, off_t cd_off, off_t block_start,
 }
 
 /* 定位 Signing Block 并取出 v2/v3 块内容。成功返回长度（>0）。 */
-SIG_SEC_MARKED
+SIG_SEC_MARKED_NOVMP
 static int sig_read_v2block(int fd, off_t cd_off,
                             unsigned char magic[16], unsigned char **out_value) {
     off_t block_start;
@@ -859,7 +893,7 @@ static int sig_read_v2block(int fd, off_t cd_off,
 }
 
 /* 从 v2/v3 块内容解析出第一张证书的 DER（malloc，调用者 free）。成功返回 0。 */
-SIG_SEC_MARKED
+SIG_SEC_MARKED_NOVMP
 static int sig_parse_first_cert(const unsigned char *value, int found,
                                 unsigned char **out_der, size_t *out_len) {
     const unsigned char *p = value;
@@ -905,7 +939,7 @@ static int sig_parse_first_cert(const unsigned char *value, int found,
     return 0;
 }
 
-SIG_SEC_MARKED
+SIG_SEC_MARKED_NOVMP
 static int extract_cert_der(int fd, unsigned char **out_der, size_t *out_len) {
     off_t fsize;
     unsigned char eocd[22];
@@ -1235,7 +1269,7 @@ static int nc_open_ro(const char *path) {
 /* 采集 APK 证书指纹：定位 → 打开 → 提取证书 → SHA256。
  * 成功返回 0 并把 32 字节指纹写进 actual；失败返回该走的 killvar 变体（≥0）
  * 或 -1 表示"环境异常类，走 variant 0"。 */
-SIG_SEC_MARKED
+SIG_SEC_MARKED_NOVMP
 static int sig_collect_fp(unsigned char actual[32]) {
     char apk_path[1024];
     int fd;
@@ -1315,7 +1349,7 @@ static int sig_compare_fp(const unsigned char actual[32]) {
     return mismatch;
 }
 
-SIG_SEC_MARKED
+SIG_SEC_MARKED_NOVMP
 static void sig_verify(void) {
     unsigned char actual[32];
     int i;

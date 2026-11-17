@@ -124,9 +124,45 @@
  * ⚠️ 条件化 SIGGUARD2_HOST_TEST：宿主测试没有解锁设施，标了读到密文 → 假红。
  *    与 sig_check.c 的 SIG_SEC_MARKED 同一纪律。 */
 #if defined(NC_GUARD_SECTIONED) && !defined(SIGGUARD2_HOST_TEST)
-#  define G2_SEC_MARKED __attribute__((section(NC_SEC_CODE), retain, used, noinline))
+/* ── 2026-11-17：第二道防线补 VMP ────────────────────────────────────
+ *
+ * 背景：本文件是【独立第二线】（与 sig_check.c 零代码共享，独立证书
+ * 派生 + 独立处置路径 g2_kill_hard/tgkill + watchdog）。设计意图是
+ * "第一线被破了还有第二道"。
+ *
+ * 但此前 G2_SEC_MARKED 只有段标记、没有 annotate("+vm_virtualize")，
+ * 于是 4 个标记函数全部只吃 Flatten+Mba —— 而第一线对应的
+ * derive_expected / sig_compare_fp 是有 VMP 的。结果：攻击者破了第一线
+ * 之后，第二线的判定逻辑是"可读状态机"，第二线价值掉一半。
+ *
+ * 修法：判定点补 VMP，支撑函数保持只有段（吃混淆）。
+ * 与 sig_check.c 同一纪律：链式依赖里只有判定点需要 VMP。
+ *
+ *   需要 VMP（判定点）：
+ *     g2_derive —— 第二套派生公式（对应第一线的 derive_expected）
+ *     g2_verify —— 比对 + 处置调度（对应 sig_compare_fp + sig_verify）
+ *   不需要 VMP（支撑函数，改了只会导致失败）：
+ *     g2_find_apk / g2_extract_cert / 各种 g2_sha_* / g2_rd* / watchdog
+ *
+ * ⚠️ g2_entry 是 constructor，【绝不能】标段 —— 它是 unlock 的调用方，
+ *    标进去 = 解锁前执行密文 = 死锁。
+ * ⚠️ 条件化 SIGGUARD2_HOST_TEST：宿主测试没有解锁设施，标了读到密文 → 假红。
+ *    与 sig_check.c 的 SIG_SEC_MARKED 同一纪律。 */
+#  if defined(NC_AMICE_VMP)
+#    define G2_SEC_MARKED \
+       __attribute__((section(NC_SEC_CODE), retain, used, noinline, \
+                      annotate("+vm_virtualize")))
+#    define G2_SEC_MARKED_NOVMP \
+       __attribute__((section(NC_SEC_CODE), retain, used, noinline))
+#  else
+#    define G2_SEC_MARKED \
+       __attribute__((section(NC_SEC_CODE), retain, used, noinline))
+#    define G2_SEC_MARKED_NOVMP \
+       __attribute__((section(NC_SEC_CODE), retain, used, noinline))
+#  endif
 #else
 #  define G2_SEC_MARKED
+#  define G2_SEC_MARKED_NOVMP
 #endif
 
 /* ═══════════════════════ SHA-256(公共域精简实现,自包含) ═══════════════════════ */
@@ -243,7 +279,7 @@ static unsigned long long g2_rd64le(const unsigned char *p) {
  *   ② 由本 so 自身路径反推安装目录(/proc/<pid>/root 前缀,绕 SELinux)
  * 取舍理由:兜底扫 /data/app 在 Android 11+ 必失败(SELinux),留着只是噪声。
  * 任一路径 access(R_OK) 通过即采用;全失败 → 未检出(不误伤)。 */
-G2_SEC_MARKED
+G2_SEC_MARKED_NOVMP
 static int g2_find_apk(char *out, size_t outlen) {
     FILE *fp;
     char line[1024];
@@ -370,7 +406,7 @@ static const char *g2_block_magic(void) {
 #define G2_V2_ID 0x7109871aULL
 #define G2_V3_ID 0xf05368c0ULL
 
-G2_SEC_MARKED
+G2_SEC_MARKED_NOVMP
 static int g2_extract_cert(int fd, unsigned char **out_der, size_t *out_len) {
     off_t fsize, pos, search_start;
     unsigned char eocd[22], magic[16], sz8[8], header[12];
