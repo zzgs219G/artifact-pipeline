@@ -1084,7 +1084,16 @@ jobs:
           cat protect-report.md >> "$GITHUB_STEP_SUMMARY"
           echo "" | tee -a build.log
           echo "── 函数级报告摘要 ──" | tee -a build.log
-          grep -E '^\| (打进|源码标注|VMP |第二套)' protect-report.md | tee -a build.log || true
+          # 摘要抓报告里的关键行。模式必须跟着报告结构走 ——
+          # 之前只抓「打进|源码标注|VMP |第二套」，体积表完全没显示，
+          # 用户的原话："我怎么没看到日志里有压缩前和压缩后？"
+          grep -E '^\| (源码标注|经 `\[mark\]`|VMP |第二套)' \
+            protect-report.md | tee -a build.log || true
+          # 体积表完整贴一份（压缩前后对照，用户明确要求能看到）
+          echo "" | tee -a build.log
+          echo "【体积与压缩】" | tee -a build.log
+          sed -n '/^## 体积与压缩/,/^## /p' protect-report.md \
+            | grep -E '^\||^so 磁盘|^> ⚠️' | tee -a build.log || true
 
       - name: 上传函数级防护报告
         if: always()
