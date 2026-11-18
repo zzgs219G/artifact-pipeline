@@ -188,6 +188,7 @@ WANT_OBFUSCATE=0
 OBF_MBA=0
 OBF_FLATTEN=0
 OBF_PAGG=0
+OBF_BCF=0        # 保留兼容：--obfuscate-bcf 仍可用，但默认不勾
 OBF_VM_FLATTEN=0
 # --dex2c-static-register（2026-11-10）：dex2c 的业务方法改用【静态短名】注册。
 #
