@@ -76,6 +76,29 @@ APP_CFLAGS.arm64 += -mbranch-protection=standard
 APP_PLATFORM := android-21
 APP_ABI := armeabi-v7a arm64-v8a
 EOF
+
+  # ── 调试报告（2026-11-19）────────────────────────────────────────
+  # 默认【不定义】NCGUARD_DEBUG_REPORT → nc_guard_report.c 的
+  # ncg_debug_log_path() 整段被编译掉，产物里 strings 搜不到
+  # xixin_debug / NCG_REPORT_PATH（外部 0 信息逆向报告标 ★★★ 的弱点）。
+  #
+  # 要出调试包时设 DEBUG_REPORT=1：
+  #     DEBUG_REPORT=1 python3 scripts/trigger_build.py app.apk --sigcheck --vmp
+  #
+  # ⚠️ 调试包不能发给用户（带调试开关），但强度与正式包相同，可用于真机排障。
+  # ⚠️ 这是【临时调试开关】，不是产品选项：不走 config-schema.json。
+  if [[ "${DEBUG_REPORT:-0}" == "1" ]]; then
+    cat >> "$jni/Application.mk" <<'DBGEOF'
+
+# ── 调试自检报告（DEBUG_REPORT=1 时开启）─────────────────────────
+# 让 nc_guard_report.c 的 ncg_debug_log_path() 参与编译 →
+# 报告写到 /storage/emulated/0/Android/data/<包名>/files/ncguard_log.md
+# 开关哨兵仍为 /storage/emulated/0/xixin_debug（或 NCG_REPORT_PATH 环境变量）
+APP_CFLAGS  += -DNCGUARD_DEBUG_REPORT
+APP_CPPFLAGS += -DNCGUARD_DEBUG_REPORT
+DBGEOF
+    echo "  [mk] ⚠️ DEBUG_REPORT=1：已编入自检报告（产物不可分发）"
+  fi
   # ── Amice 混淆（2026-11-05）──────────────────────────────────────
   # 为什么追加而不是改上面的 heredoc：上面的 APP_CFLAGS 是 'EOF' 单引号
   # heredoc（不展开变量），而这里要用 $obf_spec 做条件判断，混在一起会让
