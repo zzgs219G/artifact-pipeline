@@ -57,13 +57,13 @@
           "arg_on": "--obfuscate-mba"
         },
         {
-          "key": "bcf",
-          "label": "虚假控制流（BCF）",
-          "desc": "插入永假分支 + 不透明谓词，让控制流图看起来比实际复杂。与「动态控制流」机制不同：BCF 改的是【分支条件】（整数区域重写 + 带守卫的函数副本），而 vm_flatten 改的是【状态码生成方式】。两者可叠加，跨类互补。⚠️ 与 VMP 冲突（会改 CFG），VMP 开启时由 amice 逐函数跳过 —— 非 VMP 函数仍照吃。体积开销中等。",
+          "key": "param_aggregate",
+          "label": "参数聚合",
+          "desc": "把函数的多个参数打包成一个结构体传入。攻击者读反汇编时靠「参数类型和顺序」推断函数语义，打包后每个字段都变成栈偏移访问 —— 必须先逆出结构体布局才能理解函数在干什么。✅ 不修改控制流，与 VMP 无冲突（VMP 目标函数会被自动跳过）；体积代价小（结构体在栈上，不复制代码）。",
           "type": "checkbox",
           "default": true,
           "value_kind": "flag",
-          "arg_on": "--obfuscate-bcf"
+          "arg_on": "--obfuscate-param-aggregate"
         },
         {
           "key": "vm_flatten",

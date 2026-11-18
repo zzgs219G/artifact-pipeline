@@ -331,10 +331,10 @@ import json,sys
 d=json.load(open('$ROOT/configs/v1/config-schema.json'))
 m=[x for x in d['modules'] if x.get('key')=='soguard'][0]
 ks=[c['key'] for c in m.get('children',[])]
-sys.exit(0 if ks==['vm','mba','bcf','vm_flatten'] else 1)"; then
-  ok "T14c soguard 子项恰为 vm/mba/bcf/vm_flatten 四项"
+sys.exit(0 if ks==['vm','mba','param_aggregate','vm_flatten'] else 1)"; then
+  ok "T14c soguard 子项恰为 vm/mba/param_aggregate/vm_flatten"
 else
-  bad "T14c soguard 子项被改动 —— 应为 vm/mba/bcf/vm_flatten"
+  bad "T14c soguard 子项被改动"
 fi
 
 # ── T15：vm_flatten 与 VMP 按函数分流（2026-11-18 修正）────────────

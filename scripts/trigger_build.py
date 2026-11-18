@@ -177,6 +177,7 @@ def build_config(args) -> str:
             "mba": bool(getattr(args, "obf_mba", False)),
             "flatten": bool(getattr(args, "obf_flatten", False)),
             "bcf": bool(getattr(args, "obf_bcf", False)),
+            "param_aggregate": bool(getattr(args, "obf_param_aggregate", False)),
             "indirect_call": bool(getattr(args, "obf_indirect_call", False)),
             "indirect_branch": bool(getattr(args, "obf_indirect_branch", False)),
             "vm_flatten": bool(getattr(args, "obf_vm_flatten", False)),
@@ -765,7 +766,9 @@ def main() -> int:
     g.add_argument("--obf-flatten", action="store_true",
                    help="控制流扁平化：状态码明文，配表可还原（已被 --obf-bcf 取代，保留兼容）")
     g.add_argument("--obf-bcf", action="store_true",
-                   help="虚假控制流：永假分支 + 不透明谓词，改分支条件（与 vm_flatten 跨类互补）")
+                   help="虚假控制流：永假分支 + 不透明谓词（实测 +164KB 且可被符号执行秒解，不推荐）")
+    g.add_argument("--obf-param-aggregate", action="store_true",
+                   help="参数聚合：函数参数打包成结构体，改签名（不碰控制流，与 VMP 兼容）")
     g.add_argument("--obf-indirect-call", action="store_true",
                    help="隐藏调用关系：看不出谁调用了谁（VMP 覆盖不到的盲区）")
     g.add_argument("--obf-indirect-branch", action="store_true",

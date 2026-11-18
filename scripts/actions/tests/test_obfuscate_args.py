@@ -111,7 +111,7 @@ def main():
     # 理由：flatten 与 vm_flatten 都是「状态机」类，跨类收益低；
     # BCF 改的是分支条件（整数区域重写 + 带守卫副本），与 vm_flatten 互补。
     check("四个子项齐全（VMP 本体 + 混淆 3）",
-          set(kids) == {'vm', 'mba', 'bcf', 'vm_flatten'},
+          set(kids) == {'vm', 'mba', 'param_aggregate', 'vm_flatten'},
           str(sorted(kids)))
     # VMP 是 so层保护的第一等子项：默认开、可关。
     # 「可关」不是随手加的 —— 它占约 470KB，小包或压测时需要能关掉。
@@ -121,8 +121,11 @@ def main():
           kids.get('vm', {}).get('arg_on') == '--vmp-vm',
           str(kids.get('vm', {}).get('arg_on')))
     check("mba 默认开启（低风险）", kids.get('mba', {}).get('default') is True)
-    check("bcf 默认开启（与 vm_flatten 跨类互补，不像 flatten 争控制流）",
-          kids.get('bcf', {}).get('default') is True)
+    # 2026-11-18：bcf 换成 param_aggregate。
+    # BCF 实测 +164KB .text/+127KB APK，且产物是"合法的位运算分支"，
+    # 符号执行几秒证恒真、LLM 直接跳过 —— 性价比最低。
+    check("param_aggregate 默认开启（不碰控制流，与 VMP 兼容）",
+          kids.get('param_aggregate', {}).get('default') is True)
     # 防回归：被删掉的两项不得复活（复活必然重演 VMP 掉 4 个函数的回归）
     check("indirect_call 已彻底移除",
           'indirect_call' not in kids)
@@ -131,7 +134,7 @@ def main():
     check("vm_flatten 默认关闭（体积与编译开销大，需显式开）",
           kids.get('vm_flatten', {}).get('default') is False)
     for k, want in (('mba', '--obfuscate-mba'),
-                    ('bcf', '--obfuscate-bcf'),
+                    ('param_aggregate', '--obfuscate-param-aggregate'),
                     ('vm_flatten', '--obfuscate-vm-flatten')):
         check(f"{k} 的 arg_on == {want}",
               kids.get(k, {}).get('arg_on') == want,
@@ -165,10 +168,10 @@ def main():
 
     rc, lines, out = resolve({
         'schema_version': 1, 'sigcheck': True,
-        'soguard': {'enabled': True, 'mba': False, 'bcf': True},
+        'soguard': {'enabled': True, 'mba': False, 'param_aggregate': True},
     })
-    check("bcf 勾选 → 生成 --obfuscate-bcf",
-          rc == 0 and '--obfuscate-bcf' in lines, f"lines={lines}")
+    check("param_aggregate 勾选 → 生成 --obfuscate-param-aggregate",
+          rc == 0 and '--obfuscate-param-aggregate' in lines, f"lines={lines}")
 
     # vm_flatten（动态控制流）
     rc, lines, out = resolve({

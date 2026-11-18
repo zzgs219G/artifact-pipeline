@@ -187,7 +187,7 @@ WANT_CHACHA20=0
 WANT_OBFUSCATE=0
 OBF_MBA=0
 OBF_FLATTEN=0
-OBF_BCF=0
+OBF_PAGG=0
 OBF_VM_FLATTEN=0
 # --dex2c-static-register（2026-11-10）：dex2c 的业务方法改用【静态短名】注册。
 #
@@ -315,6 +315,7 @@ while [[ $# -gt 0 ]]; do
     --vmp-keep-dynamic-register) WANT_VMP=1; shift ;;   # 历史参数，保留兼容（现等价于 --vmp）
     --obfuscate-mba) WANT_OBFUSCATE=1; OBF_MBA=1; shift ;;
     --obfuscate-flatten) WANT_OBFUSCATE=1; OBF_FLATTEN=1; shift ;;
+    --obfuscate-param-aggregate) WANT_OBFUSCATE=1; OBF_PAGG=1; shift ;;
     --obfuscate-bcf) WANT_OBFUSCATE=1; OBF_BCF=1; shift ;;
     --obfuscate-vm-flatten) WANT_OBFUSCATE=1; OBF_VM_FLATTEN=1; shift ;;
     *)          log_err "未知参数: $1"; usage ;;
@@ -1060,7 +1061,7 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   #
   # ⚠️ flatten 与 vm_flatten 全勾时以 vm_flatten 替代 flatten（两者都改
   #    控制流，叠加只是互相削弱且体积翻倍）。见下方校验。
-  if [[ $OBF_MBA -eq 0 && $OBF_FLATTEN -eq 0 && $OBF_BCF -eq 0 && $OBF_VM_FLATTEN -eq 0 ]]; then
+  if [[ $OBF_MBA -eq 0 && $OBF_FLATTEN -eq 0 && $OBF_BCF -eq 0 && $OBF_PAGG -eq 0 && $OBF_VM_FLATTEN -eq 0 ]]; then
     log_err "勾选了代码混淆，但没选任何混淆强度"
     log_err "     可选：--obfuscate-mba / --obfuscate-bcf / --obfuscate-flatten / --obfuscate-vm-flatten"
     exit 1
@@ -1070,11 +1071,13 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   [[ $OBF_MBA -eq 1 ]]             && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}mba"
   [[ $OBF_FLATTEN -eq 1 ]]         && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}flatten"
   [[ $OBF_BCF -eq 1 ]]             && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}bcf"
+  [[ $OBF_PAGG -eq 1 ]]            && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}param_aggregate"
   [[ $OBF_VM_FLATTEN -eq 1 ]]      && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}vm_flatten"
 
   export AMICE_MBA="$([[ $OBF_MBA -eq 1 ]] && echo true || echo false)"
   export AMICE_FLATTEN="$([[ $OBF_FLATTEN -eq 1 ]] && echo true || echo false)"
   export AMICE_BOGUS_CONTROL_FLOW="$([[ $OBF_BCF -eq 1 ]] && echo true || echo false)"
+  export AMICE_PARAM_AGGREGATE="$([[ $OBF_PAGG -eq 1 ]] && echo true || echo false)"
   export AMICE_VM_FLATTEN="$([[ $OBF_VM_FLATTEN -eq 1 ]] && echo true || echo false)"
 
   # ── 混淆只作用于明文段，不作用于 .ncx（2026-11-18）─────────────────
@@ -1145,6 +1148,7 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
   [[ "$AMICE_MBA"       == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}mba"
   [[ "$AMICE_FLATTEN"   == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}flatten"
   [[ "$AMICE_BOGUS_CONTROL_FLOW" == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}bcf"
+  [[ "$AMICE_PARAM_AGGREGATE" == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}param_aggregate"
   [[ "$AMICE_VM_FLATTEN" == true ]] && _OBF_SPEC="${_OBF_SPEC:+$_OBF_SPEC,}vm_flatten"
 
   log_info "代码混淆: $_OBF_SPEC"
@@ -1152,7 +1156,7 @@ if [[ $WANT_OBFUSCATE -eq 1 ]]; then
     log_info "  ⚠️ 混淆不作用于这些段（密文不可压缩，收益为零）: $AMICE_OBF_SKIP_SECTIONS"
   fi
   log_info "  AMICE_MBA=$AMICE_MBA AMICE_FLATTEN=$AMICE_FLATTEN"
-  log_info "  AMICE_VM_FLATTEN=$AMICE_VM_FLATTEN AMICE_BOGUS_CONTROL_FLOW=$AMICE_BOGUS_CONTROL_FLOW"
+  log_info "  AMICE_VM_FLATTEN=$AMICE_VM_FLATTEN AMICE_BOGUS_CONTROL_FLOW=$AMICE_BOGUS_CONTROL_FLOW AMICE_PARAM_AGGREGATE=$AMICE_PARAM_AGGREGATE"
   log_info "混淆用 NDK: $AMICE_NDK_HOME（bundle 自带，与插件配套）"
 fi
 
@@ -1200,6 +1204,7 @@ if [[ $WANT_VMP -eq 1 ]]; then
     export AMICE_MBA=false
     export AMICE_FLATTEN=false
     export AMICE_BOGUS_CONTROL_FLOW=false
+    export AMICE_PARAM_AGGREGATE=false
     export AMICE_VM_FLATTEN=false
     log_info "不做混淆（未勾选代码混淆，或按函数分流的开关已关闭），只保留 VMP"
   fi
