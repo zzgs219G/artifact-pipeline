@@ -3,6 +3,8 @@
   "modules_expected": [
     "uncheck"
   ],
+  "label": "去签名校验",
+  "desc": "把 APK 改成签名校验必然通过的包。产物未签名，自行 apksigner",
   "modules": [
     {
       "key": "uncheck",

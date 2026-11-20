@@ -38,9 +38,14 @@ inputs = trigger["workflow_dispatch"]["inputs"]
 # 与 no_lock 不是一回事：
 #   no_lock = 注入 nox 但不加密（段明文）
 #   no_nox  = 连 nox 的 .c 都不编进 so（量模块自身体积用）
-assert set(inputs) == {"apk_url", "protect_config", "dpt_extra_args", "sign",
-                       "amice_probe", "no_lock", "no_nox"}, \
-    f"inputs 应为 apk_url+protect_config+dpt_extra_args+sign+amice_probe+no_lock+no_nox: {list(inputs)}"
+assert set(inputs) == {"apk_url", "protect_config", "schema_v1", "dpt_extra_args",
+                       "sign", "amice_probe", "no_lock", "no_nox"}, \
+    f"inputs 应为 apk_url+protect_config+schema_v1+dpt_extra_args+sign+amice_probe+no_lock+no_nox: {list(inputs)}"
+# schema_v1（2026-11-21）：声明式卡片标记，App 读它决定拉 configs/v1。
+# 是给 App 的元数据，不是用户选项 —— App 侧会把它从通用表单里过滤掉。
+# 命名规则 `schema_v<N>`，N 必须与 configs/v<N>/ 目录名一致。
+assert inputs["schema_v1"].get("type") == "boolean", "schema_v1 应为 boolean 类型"
+assert inputs["schema_v1"]["default"] is True, "schema_v1 默认 true（否则 App 会退回映射表）"
 assert inputs["no_lock"]["default"] is False, "no_lock 必须默认 false（默认照常锁箱）"
 assert inputs["no_nox"]["default"] is False, "no_nox 必须默认 false（默认照常注入 nox）"
 assert inputs["no_nox"].get("type") == "boolean", "no_nox 应为 boolean 类型"

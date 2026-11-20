@@ -9,6 +9,8 @@
     "envcheck",
     "packer"
   ],
+  "label": "加固模块",
+  "desc": "给 APK 加防御：签名校验 / 核心逻辑转 C / 字符串加密 / 防对比 / 环境检测 / 加壳",
   "modules": [
     {
       "key": "sigcheck",

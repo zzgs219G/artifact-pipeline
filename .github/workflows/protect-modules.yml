@@ -38,6 +38,15 @@ on:
       protect_config:
         description: '加固配置JSON(schema驱动;结构见 configs/v1/config-schema.json)'
         required: true
+      # 声明式卡片版本（2026-11-21）：App 读这个 input 名就知道该拉哪张 schema。
+      # 命名规则 `schema_v<N>`，N 必须与 configs/v<N>/ 目录名一致。
+      # 有了它，App 不需要维护「workflow 文件名 → 卡片版本」映射表，
+      # 加新卡片只改自己 workflow 的这一行。
+      schema_v1:
+        description: '内部标记：本流水线使用 configs/v1 卡片（App 据此渲染表单，请勿修改）'
+        required: false
+        type: boolean
+        default: true
       dpt_extra_args:
         description: '附加 dpt.jar 参数,空格分隔,如 --smaller(自由文本只构成打包参数注入面,最坏打包失败;secrets 不经此路径)'
         required: false
