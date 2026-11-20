@@ -45,13 +45,32 @@ SIGFIX_DESC = 'Lcom/nc/uncheck/SigFix;'
 # 与 payload/build.sh 的 SENTINEL 必须逐字一致
 SENTINEL = 'NCSIGFIXSENTINELCERTB64PLACEHOLDER0000000000000000000000000000000'
 
+# SigFixApp 里"原 Application 类名"占位符，与 payload/src/.../SigFixApp.java 一致
+ORIGINAL_APP_PH = '__NC_ORIGINAL_APP__'
+
+# 我们的 Application 挂载类（全限定名）
+SIGFIX_APP = 'com.nc.uncheck.SigFixApp'
+
 # 注入点：(方法名, 签名, 说明)。按「跑得早 → 晚」排，全部注入（install 幂等）
+# 注入点：按「优先尝试」排序。全部尝试，install 幂等。
+#
+# ⚠️ 顺序有讲究（2026-11-21 实测事故后调整）：
+#   原先把 attachBaseContext 放第一，因为时序最早。但它在很多父类上是
+#   **final**（JMComic 的父类链 Lcom/getcapacitor/g; → Lg/i;
+#   把 attachBaseContext 声明为 final），无法覆写，硬覆写 =
+#   LinkageError 闪退。
+#   改为主选 onCreate：绝大多数 Activity 自己就 override 了它（或父类
+#   没有声明 final），注入点稳定；时序只比 attachBaseContext 晚
+#   「一次 Application.onCreate」，对校验类 App 完全够用
+#   （它们的检查通常在 MainActivity.onCreate）。
+#   attachBaseContext 保留为备选：只在父类链允许覆写时才用。
 ACTIVITY_POINTS = [
-    ('attachBaseContext', '(Landroid/content/Context;)V', '最早，Context 刚挂上'),
+    ('onCreate', '(Landroid/os/Bundle;)V', '最常用，界面创建前；多数包可注入'),
+    ('attachBaseContext', '(Landroid/content/Context;)V', '最早，但父类常声明 final，需检查'),
 ]
 APPLICATION_POINTS = [
-    ('attachBaseContext', '(Landroid/content/Context;)V', 'Application 挂 Context，早于 onCreate'),
     ('onCreate', '()V', 'Application 初始化，早于一切 Activity'),
+    ('attachBaseContext', '(Landroid/content/Context;)V', 'Application 挂 Context，更早但可能 final'),
 ]
 
 
@@ -299,6 +318,36 @@ def _first_instruction_idx(lines, start_idx):
     return None
 
 
+def _method_has_marker(lines, method_name, method_sig):
+    """指定方法的方法体内是否已经有我们的注入标记。
+
+    ⚠️ 为什么必须按方法粒度判定（2026-11-21 修）：
+    原实现是在**整个文件**里查 CALL_MARKER —— 同一个类注入第一个方法后，
+    第二个方法就永远被判成 already 而跳过。
+    实测表现：MainActivity 先注入 onCreate，随后 attachBaseContext
+    报 "already" 被跳过，看起来像"已经注过了"，实际根本没注。
+    这种假幂等比重复注入更危险：它让"多注入点保险"静默退化成单点。
+    """
+    import re as _re
+    in_target = False
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith('.method'):
+            m = _re.search(r'\.method\s+(.*)$', s)
+            in_target = False
+            if m:
+                nm = _re.search(r'([^\s(]+)(\([^)]*\)\S+)$', m.group(1))
+                if nm and nm.group(1) == method_name and nm.group(2) == method_sig:
+                    in_target = True
+            continue
+        if s.startswith('.end method'):
+            in_target = False
+            continue
+        if in_target and CALL_MARKER in line:
+            return True
+    return False
+
+
 def _register_ok(lines, start_idx, param_index):
     """判断参数寄存器物理编号是否 ≤ v15（invoke-static 是 35c，上限 v15）。
 
@@ -356,6 +405,68 @@ def _param_physical_index(lines, start_idx, is_static, slots, param_index):
     return None
 
 
+def _find_super_chain(decompiled_dir, start_desc):
+    """沿 .super 走父类链，返回 [desc, super, super.super, ...]（不含 Object）。
+
+    ⚠️ 为什么需要它：新建方法覆写前必须确认父类链上没有 **final 同名方法**。
+    实测事故（JMComic / run 03:17 装机闪退）：
+      MainActivity 的父类链是 Lcom/getcapacitor/g; → Lg/i; → Landroid/app/Activity;
+      而 Lg/i; 里 `.method public final attachBaseContext(Context)V`
+      → 我们新建 `protected attachBaseContext` 覆写它
+      → ART 抛 java.lang.LinkageError: overrides final method in class Lg/i;
+      → App 连 Application.onCreate 都到不了，直接闪退。
+    """
+    chain = []
+    cur = start_desc
+    seen = set()
+    for _ in range(32):                      # 深度上限，防畸形包死循环
+        if not cur or cur in seen or cur == 'Ljava/lang/Object;':
+            break
+        seen.add(cur)
+        path = find_smali_file(decompiled_dir, cur)
+        if not path:
+            break
+        with open(path, encoding='utf-8') as f:
+            sup = None
+            for line in f:
+                s = line.strip()
+                if s.startswith('.super '):
+                    sup = s[len('.super '):].strip()
+                    break
+        if not sup:
+            break
+        chain.append(sup)
+        cur = sup
+    return chain
+
+
+def _is_final_in_super_chain(decompiled_dir, start_desc, method_name, method_sig):
+    """父类链上是否有 `final` 的同名同签名方法。有则不能覆写。"""
+    import re as _re
+    for desc in _find_super_chain(decompiled_dir, start_desc):
+        path = find_smali_file(decompiled_dir, desc)
+        if not path:
+            continue
+        with open(path, encoding='utf-8') as f:
+            lines = f.read().split('\n')
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if not s.startswith('.method'):
+                continue
+            m = _re.search(r'\.method\s+(.*)$', s)
+            if not m:
+                continue
+            rest = m.group(1)
+            nm = _re.search(r'([^\s(]+)(\([^)]*\)\S+)$', rest)
+            if not nm or nm.group(1) != method_name or nm.group(2) != method_sig:
+                continue
+            # 访问标志里有 final 即不可覆写
+            if _re.search(r'\bfinal\b', rest):
+                return desc
+            return None
+    return None
+
+
 def _create_method_override(path, desc, super_desc, method_name, method_sig, install_desc):
     """类里没有这个方法时，新建一个覆写：super 调用 + install 调用。
 
@@ -363,13 +474,18 @@ def _create_method_override(path, desc, super_desc, method_name, method_sig, ins
       LAUNCHER 不 override attachBaseContext 是常态（JMComic 就是）。
       退到 onCreate 也能工作，但时序晚；attachBaseContext 越早越安全。
       新建覆写的代价极小（一个方法、零新增字段），且语义完全合法。
+
+    ⚠️ 调用方必须先确认父类链上没有 final 同名方法（见 _is_final_in_super_chain）。
+       本函数自己也防御性再查一次 —— 覆写 final 方法是 LinkageError 级别的
+       致命错误，不能只靠调用方记得检查。
     """
     with open(path, encoding='utf-8') as f:
         text = f.read()
-    if CALL_MARKER in text:
-        return False, 'already'
-
     lines = text.split('\n')
+
+    # 幂等：这个类里已经新建过同名方法就不再建（按方法粒度，不看全文件）。
+    if _method_has_marker(lines, method_name, method_sig):
+        return False, 'already'
 
     # 找一个存活的 .method 块末尾不是好位置（方法顺序无关），
     # 直接插在类尾部（最后一个 .end method 之后），smali 对方法顺序无要求。
@@ -432,8 +548,6 @@ def inject_call_site(path, install_desc, method_name, method_sig):
     """
     with open(path, encoding='utf-8') as f:
         text = f.read()
-    if CALL_MARKER in text:
-        return False, 'already'
     lines = text.split('\n')
 
     target = None
@@ -464,12 +578,23 @@ def inject_call_site(path, install_desc, method_name, method_sig):
     if 'native' in lines[target]:
         return False, 'native'
 
-    # 要传的参数：attachBaseContext(Context) → p0=this, p1=Context
-    #             onCreate() → p0=this（Activity/Application 自己就是 Context）
-    if method_sig == '()V':
-        param_reg_index = 0
-    else:
-        param_reg_index = 0 if is_static else 1
+    # 幂等：只判定「这个目标方法」是否已注入，不看整个文件。
+    if _method_has_marker(lines, method_name, method_sig):
+        return False, 'already'
+
+    # 传哪个寄存器给 install(Context)？
+    #
+    # ⚠️ 必须是 this（p0），不是方法的第一个参数。踩过的坑（2026-11-21）：
+    #   onCreate(Landroid/os/Bundle;)V 的第一参数 p1 是 **Bundle**，不是 Context。
+    #   原实现按「第一个参数」取值，于是注入的是
+    #     invoke-static {p1}, Lcom/nc/uncheck/SigFix;->install(Landroid/content/Context;)V
+    #   smali 不校验参数类型，能汇编通过、能装、能跑，
+    #   但 install() 里 ctx.getPackageName() 抛异常被 catch 吞掉 →
+    #   载荷静默什么都不做。表现是「注入成功、装机无效果」，极难排查。
+    #
+    #   而 Activity 与 Application 都继承 Context，p0（this）永远是合法 Context，
+    #   且不需要关心方法签名有几个参数。
+    param_reg_index = 0   # p0 = this
 
     phys = _param_physical_index(lines, target, is_static, slots, param_reg_index)
     if phys is None:
@@ -558,6 +683,7 @@ def _super_desc_of(path):
 
 def do_inject(decompiled_dir, apk_path, dry_run=False):
     dex_capacity = _load_module('dex_capacity', ('scripts', 'repack', 'dex-capacity.py'))
+    axml_edit = _load_module('axml_edit', ('scripts', 'uncheck', 'axml_edit.py'))
 
     # 1) 证书
     cert_der = extract_cert_der(apk_path)
@@ -565,10 +691,49 @@ def do_inject(decompiled_dir, apk_path, dry_run=False):
     print(f'✅ 原证书 DER: {len(cert_der)} 字节 → Base64 {len(cert_b64)} 字符')
 
     # 2) Manifest
-    manifest = parse_manifest_text(_read_manifest_text(decompiled_dir))
+    # 优先用二进制 AXML 解析（run.py 解包时带了 -r，Manifest 保持二进制）。
+    # 退回文本解析是为了兼容手工解包（apktool d 不带 -r）的调试场景。
+    manifest = None
+    _mpath = os.path.join(decompiled_dir, 'AndroidManifest.xml')
+    if os.path.isfile(_mpath):
+        try:
+            with open(_mpath, 'rb') as _f:
+                _head = _f.read(2)
+            if _head == b'\x03\x00':
+                manifest = axml_edit.parse_manifest(_mpath)
+        except Exception as _e:
+            print(f'⚠️ AXML 解析失败，退回文本解析: {_e}')
+    if manifest is None:
+        manifest = parse_manifest_text(_read_manifest_text(decompiled_dir))
     print(f"✅ 包名: {manifest['package']}")
     print(f"   Application: {manifest['app_class'] or '(无自定义)'}")
     print(f"   LAUNCHER: {manifest['launchers']}")
+
+    # 3b) 改写 AndroidManifest：把 android:name 指向 SigFixApp，
+    #     并把原类名记下来供 SigFixApp 反射接管。
+    #
+    # 为什么要挂到 Application（而不是只注入 Activity.onCreate）：
+    #   Application 是系统最早实例化的应用类，覆盖 Application.onCreate /
+    #   attachBaseContext / ContentProvider.onCreate 等所有更早的时机。
+    #   只挂 Activity 会漏掉在 Application 里校验的 App。
+    original_app_java = None
+    if manifest['app_class']:
+        # smali 描述符 Lcom/x/Y; → com.x.Y
+        d = manifest['app_class']
+        if d.startswith('L') and d.endswith(';'):
+            original_app_java = d[1:-1].replace('/', '.')
+    if not dry_run:
+        manifest_path = os.path.join(decompiled_dir, 'AndroidManifest.xml')
+        axml_edit.set_app_name(manifest_path, SIGFIX_APP)
+        now = axml_edit.get_app_name(manifest_path)
+        if now != SIGFIX_APP:
+            raise RuntimeError(
+                f'AndroidManifest 改写后回读不一致：期望 {SIGFIX_APP}，实际 {now}')
+        print(f'✅ AndroidManifest: android:name → {SIGFIX_APP}')
+        if original_app_java:
+            print(f'   原 Application 将由其接管: {original_app_java}')
+        else:
+            print('   原包无 android:name，SigFixApp 不接管任何原 Application')
 
     # 3) 载荷 smali（主类 + 内部类）
     payload_dir = os.path.join(_HERE, 'payload')
@@ -581,16 +746,38 @@ def do_inject(decompiled_dir, apk_path, dry_run=False):
     if not any(f == 'SigFix.smali' for f in payload_files):
         raise RuntimeError('载荷缺主类 SigFix.smali')
 
-    # 4) 选落点（n+1，不碰已有 dex）
+    # 4) 选落点：**永远新建 dex**（n+1），不写进任何已有 dex。
+    #
+    # ⚠️ 为什么强制新建（2026-11-21 用户实测反馈后改）：
+    #   dex-capacity.pick_target_dir() 的默认策略是「首选目录够用就用」，
+    #   那是给加固流水线设计的（加固要改业务 smali，本来就得重编那些 dex）。
+    #   去校验不同：载荷类与原包毫无关系，没有任何理由塞进 classes.dex。
+    #   塞进去的代价：
+    #     · 原 classes.dex 被整体重新汇编，所有类都重写一遍，
+    #       汇编器的细微差异都可能改变原包行为（本次闪退排查就分不清
+    #       是载荷的问题还是重编的问题）；
+    #     · 无法回滚：出问题没法「只去掉载荷」回到原状做二分；
+    #     · 大包必撞 65536 上限。
+    #   新建 classesN.dex 后，原 dex 逐字节不变，
+    #   排查时删掉那一个 dex 就回到原始状态。
+    #
+    #   实现上不改 pick_target_dir（它是加固侧的公共模块），
+    #   而是把 prefer 指向一个必然不存在的目录名 → 必然走 n+1 分支。
     if dry_run:
         print('ℹ️ dry-run：跳过落点选择与写盘')
         return {'payload_files': payload_files, 'manifest': manifest,
                 'cert_b64_len': len(cert_b64)}
 
+    NO_SUCH_DIR = '__nc_uncheck_force_new_dex__'
     target_dir = dex_capacity.pick_target_dir(
         decompiled_dir,
         need_methods=40,          # 载荷方法数（SigFix + 内部类，含构造器等）
-        apk_path=apk_path)
+        apk_path=apk_path,
+        prefer=NO_SUCH_DIR)
+    if target_dir == NO_SUCH_DIR:
+        raise RuntimeError(
+            'pick_target_dir 意外返回了占位目录名 —— '
+            'dex-capacity.py 的 prefer 语义可能变了，请核对后修正本调用。')
     target_root = os.path.join(decompiled_dir, target_dir)
     pkg_dir = os.path.join(target_root, 'com', 'nc', 'uncheck')
     os.makedirs(pkg_dir, exist_ok=True)
@@ -601,6 +788,10 @@ def do_inject(decompiled_dir, apk_path, dry_run=False):
     for fname in payload_files:
         with open(os.path.join(payload_dir, fname), encoding='utf-8') as f:
             text = f.read()
+        if fname.startswith('SigFixApp'):
+            if ORIGINAL_APP_PH in text:
+                text = text.replace(ORIGINAL_APP_PH,
+                                    original_app_java or SIGFIX_APP)
         if fname == 'SigFix.smali':
             if SENTINEL not in text:
                 raise RuntimeError(
@@ -633,6 +824,15 @@ def do_inject(decompiled_dir, apk_path, dry_run=False):
             if note == 'no-method' and super_desc:
                 # LAUNCHER 不 override attachBaseContext 是常态（JMComic 就是），
                 # 新建覆写而不是退回更晚的注入点。
+                #
+                # ⚠️ 但必须先查父类链：若父类把它声明成 final，覆写 =
+                #    LinkageError，App 直接闪退（实测 JMComic：
+                #    父类链 Lcom/getcapacitor/g; → Lg/i; 里 attachBaseContext 是 final）。
+                blocker = _is_final_in_super_chain(decompiled_dir, launcher, name, sig)
+                if blocker:
+                    print(f'   · {launcher}->{name}{sig}: 跳过'
+                          f'（父类 {blocker} 声明为 final，不能覆写）')
+                    continue
                 ok2, note2 = _create_method_override(
                     smali, launcher, super_desc, name, sig, SIGFIX_DESC)
                 if ok2:
@@ -652,6 +852,12 @@ def do_inject(decompiled_dir, apk_path, dry_run=False):
                     injected.append(f"{manifest['app_class']}->{note}")
                     continue
                 if note == 'no-method' and super_desc:
+                    blocker = _is_final_in_super_chain(
+                        decompiled_dir, manifest['app_class'], name, sig)
+                    if blocker:
+                        print(f"   · {manifest['app_class']}->{name}{sig}: 跳过"
+                              f'（父类 {blocker} 声明为 final，不能覆写）')
+                        continue
                     ok2, note2 = _create_method_override(
                         app_smali, manifest['app_class'], super_desc, name, sig, SIGFIX_DESC)
                     if ok2:

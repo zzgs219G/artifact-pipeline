@@ -1,438 +1,227 @@
 package com.nc.uncheck;
 
 import android.content.Context;
-import android.content.pm.PackageInfo;
-import android.content.pm.Signature;
-import android.os.Build;
-import android.util.Base64;
 import android.util.Log;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
-
 /**
- * SigFix —— 通用去签名校验载荷（唯一源码真相）
+ * SigFix —— 通用去签名校验载荷的**引导器**（bootstrap）。
  *
- * smali 由 build.sh 自动生成，永不手改（同 string-enc/stub-src/StrDec.java 的先例）。
+ * ⚠️ 这个类必须待在 App 自己的 ClassLoader 里（也就是和别的类一起被打进
+ * classes.dex 或我们新增的 classesN.dex）。它的唯一职责是：
  *
- * ==== 核心思路 ====
- * 不改目标 App 的任何校验代码。App 无论怎么写校验，最终必须从某个「信息源」取签名：
- *   A. PackageManager.getPackageInfo(...).signatures / .signingInfo   ← 本类代理这一层
- *   B. PackageManager.checkSignatures(...)                            ← 顺带覆盖（同一接口）
- *   C. 自读 APK 文件（sourceDir / ZipFile / stat）                     ← 本版不覆盖，见 README
- *   D. 硬编码常量 / 上报服务器                                          ← 本版不覆盖，见 README
- * 本类把 A/B 的返回值换成「原版证书」，于是 App 自己算出来的哈希就是原版哈希，
- * 与它自己的期望值自然相等 —— 不需要知道它把期望值写在哪、怎么混淆的。
+ *   1. 把「真正干活的类」反序列化成一个**独立的 dex 文件**写到私有目录；
+ *   2. 用 `dalvik.system.DexFile` 的废弃构造方法 `DexFile(String)`
+ *      加载那个 dex —— 这条路径会让 ART 用 **BootClassLoader** 加载它；
+ *   3. 反射调用真正干活的类。
  *
- * ==== 兼容性设计（这是重点，逐条对应「换手机就打不开」的风险）====
- * 1. 永不抛异常出本类：每个步骤独立 try/catch，任何一步失败都静默降级，
- *    App 照常启动（最坏情况=校验没过，弹个警告，不会闪退）。
- * 2. 字段一律「按类型找，不按名字找」（findFieldByType）：
- *    ActivityThread 里那个 IPackageManager 字段在历史版本上叫过 sPackageManager /
- *    mPackageManager，硬编码名字的实现在换 ROM 时必废。按类型匹配与名字无关。
- * 3. 在 IPackageManager「接口层」做代理，不在 Parcel/Binder「字节层」：
- *    拿到的是已经反序列化好的 PackageInfo 普通对象，直接改字段即可。
- *    不需要知道 transaction code、不需要重写 writeToParcel、不随 Android
- *    版本改 Parcel 布局而失效。
- * 4. SigningInfo 内部结构按类型扫描，不认 SigningDetails 里的字段名：
- *    把所有 Signature[] 类型的字段都换掉（signatures + pastSigningCertificates
- *    两个都要换，否则 getSigningCertificateHistory() 会走到另一个字段）。
- * 5. 只改目标包自己的 PackageInfo（按 packageName 过滤）：
- *    否则 App 查别的包（典型：androidx emoji2 校验字体 Provider 的签名）会拿到
- *    错的值而崩 —— 这是「本机好、别人机崩」的经典成因。
- * 6. 幂等 + 不叠加别人已有的代理：Proxy.isProxyClass 检查，已 hook 就跳过。
- * 7. 不用 lambda / 新语法：d8 min-api 21 下编，避免脱糖差异。
+ * ==== 为什么要这么绕 ====
  *
- * ==== 已知不覆盖（诚实口径，见 README「覆盖边界」）====
- * - App 绕过 PackageManager、直接从 /dev/binder 拿 "package" 服务：需 hook ServiceManager
- * - App 自读 APK 文件（sourceDir + ZipFile / 解析 Signing Block / stat 文件大小）
- * - App 把测量结果上报服务器裁决
- * - Play Integrity / SafetyNet
+ * 目标是反射访问隐藏 API（`ActivityThread` / `IPackageManager` 等）。
+ * Android 9+ 对「应用代码」反射隐藏 API 做了拦截，判定依据是
+ * **加载该 Class 的 ClassLoader / DexFile 的 domain**。
+ * 而由 BootClassLoader 加载的 dex 被视为系统代码，不受拦截。
+ *
+ * 直接调 `VMRuntime.setHiddenApiExemptions("L")` 这条路在 Android 15+
+ * （实机测的是 Android 17 / SDK 37）上被标成 `blocked`，
+ * 报 `NoSuchMethodException`，纯反射拿不到。
+ *
+ * 业界已验证的纯 Java 绕法有两条：
+ *   a) 把类的 `Class.classLoader` 置为 null —— **Android Q 起失效**
+ *      （Q 之后判定的是"DexFile 的 ClassLoader"，不是"类的"）
+ *   b) `new DexFile(path)`（不传 ClassLoader）让 BootClassLoader 加载
+ *      —— Android P~U 已验证有效，本类采用这条
+ *
+ * ==== 已知风险（如实记录） ====
+ * · `DexFile(String)` 已被标记 @Deprecated，官方随时可能删除。
+ *   Android 17 上经 dexdump 实测仍存在（`<init>(Ljava/lang/String;)V`）。
+ *   若未来版本删掉，本类会在引导阶段失败 —— 但**不会闪退**：
+ *   所有路径都 try/catch，失败只记日志，App 照常启动（校验照旧）。
+ * · 写 dex 到 codeCacheDir 需要文件系统可写，正常情况下 App 私有目录必然可写。
+ * · 本类只负责引导，不写任何业务逻辑，便于单独审查。
  */
 public final class SigFix {
 
     private static final String TAG = "SigFix";
 
-    /**
-     * 原证书 DER 的 Base64。由 scripts/uncheck/inject.py 在注入时替换成真实值。
-     * 占位符必须保持「以 __ 开头」的形态：install() 见占位符未被替换就整体放弃，
-     * 避免拿垃圾串构造 Signature 后行为不可预期。
-     */
+    /** 真正干活的类：位于我们另行投放的 dex 里，由 BootClassLoader 加载。 */
+    private static final String PAYLOAD_CLASS = "com.nc.uncheck.SigFixImpl";
+
+    /** 投放的 dex 文件名（放在 codeCacheDir 下）。 */
+    private static final String PAYLOAD_DEX = "sigfix-payload.dex";
+
+    /** 资产名：注入时由 scripts/uncheck/inject.py 放进 assets/。 */
+    private static final String PAYLOAD_ASSET = "nc_sigfix/payload.dex";
+
+    /** 原版证书 DER 的 Base64，由 inject.py 在构建期替换。 */
     private static final String CERT_B64 = "__NC_SIGFIX_CERT_B64__";
 
-    /** 伪造后的签名数组（原版证书），全局共用一份。 */
-    private static Signature[] sFake;
-
-    /** 目标包名。只改这个包的 PackageInfo，别的包一律放过。 */
-    private static String sTargetPkg;
-
-    private static volatile boolean sFakeReady;
+    private static volatile boolean sDone;
 
     private SigFix() {
     }
 
     /**
-     * 唯一对外入口。可重复调用（双保险注入点会各调一次），内部幂等。
+     * 唯一对外入口。可重复调用（多注入点会各调一次），内部幂等。
      *
-     * @param ctx 目标 App 的 Context，用于取包名。为 null 则整体放弃
-     *            （拿不到包名就无法安全过滤，宁可不生效也不要改到别的包）。
+     * @param ctx 目标 App 的 Context（Activity / Application 本身即是）
      */
     public static void install(Context ctx) {
+        Log.i(TAG, "install() 进入，ctx=" + (ctx == null ? "null" : ctx.getClass().getName()));
         if (ctx == null) {
             return;
         }
-
-        if (!sFakeReady) {
-            if (CERT_B64 == null || CERT_B64.startsWith("__")) {
-                return;
-            }
-            try {
-                sFake = new Signature[]{new Signature(Base64.decode(CERT_B64, Base64.DEFAULT))};
-                sFakeReady = true;
-            } catch (Throwable t) {
-                return;
-            }
+        if (sDone) {
+            Log.i(TAG, "已安装过，跳过");
+            return;
         }
 
-        if (sTargetPkg == null) {
-            try {
-                sTargetPkg = ctx.getPackageName();
-            } catch (Throwable t) {
-                return;
-            }
-            if (sTargetPkg == null) {
-                return;
-            }
+        if (CERT_B64 == null || CERT_B64.startsWith("__")) {
+            Log.e(TAG, "证书占位符未被替换（注入器没烘焙），放弃");
+            return;
         }
 
-        // 顺序有讲究：先解 hidden API 限制，否则后面反射 ActivityThread 会被拦。
-        // 但即使豁免失败也继续试 —— 低版本 Android 本来就不需要豁免。
+        // ⚠️ 关键：Application.attachBaseContext 阶段 Context 还没就绪。
+        //
+        // 实测（简盒 v2.1.2 / Android 17）：
+        //   在 Application.attachBaseContext 里调 ctx.getCodeCacheDir() →
+        //   NullPointerException: ContextWrapper.getCodeCacheDir() on a null object
+        //   原因：Application.attach() 先调 attachBaseContext，此时 mBase 刚设置，
+        //   依赖 mBase 的那些 API（getCodeCacheDir / getFilesDir / getAssets 等）
+        //   尚不可用。
+        //
+        // 所以：拿不到目录时**不标记完成**，等下一个注入点（onCreate）再来。
+        // 注入器会往多个生命周期方法各插一份调用，天然形成重试链。
         try {
-            exemptHiddenApi();
-        } catch (Throwable ignored) {
-        }
-
-        hookActivityThread();
-
-        hookExistingPackageManager(ctx);
-    }
-
-    // ───────────────────────── hidden API 豁免 ─────────────────────────
-
-    /**
-     * 解除 hidden API 黑/灰名单限制（Android 9+）。
-     *
-     * 走的是业界通行的纯 Java 路径：用 Class.forName / getDeclaredMethod 拿到
-     * VMRuntime 的 Method 对象再 invoke。这里访问的是 SDK 公开方法（Class.forName
-     * 等）本身不受限制，拿到 Method 对象后的调用才绕开「调用点所属类是否在名单里」
-     * 的判定。
-     *
-     * ⚠️ 风险（如实记录）：setHiddenApiExemptions 属 unsupported（灰名单），
-     * 个别 OEM ROM 或未来 Android 版本可能收紧为黑名单。失败时本方法抛异常，
-     * 由 install() 吞掉，此时后续反射 ActivityThread 会失败 → hook 不生效，
-     * 但 App 仍能正常启动（不闪退）。这也是为什么「不得把异常抛出去」是硬约束。
-     */
-    private static void exemptHiddenApi() throws Throwable {
-        Method mForName = Class.class.getDeclaredMethod("forName", new Class[]{String.class});
-        Method mGetDeclaredMethod = Class.class.getDeclaredMethod("getDeclaredMethod",
-                new Class[]{String.class, Class[].class});
-        if (mForName == null || mGetDeclaredMethod == null) {
-            return;
-        }
-
-        Class<?> clsVmRuntime = (Class<?>) mForName.invoke(null, new Object[]{"dalvik.system.VMRuntime"});
-        if (clsVmRuntime == null) {
-            return;
-        }
-
-        Method mGetRuntime = (Method) mGetDeclaredMethod.invoke(clsVmRuntime,
-                new Object[]{"getRuntime", new Class[0]});
-        if (mGetRuntime == null) {
-            return;
-        }
-        Object vmRuntime = mGetRuntime.invoke(null);
-        if (vmRuntime == null) {
-            return;
-        }
-
-        Method mSetExemptions = (Method) mGetDeclaredMethod.invoke(clsVmRuntime,
-                new Object[]{"setHiddenApiExemptions", new Class[]{String[].class}});
-        if (mSetExemptions == null) {
-            return;
-        }
-        // "L" 是前缀豁免：所有以 L 开头的签名（即全部类）都放行。
-        mSetExemptions.invoke(vmRuntime, new Object[]{new String[]{"L"}});
-    }
-
-    // ───────────────────────── 主 hook：ActivityThread ─────────────────────────
-
-    /**
-     * 把 ActivityThread 里持有 IPackageManager 的那个字段换成我们的代理。
-     *
-     * 为什么选这个字段而不是别处：它是进程内所有 ContextImpl 构造
-     * ApplicationPackageManager 时的共同来源，改一处即全局生效。
-     */
-    private static void hookActivityThread() {
-        try {
-            Class<?> clsAt = Class.forName("android.app.ActivityThread");
-            Class<?> clsIpm = Class.forName("android.content.pm.IPackageManager");
-            if (clsAt == null || clsIpm == null) {
-                return;
-            }
-
-            Method mCurrent = clsAt.getDeclaredMethod("currentActivityThread", new Class[0]);
-            mCurrent.setAccessible(true);
-            Object activityThread = mCurrent.invoke(null);
-            if (activityThread == null) {
-                return;
-            }
-
-            Field field = findFieldByType(clsAt, clsIpm);
-            if (field == null) {
-                return;
-            }
-            field.setAccessible(true);
-            Object real = field.get(activityThread);
-            if (real == null) {
-                return;
-            }
-
-            Object proxy = wrapIpm(clsIpm, real);
-            if (proxy == null) {
-                return;
-            }
-            field.set(activityThread, proxy);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    /**
-     * 补一刀：改已存在的 ApplicationPackageManager 实例里的 IPackageManager 引用。
-     *
-     * 为什么必须补：ApplicationPackageManager 在构造时就把 IPackageManager 存进了
-     * 自己的字段。install() 执行时，框架为了加载资源很可能已经创建过 PM 实例，
-     * 那些实例仍指向旧的真实对象 —— 只改 ActivityThread 覆盖不到它们。
-     */
-    private static void hookExistingPackageManager(Context ctx) {
-        try {
-            Object pm = ctx.getPackageManager();
-            if (pm == null) {
-                return;
-            }
-            Class<?> clsIpm = Class.forName("android.content.pm.IPackageManager");
-            Field field = findFieldByType(pm.getClass(), clsIpm);
-            if (field == null) {
-                return;
-            }
-            field.setAccessible(true);
-            Object real = field.get(pm);
-            if (real == null) {
-                return;
-            }
-            Object proxy = wrapIpm(clsIpm, real);
-            if (proxy == null) {
-                return;
-            }
-            field.set(pm, proxy);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    // ───────────────────────── 代理构造 ─────────────────────────
-
-    private static Object wrapIpm(Class<?> iface, Object real) {
-        try {
-            // 已经有人（另一个 hook 框架 / 我们自己的上一次调用）代理过，不叠加：
-            // 叠加会让异常处理链变长，且我们无法确认对方语义。
-            if (Proxy.isProxyClass(real.getClass())) {
-                return null;
-            }
-            ClassLoader cl = iface.getClassLoader();
-            return Proxy.newProxyInstance(cl, new Class[]{iface}, new IpmHandler(real));
+            ctx.getCodeCacheDir();
         } catch (Throwable t) {
-            return null;
+            Log.i(TAG, "Context 尚未就绪（" + t.getClass().getSimpleName()
+                    + "），等待下一个注入点重试");
+            return;   // 注意：没有设置 sDone，下一处调用会重新尝试
+        }
+
+        sDone = true;
+        try {
+            boot(ctx);
+        } catch (Throwable t) {
+            // 引导失败：只记日志。校验没绕过是"没生效"，不能让 App 崩。
+            Log.e(TAG, "引导失败（去校验未生效，App 可正常使用）", t);
         }
     }
 
-    /**
-     * IPackageManager 的代理处理器。
-     *
-     * 关键点：走到这里时 AIDL 的 Parcel 编解码已经在真实对象内部做完了，
-     * 我们拿到的是普通 Java 对象。所以只需要「转发 + 改结果」。
-     */
-    private static final class IpmHandler implements InvocationHandler {
-
-        private final Object mReal;
-
-        IpmHandler(Object real) {
-            mReal = real;
+    private static void boot(Context ctx) throws Throwable {
+        // 1) 投放 payload dex 到私有目录（已存在且大小一致则跳过）
+        java.io.File dexOut = new java.io.File(ctx.getCodeCacheDir(), PAYLOAD_DEX);
+        boolean needWrite = true;
+        try {
+            long expect = assetSize(ctx, PAYLOAD_ASSET);
+            if (dexOut.isFile() && dexOut.length() == expect && expect > 0) {
+                needWrite = false;
+                Log.i(TAG, "payload dex 已存在且大小一致，跳过投放");
+            }
+        } catch (Throwable ignored) {
+        }
+        if (needWrite) {
+            // 先删旧文件：上一次运行可能已把它设成只读（400），
+            // 直接 FileOutputStream 覆盖会 EACCES（实测踩过）。
+            if (dexOut.exists() && !dexOut.delete()) {
+                Log.w(TAG, "旧 payload dex 删不掉: " + dexOut.getAbsolutePath());
+            }
+            extractAsset(ctx, PAYLOAD_ASSET, dexOut);
+            Log.i(TAG, "payload dex 已投放: " + dexOut.getAbsolutePath()
+                    + " (" + dexOut.length() + " B)");
         }
 
-        @Override
-        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            Object ret;
-            try {
-                ret = method.invoke(mReal, args);
-            } catch (InvocationTargetException e) {
-                // 保持原样向外抛，不能把 InvocationTargetException 透给系统框架：
-                // 框架只 catch 它自己认识的服务端异常类型。
-                Throwable cause = e.getCause();
-                throw (cause != null) ? cause : e;
+        // 2) 用 DexFile(String) 让 BootClassLoader 加载 → 里面的类天然享有系统权限
+        //
+        // ⚠️ 必须用「不传 ClassLoader」的那个重载。传了 ClassLoader 就退回
+        //    普通应用域，隐藏 API 照样被拦，等于白绕。
+        Object dexFile = null;
+        Class<?> impl;
+        try {
+            Class<?> clsDexFile = Class.forName("dalvik.system.DexFile");
+            java.lang.reflect.Constructor<?> ctor =
+                    clsDexFile.getDeclaredConstructor(String.class);
+            ctor.setAccessible(true);
+            dexFile = ctor.newInstance(dexOut.getAbsolutePath());
+            Log.i(TAG, "DexFile(String) 构造成功");
+
+            java.lang.reflect.Method loadClass =
+                    clsDexFile.getDeclaredMethod("loadClass", String.class, ClassLoader.class);
+            loadClass.setAccessible(true);
+            impl = (Class<?>) loadClass.invoke(dexFile, PAYLOAD_CLASS, null);
+            if (impl == null) {
+                throw new IllegalStateException("loadClass 返回 null: " + PAYLOAD_CLASS);
             }
+            Log.i(TAG, "payload 类已加载（BootClassLoader 域）: " + impl.getName());
+        } catch (Throwable t) {
+            Log.e(TAG, "DexFile 引导失败", t);
+            throw t;
+        }
+
+        // 3) 先告诉实现类 payload.dex 在哪 —— 它建 Proxy 时需要知道
+        //    （Proxy 的 ClassLoader 必须同时看到系统接口与本 dex 里的 handler 类）
+        try {
+            java.lang.reflect.Method setPath =
+                    impl.getDeclaredMethod("setPayloadPath", String.class);
+            setPath.setAccessible(true);
+            setPath.invoke(null, dexOut.getAbsolutePath());
+        } catch (Throwable t) {
+            Log.w(TAG, "setPayloadPath 失败（Proxy 可能因此建不出来）", t);
+        }
+
+        // 4) 反射调用真正的 install
+        java.lang.reflect.Method install =
+                impl.getDeclaredMethod("install", Context.class, String.class);
+        install.setAccessible(true);
+        install.invoke(null, ctx, CERT_B64);
+        Log.i(TAG, "payload install() 调用完成");
+    }
+
+    private static long assetSize(Context ctx, String name) throws Throwable {
+        android.content.res.AssetFileDescriptor fd = ctx.getAssets().openFd(name);
+        try {
+            return fd.getLength();
+        } finally {
+            fd.close();
+        }
+    }
+
+    private static void extractAsset(Context ctx, String name, java.io.File out) throws Throwable {
+        java.io.InputStream in = ctx.getAssets().open(name);
+        try {
+            java.io.FileOutputStream os = new java.io.FileOutputStream(out);
             try {
-                patchResult(ret);
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    os.write(buf, 0, n);
+                }
+                os.flush();
+            } finally {
+                os.close();
+            }
+        } finally {
+            in.close();
+        }
+
+        // ⚠️ 必须改成只读，否则加载会被系统拒绝。
+        //
+        // 实测（Android 17 / HyperOS）：
+        //   SecurityException: Writable dex file '.../sigfix-payload.dex' is not allowed.
+        //   at dalvik.system.DexFile.openDexFileNative
+        //
+        // Android 14+ 禁止加载"可写"的 dex 文件，用来堵"把代码写到磁盘再加载"
+        // 这类注入手法。setReadOnly() 之后就能正常加载了 —— 文件依然在我们
+        // 自己的私有目录里，只是去掉写权限位。
+        out.setReadOnly();
+        if (out.canWrite()) {
+            Log.w(TAG, "setReadOnly() 未生效，尝试 chmod");
+            try {
+                java.lang.Runtime.getRuntime().exec(
+                        new String[]{"chmod", "400", out.getAbsolutePath()}).waitFor();
             } catch (Throwable ignored) {
-                // 改结果失败也要把原始结果还给调用方，绝不因我们的问题让 App 崩
-            }
-            return ret;
-        }
-    }
-
-    // ───────────────────────── 返回值改写 ─────────────────────────
-
-    private static void patchResult(Object ret) {
-        if (ret == null) {
-            return;
-        }
-        if (ret instanceof PackageInfo) {
-            patchPackageInfo((PackageInfo) ret);
-        } else if (ret instanceof PackageInfo[]) {
-            PackageInfo[] arr = (PackageInfo[]) ret;
-            for (int i = 0; i < arr.length; i++) {
-                patchPackageInfo(arr[i]);
             }
         }
-        // 注：getInstalledPackages 等接口可能返回 ParceledListSlice，
-        // 展开它需要调 getList()，而 getList() 会触发一次 Binder 读取、有副作用。
-        // 本版不展开（目标 App 极少用这个接口查自己签名）。见 README 覆盖边界。
-    }
-
-    private static void patchPackageInfo(PackageInfo pi) {
-        if (pi == null || sFake == null) {
-            return;
-        }
-        // 只动目标包自身。别的包（emoji 字体 Provider、同签名校验等）保持原样。
-        if (pi.packageName == null || !pi.packageName.equals(sTargetPkg)) {
-            return;
-        }
-        try {
-            pi.signatures = sFake;
-        } catch (Throwable ignored) {
-        }
-        try {
-            patchSigningInfo(pi);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    /**
-     * Android 9+ 走 SigningInfo。App 可能读 getApkContentsSigners() 或
-     * getSigningCertificateHistory()，两者分别对应 SigningDetails 里两个不同的
-     * Signature[] 字段 —— 所以按类型扫，把所有 Signature[] 字段一起换掉。
-     */
-    private static void patchSigningInfo(PackageInfo pi) {
-        if (Build.VERSION.SDK_INT < 28) {
-            return;
-        }
-        Object signingInfo;
-        try {
-            signingInfo = pi.signingInfo;
-        } catch (Throwable t) {
-            return;
-        }
-        if (signingInfo == null) {
-            return;
-        }
-
-        Class<?> clsSigningDetails;
-        try {
-            clsSigningDetails = Class.forName("android.content.pm.SigningDetails");
-        } catch (Throwable t) {
-            return;
-        }
-
-        Field fieldDetails = findFieldByType(signingInfo.getClass(), clsSigningDetails);
-        if (fieldDetails == null) {
-            return;
-        }
-        Object details;
-        try {
-            fieldDetails.setAccessible(true);
-            details = fieldDetails.get(signingInfo);
-        } catch (Throwable t) {
-            return;
-        }
-        if (details == null) {
-            return;
-        }
-
-        replaceAllSignatureArrays(details, clsSigningDetails);
-    }
-
-    /**
-     * 把 owner 类（含父类）里所有 Signature[] 字段都替换成 sFake。
-     *
-     * 为什么是「所有」而不是「叫 signatures 那个」：
-     *   SigningDetails.signatures             → getApkContentsSigners()
-     *   SigningDetails.pastSigningCertificates → getSigningCertificateHistory()
-     * 只换前者时，hasMultipleSigners() 为 false（我们只放 1 个签名）会让
-     * getSigningCertificateHistory() 走到后者，读到的是原版之外的旧值 ——
-     * 表现为「某些 App 的哈希比对用 history 就过不去」。
-     */
-    private static void replaceAllSignatureArrays(Object owner, Class<?> start) {
-        Class<?> c = start;
-        while (c != null && c != Object.class) {
-            Field[] fields;
-            try {
-                fields = c.getDeclaredFields();
-            } catch (Throwable t) {
-                c = c.getSuperclass();
-                continue;
-            }
-            for (int i = 0; i < fields.length; i++) {
-                Field f = fields[i];
-                if (f.getType() != Signature[].class) {
-                    continue;
-                }
-                try {
-                    f.setAccessible(true);
-                    f.set(owner, sFake);
-                } catch (Throwable ignored) {
-                }
-            }
-            c = c.getSuperclass();
-        }
-    }
-
-    // ───────────────────────── 工具：按类型找字段 ─────────────────────────
-
-    /**
-     * 【兼容性核心】按字段「类型」查找，不按名字。
-     *
-     * 历史教训（对照 SRPatch / ApkSignatureKillerEx）：它们都硬编码
-     * sPackageManager / mPackageManager / mCreators，Android 改一次名就整体失效，
-     * 而且失效方式是「不报错，只是没生效」，极难排查。
-     */
-    private static Field findFieldByType(Class<?> owner, Class<?> type) {
-        Class<?> c = owner;
-        while (c != null && c != Object.class) {
-            Field[] fields;
-            try {
-                fields = c.getDeclaredFields();
-            } catch (Throwable t) {
-                c = c.getSuperclass();
-                continue;
-            }
-            for (int i = 0; i < fields.length; i++) {
-                if (fields[i].getType() == type) {
-                    return fields[i];
-                }
-            }
-            c = c.getSuperclass();
-        }
-        return null;
+        Log.i(TAG, "payload dex 已设为只读: canWrite=" + out.canWrite());
     }
 }

@@ -20,15 +20,19 @@ RELAY_TOKEN=<token> python3 scripts/trigger_build.py app.apk \
 对应 `.github/workflows/uncheck.yml`。卡片定义在 `configs/v2/config-schema.json`
 （v1 是加固，互不影响）。
 
-### 本地（Termux / Linux）
+### 本地（Termux / Linux）—— 完全离线，不需要云端
 
 ```bash
-# 一条命令
+# 一条命令（纯本地：apktool + d8，不需要 NDK、不需要网络）
 bash scripts/uncheck/uncheck.sh in.apk out-unsigned.apk --uncheck
 
 # 然后自己签
 apksigner sign --ks my.jks --out final.apk out-unsigned.apk
 ```
+
+本地能跑全套的原因：本模块只改 dex + Manifest，**不需要 NDK 编译**
+（`payload.dex` 是预先编好入 git 的，见 `payload/build.sh`）。
+这与加固流水线不同 —— 那边要编 so，必须云端。
 
 依赖：`java`（JDK 17+）、`tools/apktool.jar`（仓库自带）、
 `scripts/string-enc/tools/d8.jar`（仓库自带）、`android.jar`（`SIGFIX_ANDROID_JAR`
@@ -36,6 +40,30 @@ apksigner sign --ks my.jks --out final.apk out-unsigned.apk
 `zipalign`（可选，找不到会明确警告而非静默）。
 
 ---
+
+## 挂载点：Application（最早）
+
+改了 `AndroidManifest.xml` 的 `android:name` 指向 `SigFixApp`，理由与时序有关：
+
+```
+ContentProvider.onCreate      ← 最早
+Application.attachBaseContext ← 我们挂在这里（SigFixApp）
+Application.onCreate
+Activity.onCreate             ← 只挂这里会漏掉上面三种
+```
+
+`SigFixApp` 不是"替换"原 Application，而是**代理**：
+
+1. `attachBaseContext` 里先装 hook（早于原 Application 初始化）
+2. 反射创建**原来的** Application 实例（无参构造 + `Application.attach`）
+3. 清零它的 `mBase`，再调它自己的 `attachBaseContext`（原初始化逻辑完整执行）
+4. 替换 `ActivityThread.mInitialApplication`，之后回调都落到原实例
+5. `onCreate` 转发给原实例
+
+**为什么不学 MT 改父类**：MT 把原类的 `extends Application` 改成
+`extends KillerApplication`，Manifest 不动。缺点是原类若继承
+`TinkerApplication` / `MultiDexApplication`，换父类等于删掉那些逻辑，
+App 起不来。代理链保住了原继承关系与全部初始化逻辑。
 
 ## 原理：改「系统返回值」，不改 App 代码
 

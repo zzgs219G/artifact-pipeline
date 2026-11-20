@@ -177,7 +177,13 @@ def run(in_apk, out_apk, keep_work=None, api=30):
         # 1) 解包（不带 -r：需要文本 Manifest 供注入器解析）
         print('==> 解包')
         r = subprocess.run(
-            ['java', '-jar', APKTOOL, 'd', '-f', '-o', decompiled, in_apk],
+            # -r：不反编译资源，**Manifest 保持二进制**。
+            # 必须保持二进制的原因：我们要用 axml_edit 改写 android:name，
+            # 它只能处理 AXML；apktool 解成文本后还得编回去，而本地没有可用的
+            # aapt2（实测 Termux 下 apktool b 会报 aapt2 wrapper 错误）。
+            # 代价：注入器不能用正则读文本 Manifest，改用 axml_edit.parse_manifest
+            # 直接解析二进制。
+            ['java', '-jar', APKTOOL, 'd', '-r', '-f', '-o', decompiled, in_apk],
             capture_output=True, text=True)
         if r.returncode != 0 or not os.path.isdir(decompiled):
             raise RuntimeError(f'apktool 解包失败:\n{r.stdout}\n{r.stderr}')
@@ -191,51 +197,129 @@ def run(in_apk, out_apk, keep_work=None, api=30):
         if r.returncode != 0:
             raise RuntimeError(f'注入失败:\n{r.stderr}')
 
-        # 3) 找出被注入的 smali 目录（载荷落在哪个就重编哪个）
-        injected_dirs = []
+        # 3) 找出「本次被改过的」smali 目录 —— 全部要重新汇编。
+        #
+        # ⚠️ 这是本模块最严重的一处 bug（2026-11-21 真机实测暴露）：
+        #   原实现只汇编「载荷类所在目录」（inject.py 新建的 smali_classesN/），
+        #   而 inject.py 同时还会往**原有 smali 目录**里的 LAUNCHER/Application
+        #   插调用。那些被插了调用点的目录没有被重新汇编，于是产物里：
+        #     · classes.dex  = 原包未修改的旧版本（没有 invoke）
+        #     · classes2.dex = 载荷类（没人调用它）
+        #   → 载荷完整躺在 APK 里，但永远不会被执行，校验照旧通过/照旧弹警告。
+        #   症状极具迷惑性：注入器日志显示「注入 1 个调用点」，
+        #   产物自检显示「载荷在位」，装机后却完全没效果。
+        #
+        #   修法：按「注入标记」而不是按「载荷目录」来判定哪些目录需要重编。
+        #   inject.py 在插调用点的同时写了 CALL_MARKER，用它做唯一判据。
+        MARKER = '# nc-uncheck-call'
+        changed_dirs = []
         for entry in sorted(os.listdir(decompiled)):
             if not SMALI_DIR_RE.match(entry):
                 continue
-            p = os.path.join(decompiled, entry, 'com', 'nc', 'uncheck')
-            if os.path.isdir(p):
-                injected_dirs.append(entry)
-        if not injected_dirs:
-            raise RuntimeError('注入后找不到载荷所在 smali 目录（注入逻辑有 bug）')
-        if len(injected_dirs) > 1:
-            raise RuntimeError(f'载荷跨多个 dex 目录，不支持: {injected_dirs}')
-        injected_dir = injected_dirs[0]
-        dex_name = 'classes.dex' if injected_dir == 'smali' \
-            else 'classes' + injected_dir[len('smali_classes'):] + '.dex'
-        print(f'==> 载荷落在 {injected_dir}/ → {dex_name}')
+            base = os.path.join(decompiled, entry)
+            hit = False
+            for root, _dirs, files in os.walk(base):
+                for fn in files:
+                    if not fn.endswith('.smali'):
+                        continue
+                    with open(os.path.join(root, fn), encoding='utf-8', errors='ignore') as f:
+                        if MARKER in f.read():
+                            hit = True
+                            break
+                if hit:
+                    break
+            # 载荷目录即使没有标记也要重编（它整个是新增的）
+            if not hit and os.path.isdir(os.path.join(base, 'com', 'nc', 'uncheck')):
+                hit = True
+            if hit:
+                changed_dirs.append(entry)
 
-        # 4) 汇编该目录
-        print('==> 汇编 smali')
-        new_dex = os.path.join(work, dex_name)
-        print(assemble_smali(os.path.join(decompiled, injected_dir), new_dex, api))
+        if not changed_dirs:
+            raise RuntimeError(
+                '没有任何 smali 目录被改动 —— 注入没有生效，'
+                '不要产出「看着成功但什么都没做」的包')
 
-        # 5) 版本头对齐原 dex
+        payload_dirs = [d for d in changed_dirs
+                        if os.path.isdir(os.path.join(decompiled, d,
+                                                      'com', 'nc', 'uncheck'))]
+        if len(payload_dirs) != 1:
+            raise RuntimeError(f'载荷应恰好落在一个 dex 目录，实际: {payload_dirs}')
+        injected_dir = payload_dirs[0]
+
+        print(f'==> 需要重新汇编的目录: {changed_dirs}')
+        print(f'    （载荷在 {injected_dir}/，另有 {len(changed_dirs)-1} 个被插了调用点）')
+
+        # 4) 逐个汇编
+        replaced = {}          # {dex_name: built_bytes}
         with zipfile.ZipFile(in_apk) as z:
-            if dex_name not in z.namelist():
-                raise RuntimeError(
-                    f'原包里没有 {dex_name}，但注入落点是 {injected_dir}/。\n'
-                    f'  这是「新建 dex」场景，本版未实现（需把新 dex 命名为 n+1 并追加）。')
-            orig_dex = z.read(dex_name)
-        _, orig_ver = read_dex_version(orig_dex)
-        with open(new_dex, 'rb') as f:
-            built = f.read()
-        _, built_ver = read_dex_version(built)
-        if built_ver != orig_ver:
-            built = patch_dex_version(built, orig_ver)
-            with open(new_dex, 'wb') as f:
-                f.write(built)
-            print(f'==> dex 版本头 {built_ver:03d} → {orig_ver:03d}（与原始一致）')
-        else:
-            print(f'==> dex 版本头 {built_ver:03d}（与原始一致，无需改）')
+            src_names = z.namelist()
+            orig_dexes = [n for n in src_names
+                          if n.startswith('classes') and n.endswith('.dex')]
+            if not orig_dexes:
+                raise RuntimeError('原包里没有任何 classes*.dex，不是可处理的 APK')
+            ref_ver = read_dex_version(z.read(sorted(orig_dexes)[0]))[1]
 
-        # 6) 组装
+        print('==> 汇编 smali')
+        for d in changed_dirs:
+            dex_name = 'classes.dex' if d == 'smali' \
+                else 'classes' + d[len('smali_classes'):] + '.dex'
+            out = os.path.join(work, dex_name)
+            print(f'  · {d}/ → {dex_name}')
+            print('    ' + assemble_smali(os.path.join(decompiled, d), out, api))
+
+            with open(out, 'rb') as f:
+                built = f.read()
+            _, built_ver = read_dex_version(built)
+            if built_ver != ref_ver:
+                built = patch_dex_version(built, ref_ver)
+                print(f'    dex 版本头 {built_ver:03d} → {ref_ver:03d}（与原包一致）')
+            replaced[dex_name] = built
+
+        # 6) 投放 payload.dex 到 assets
+        #
+        # 为什么它必须进 assets 而不是跟 smali 一起编：
+        #   payload.dex 里的类要在运行时由 DexFile(String) 让 BootClassLoader
+        #   加载，才能拿到"系统域"、反射访问隐藏 API。
+        #   如果编进 App 自己的 dex，它就是应用域，反射照样被拦
+        #   （实测 Android 17：hook 完全装不上）。
+        #   引导器 SigFix 负责在运行时把它取出来写盘再加载。
+        assets_dex = os.path.join(_HERE, 'payload', 'payload.dex')
+        if not os.path.isfile(assets_dex):
+            raise RuntimeError(
+                f'缺 payload.dex: {assets_dex}\n'
+                f'  先跑 bash scripts/uncheck/payload/build.sh')
+        with open(assets_dex, 'rb') as f:
+            payload_bytes = f.read()
+        if payload_bytes[:4] != b'dex\n':
+            raise RuntimeError('payload.dex magic 非法')
+        replaced['assets/nc_sigfix/payload.dex'] = payload_bytes
+        print(f'==> 投放 assets/nc_sigfix/payload.dex（{len(payload_bytes)} B）')
+
+        # 6b) 把解包目录里**改写过的 AndroidManifest.xml** 写回产物。
+        #
+        # ⚠️ 这一步漏了会怎样（实测踩过）：签名后的包里 Manifest 仍是原内容，
+        #    系统照旧实例化原 Application，我们的 SigFixApp 形同虚设，
+        #    日志里完全没有 SigFixApp 的输出，只有注入的 onCreate 在跑。
+        #    inspect 产物时表现为 get-app-name 返回原类名。
+        mf = os.path.join(decompiled, 'AndroidManifest.xml')
+        if not os.path.isfile(mf):
+            raise RuntimeError(f'解包目录里没有 AndroidManifest.xml: {mf}')
+        with open(mf, 'rb') as f:
+            mf_bytes = f.read()
+        if mf_bytes[:2] != b'\x03\x00':
+            raise RuntimeError(
+                '解包出的 AndroidManifest.xml 不是二进制 AXML。\n'
+                '  改 Manifest 的流程要求 apktool 解包时带 -r（保持二进制）。')
+        replaced['AndroidManifest.xml'] = mf_bytes
+        print(f'==> 写回改写后的 AndroidManifest.xml（{len(mf_bytes)} B）')
+
+        # 7) 组装
         print('==> 组装 APK')
         tmp_apk = os.path.join(work, 'aligned_in.apk')
-        rebuild_apk(in_apk, tmp_apk, {dex_name: built})
+        rebuild_apk(in_apk, tmp_apk, replaced)
+        for name in sorted(replaced):
+            kind = '替换' if name in src_names else '新增'
+            print(f'    {kind} {name}（{len(replaced[name])} B）')
 
         # 7) 对齐
         used = zipalign(tmp_apk, out_apk)

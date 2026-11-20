@@ -64,26 +64,33 @@ import zlib
 apk = sys.argv[1]
 with zipfile.ZipFile(apk) as z:
     names = z.namelist()
-    if 'classes.dex' not in names:
-        print('❌ 产物缺 classes.dex', file=sys.stderr)
+    dexes = sorted(n for n in names if n.startswith('classes') and n.endswith('.dex'))
+    if not dexes:
+        print('❌ 产物里没有任何 classes*.dex', file=sys.stderr)
         sys.exit(1)
-    dex = z.read('classes.dex')
+    # 载荷在新建的 dex 里（inject.py 强制 n+1），扫所有 dex 找它
+    found_in = None
+    for n in dexes:
+        blob = z.read(n)
+        if blob[:4] != b'dex\n':
+            print(f'❌ {n} magic 非法', file=sys.stderr)
+            sys.exit(1)
+        ck, = struct.unpack_from('<I', blob, 8)
+        if ck != (zlib.adler32(blob[12:]) & 0xFFFFFFFF):
+            print(f'❌ {n} checksum 不自洽', file=sys.stderr)
+            sys.exit(1)
+        if blob[12:32] != hashlib.sha1(blob[32:]).digest():
+            print(f'❌ {n} SHA-1 签名不自洽', file=sys.stderr)
+            sys.exit(1)
+        if b'nc/uncheck/SigFix' in blob and found_in is None:
+            found_in = n
 
-if dex[:4] != b'dex\n':
-    print('❌ classes.dex magic 非法', file=sys.stderr)
-    sys.exit(1)
-ck, = struct.unpack_from('<I', dex, 8)
-if ck != (zlib.adler32(dex[12:]) & 0xFFFFFFFF):
-    print('❌ dex checksum 不自洽', file=sys.stderr)
-    sys.exit(1)
-if dex[12:32] != hashlib.sha1(dex[32:]).digest():
-    print('❌ dex SHA-1 签名不自洽', file=sys.stderr)
-    sys.exit(1)
-if b'nc/uncheck/SigFix' not in dex:
-    print('❌ dex 里找不到载荷类，注入未生效', file=sys.stderr)
+if found_in is None:
+    print('❌ 所有 dex 里都找不到载荷类，注入未生效', file=sys.stderr)
     sys.exit(1)
 
-print(f'✅ dex 结构合法，载荷在位，版本 {dex[4:7].decode()}')
+print(f'✅ {len(dexes)} 个 dex 结构均合法，载荷在 {found_in}')
+print(f'   dex 清单: {", ".join(dexes)}')
 PY
 
 log_info "完成: $OUT_APK"
