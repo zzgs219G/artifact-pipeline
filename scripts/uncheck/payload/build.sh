@@ -62,15 +62,15 @@ trap 'rm -rf "$WORK"' EXIT
 echo "==> javac (android.jar = $ANDROID_JAR)"
 mkdir -p "$WORK/src/com/nc/uncheck" "$WORK/classes"
 # 只在临时副本里替换占位符，仓库源码保持占位符形态
-sed "s|__NC_SIGFIX_CERT_B64__|${SENTINEL}|" "$SRC_BOOT" > "$WORK/src/com/nc/uncheck/SigFix.java"
+cp "$SRC_BOOT" "$WORK/src/com/nc/uncheck/SigFix.java"
 # 其余源文件原样拷过去（SigFixImpl / ArtProbe / Probe ... 新增文件自动纳入）
 for f in "$_HERE"/src/com/nc/uncheck/*.java; do
   b=$(basename "$f")
   [ "$b" = "SigFix.java" ] && continue
   cp "$f" "$WORK/src/com/nc/uncheck/$b"
 done
-grep -q "\"${SENTINEL}\"" "$WORK/src/com/nc/uncheck/SigFix.java" \
-  || { echo "❌ 哨兵替换失败: SigFix.java 的 CERT_B64 声明行形态变了" >&2; exit 1; }
+# 证书改为运行时从 assets/nc_sigfix/sigfix.json 读取，dex 里不再烘焙任何
+# 目标相关数据 —— dex 因此是**静态资产**，可入 git、可下载、可缓存。
 
 javac -source 8 -target 8 -encoding UTF-8 \
       -bootclasspath "$ANDROID_JAR" -cp "$ANDROID_JAR" \
@@ -163,10 +163,6 @@ for p in boot_files:
                 and '.class public Lcom/nc/uncheck/SigFixApp;' not in t:
             pass   # 类声明行格式由 d8 决定，不强校验
     if base == 'SigFix.smali':
-        if sentinel not in t:
-            raise SystemExit(
-                '❌ SigFix.smali 里找不到哨兵证书串。\n'
-                '   d8 可能把 CERT_B64 优化掉了，检查它是否仍被 install() 读取。')
         if 'method public static install(Landroid/content/Context;)V' not in t:
             raise SystemExit('❌ SigFix.smali 缺少 install(Landroid/content/Context;)V')
     open(p, 'w', encoding='utf-8').write(t)

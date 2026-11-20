@@ -2,9 +2,13 @@
 .super Landroid/app/Application;
 
 # static fields
-.field private static final ORIGINAL_APP:Ljava/lang/String; = "__NC_ORIGINAL_APP__"
+.field private static final CONFIG_ASSET:Ljava/lang/String; = "nc_sigfix/sigfix.json"
 
 .field private static final TAG:Ljava/lang/String; = "SigFixApp"
+
+.field static sCertB64:Ljava/lang/String; = ""
+
+.field private static sOriginalApp:Ljava/lang/String; = ""
 
 # instance fields
 .field private mBase:Landroid/content/Context;
@@ -12,6 +16,12 @@
 .field private mOriginal:Landroid/app/Application;
 
 # direct methods
+.method static constructor <clinit>()V
+    .locals 0
+
+    return-void
+.end method
+
 .method public constructor <init>()V
     .locals 0
 
@@ -171,25 +181,27 @@
         }
     .end annotation
 
-    const-string v0, "__"
+    sget-object v0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
 
-    const-string v1, "__NC_ORIGINAL_APP__"
+    const-string v1, "SigFixApp"
 
-    invoke-virtual {v1, v0}, Ljava/lang/String;->startsWith(Ljava/lang/String;)Z
+    if-eqz v0, :cond_2
+
+    invoke-virtual {v0}, Ljava/lang/String;->isEmpty()Z
 
     move-result v0
 
-    const-string v2, "SigFixApp"
-
     if-nez v0, :cond_2
 
-    const-class v0, Lcom/nc/uncheck/SigFixApp;
+    sget-object v0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
 
-    invoke-virtual {v0}, Ljava/lang/Class;->getName()Ljava/lang/String;
+    const-class v2, Lcom/nc/uncheck/SigFixApp;
 
-    move-result-object v0
+    invoke-virtual {v2}, Ljava/lang/Class;->getName()Ljava/lang/String;
 
-    invoke-virtual {v1, v0}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
+    move-result-object v2
+
+    invoke-virtual {v0, v2}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
 
     move-result v0
 
@@ -198,40 +210,60 @@
     goto :goto_1
 
     :cond_0
+    sget-object v0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
+
     invoke-virtual {p1}, Landroid/content/Context;->getClassLoader()Ljava/lang/ClassLoader;
 
-    move-result-object v0
+    move-result-object v2
 
     const/4 v3, 0x0
 
-    invoke-static {v1, v3, v0}, Ljava/lang/Class;->forName(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;
+    invoke-static {v0, v3, v2}, Ljava/lang/Class;->forName(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;
 
     move-result-object v0
 
-    const-class v1, Landroid/app/Application;
+    const-class v2, Landroid/app/Application;
 
-    invoke-virtual {v1, v0}, Ljava/lang/Class;->isAssignableFrom(Ljava/lang/Class;)Z
+    invoke-virtual {v2, v0}, Ljava/lang/Class;->isAssignableFrom(Ljava/lang/Class;)Z
 
-    move-result v1
+    move-result v2
 
-    if-nez v1, :cond_1
+    if-nez v2, :cond_1
 
-    const-string p1, "__NC_ORIGINAL_APP__ \u4e0d\u662f Application \u5b50\u7c7b\uff0c\u8df3\u8fc7"
+    new-instance p1, Ljava/lang/StringBuilder;
 
-    invoke-static {v2, p1}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+    invoke-direct {p1}, Ljava/lang/StringBuilder;-><init>()V
+
+    sget-object v0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
+
+    invoke-virtual {p1, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p1
+
+    const-string v0, " \u4e0d\u662f Application \u5b50\u7c7b\uff0c\u8df3\u8fc7"
+
+    invoke-virtual {p1, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p1
+
+    invoke-virtual {p1}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object p1
+
+    invoke-static {v1, p1}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
 
     return-void
 
     :cond_1
-    new-array v1, v3, [Ljava/lang/Class;
+    new-array v2, v3, [Ljava/lang/Class;
 
-    invoke-virtual {v0, v1}, Ljava/lang/Class;->getDeclaredConstructor([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;
+    invoke-virtual {v0, v2}, Ljava/lang/Class;->getDeclaredConstructor([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;
 
     move-result-object v0
 
-    new-array v1, v3, [Ljava/lang/Object;
+    new-array v2, v3, [Ljava/lang/Object;
 
-    invoke-virtual {v0, v1}, Ljava/lang/reflect/Constructor;->newInstance([Ljava/lang/Object;)Ljava/lang/Object;
+    invoke-virtual {v0, v2}, Ljava/lang/reflect/Constructor;->newInstance([Ljava/lang/Object;)Ljava/lang/Object;
 
     move-result-object v0
 
@@ -248,7 +280,7 @@
 
     const-string p1, "\u5df2\u8c03\u7528\u539f Application.attachBaseContext"
 
-    invoke-static {v2, p1}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+    invoke-static {v1, p1}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
     :try_end_0
     .catchall {:try_start_0 .. :try_end_0} :catchall_0
 
@@ -257,16 +289,30 @@
     :catchall_0
     move-exception p1
 
-    const-string v1, "\u8c03\u7528\u539f Application.attachBaseContext \u5931\u8d25\uff08\u5176\u5185\u90e8\u521d\u59cb\u5316\u53ef\u80fd\u7f3a\u5931\uff09"
+    const-string v2, "\u8c03\u7528\u539f Application.attachBaseContext \u5931\u8d25\uff08\u5176\u5185\u90e8\u521d\u59cb\u5316\u53ef\u80fd\u7f3a\u5931\uff09"
 
-    invoke-static {v2, v1, p1}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+    invoke-static {v1, v2, p1}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
 
     :goto_0
     invoke-direct {p0, v0}, Lcom/nc/uncheck/SigFixApp;->replaceInitialApplication(Landroid/app/Application;)V
 
-    const-string p1, "\u5df2\u63a5\u7ba1\u539f Application: __NC_ORIGINAL_APP__"
+    new-instance p1, Ljava/lang/StringBuilder;
 
-    invoke-static {v2, p1}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+    const-string v0, "\u5df2\u63a5\u7ba1\u539f Application: "
+
+    invoke-direct {p1, v0}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    sget-object v0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
+
+    invoke-virtual {p1, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p1
+
+    invoke-virtual {p1}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object p1
+
+    invoke-static {v1, p1}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
 
     return-void
 
@@ -274,7 +320,7 @@
     :goto_1
     const-string p1, "\u65e0\u539f Application \u9700\u8981\u63a5\u7ba1\uff08\u539f\u5305\u6ca1\u6709 android:name\uff09"
 
-    invoke-static {v2, p1}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+    invoke-static {v1, p1}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
 
     return-void
 .end method
@@ -440,6 +486,209 @@
     invoke-static {p2, v0, p1}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
 
     return-void
+.end method
+
+.method private static loadConfig(Landroid/content/Context;)V
+    .locals 6
+
+    const-string v0, ""
+
+    const-string v1, "SigFixApp"
+
+    const/4 v2, 0x0
+
+    :try_start_0
+    invoke-virtual {p0}, Landroid/content/Context;->getAssets()Landroid/content/res/AssetManager;
+
+    move-result-object p0
+
+    const-string v3, "nc_sigfix/sigfix.json"
+
+    invoke-virtual {p0, v3}, Landroid/content/res/AssetManager;->open(Ljava/lang/String;)Ljava/io/InputStream;
+
+    move-result-object v2
+
+    new-instance p0, Ljava/io/ByteArrayOutputStream;
+
+    invoke-direct {p0}, Ljava/io/ByteArrayOutputStream;-><init>()V
+
+    const/16 v3, 0x1000
+
+    new-array v3, v3, [B
+
+    :goto_0
+    invoke-virtual {v2, v3}, Ljava/io/InputStream;->read([B)I
+
+    move-result v4
+
+    if-lez v4, :cond_0
+
+    const/4 v5, 0x0
+
+    invoke-virtual {p0, v3, v5, v4}, Ljava/io/ByteArrayOutputStream;->write([BII)V
+
+    goto :goto_0
+
+    :cond_0
+    new-instance v3, Ljava/lang/String;
+
+    invoke-virtual {p0}, Ljava/io/ByteArrayOutputStream;->toByteArray()[B
+
+    move-result-object p0
+
+    const-string v4, "UTF-8"
+
+    invoke-direct {v3, p0, v4}, Ljava/lang/String;-><init>([BLjava/lang/String;)V
+
+    new-instance p0, Lorg/json/JSONObject;
+
+    invoke-direct {p0, v3}, Lorg/json/JSONObject;-><init>(Ljava/lang/String;)V
+
+    const-string v3, "cert"
+
+    invoke-virtual {p0, v3, v0}, Lorg/json/JSONObject;->optString(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+
+    move-result-object v3
+
+    sput-object v3, Lcom/nc/uncheck/SigFixApp;->sCertB64:Ljava/lang/String;
+
+    const-string v3, "originalApp"
+
+    invoke-virtual {p0, v3, v0}, Lorg/json/JSONObject;->optString(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+
+    move-result-object p0
+
+    sput-object p0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
+
+    new-instance p0, Ljava/lang/StringBuilder;
+
+    invoke-direct {p0}, Ljava/lang/StringBuilder;-><init>()V
+
+    const-string v0, "\u914d\u7f6e\u5df2\u8bfb\u53d6\uff1acert "
+
+    invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p0
+
+    sget-object v0, Lcom/nc/uncheck/SigFixApp;->sCertB64:Ljava/lang/String;
+
+    invoke-virtual {v0}, Ljava/lang/String;->isEmpty()Z
+
+    move-result v0
+
+    if-eqz v0, :cond_1
+
+    const-string v0, "\u7f3a\u5931"
+
+    goto :goto_1
+
+    :cond_1
+    new-instance v0, Ljava/lang/StringBuilder;
+
+    invoke-direct {v0}, Ljava/lang/StringBuilder;-><init>()V
+
+    sget-object v3, Lcom/nc/uncheck/SigFixApp;->sCertB64:Ljava/lang/String;
+
+    invoke-virtual {v3}, Ljava/lang/String;->length()I
+
+    move-result v3
+
+    invoke-virtual {v0, v3}, Ljava/lang/StringBuilder;->append(I)Ljava/lang/StringBuilder;
+
+    move-result-object v0
+
+    const-string v3, " \u5b57\u7b26"
+
+    invoke-virtual {v0, v3}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v0
+
+    invoke-virtual {v0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v0
+
+    :goto_1
+    invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p0
+
+    const-string v0, "\uff0coriginalApp="
+
+    invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p0
+
+    sget-object v0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
+
+    invoke-virtual {v0}, Ljava/lang/String;->isEmpty()Z
+
+    move-result v0
+
+    if-eqz v0, :cond_2
+
+    const-string v0, "(\u65e0)"
+
+    goto :goto_2
+
+    :cond_2
+    sget-object v0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
+
+    :goto_2
+    invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p0
+
+    invoke-virtual {p0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object p0
+
+    invoke-static {v1, p0}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+    :try_end_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_0
+
+    if-eqz v2, :cond_3
+
+    :try_start_1
+    invoke-virtual {v2}, Ljava/io/InputStream;->close()V
+    :try_end_1
+    .catchall {:try_start_1 .. :try_end_1} :catchall_1
+
+    return-void
+
+    :catchall_0
+    move-exception p0
+
+    :try_start_2
+    const-string v0, "\u8bfb\u53d6 nc_sigfix/sigfix.json \u5931\u8d25"
+
+    invoke-static {v1, v0, p0}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+    :try_end_2
+    .catchall {:try_start_2 .. :try_end_2} :catchall_2
+
+    if-eqz v2, :cond_3
+
+    :try_start_3
+    invoke-virtual {v2}, Ljava/io/InputStream;->close()V
+    :try_end_3
+    .catchall {:try_start_3 .. :try_end_3} :catchall_1
+
+    :catchall_1
+    :cond_3
+    return-void
+
+    :catchall_2
+    move-exception p0
+
+    if-eqz v2, :cond_4
+
+    :try_start_4
+    invoke-virtual {v2}, Ljava/io/InputStream;->close()V
+    :try_end_4
+    .catchall {:try_start_4 .. :try_end_4} :catchall_3
+
+    :catchall_3
+    :cond_4
+    throw p0
 .end method
 
 .method private newApplicationViaInstrumentation(Ljava/lang/Class;Landroid/content/Context;)Landroid/app/Application;
@@ -726,6 +975,8 @@
     invoke-static {v0, v2, v1}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
 
     :goto_0
+    invoke-static {p1}, Lcom/nc/uncheck/SigFixApp;->loadConfig(Landroid/content/Context;)V
+
     :try_start_1
     invoke-direct {p0, p1}, Lcom/nc/uncheck/SigFixApp;->createOriginalApplication(Landroid/content/Context;)V
     :try_end_1
@@ -747,27 +998,41 @@
 .method public onCreate()V
     .locals 3
 
+    const-string v0, "\u5df2\u8f6c\u53d1 onCreate \u7ed9 "
+
     invoke-super {p0}, Landroid/app/Application;->onCreate()V
 
-    iget-object v0, p0, Lcom/nc/uncheck/SigFixApp;->mOriginal:Landroid/app/Application;
+    iget-object v1, p0, Lcom/nc/uncheck/SigFixApp;->mOriginal:Landroid/app/Application;
 
-    const-string v1, "SigFixApp"
+    const-string v2, "SigFixApp"
 
-    if-nez v0, :cond_0
+    if-nez v1, :cond_0
 
     const-string v0, "\u6ca1\u6709\u539f Application\uff0c\u53ea\u8dd1\u6211\u4eec\u7684\u521d\u59cb\u5316"
 
-    invoke-static {v1, v0}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+    invoke-static {v2, v0}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
 
     return-void
 
     :cond_0
     :try_start_0
-    invoke-virtual {v0}, Landroid/app/Application;->onCreate()V
+    invoke-virtual {v1}, Landroid/app/Application;->onCreate()V
 
-    const-string v0, "\u5df2\u8f6c\u53d1 onCreate \u7ed9 __NC_ORIGINAL_APP__"
+    new-instance v1, Ljava/lang/StringBuilder;
 
-    invoke-static {v1, v0}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+    invoke-direct {v1, v0}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    sget-object v0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
+
+    invoke-virtual {v1, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v0
+
+    invoke-virtual {v0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v0
+
+    invoke-static {v2, v0}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
     :try_end_0
     .catchall {:try_start_0 .. :try_end_0} :catchall_0
 
@@ -776,9 +1041,9 @@
     :catchall_0
     move-exception v0
 
-    const-string v2, "\u8f6c\u53d1 onCreate \u5931\u8d25"
+    const-string v1, "\u8f6c\u53d1 onCreate \u5931\u8d25"
 
-    invoke-static {v1, v2, v0}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+    invoke-static {v2, v1, v0}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
 
     return-void
 .end method

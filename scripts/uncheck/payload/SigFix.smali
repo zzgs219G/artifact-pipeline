@@ -2,7 +2,9 @@
 .super Ljava/lang/Object;
 
 # static fields
-.field private static final CERT_B64:Ljava/lang/String; = "NCSIGFIXSENTINELCERTB64PLACEHOLDER0000000000000000000000000000000"
+.field private static CERT_B64:Ljava/lang/String; = null
+
+.field private static final CONFIG_ASSET:Ljava/lang/String; = "nc_sigfix/sigfix.json"
 
 .field private static final PAYLOAD_ASSET:Ljava/lang/String; = "nc_sigfix/payload.dex"
 
@@ -15,6 +17,12 @@
 .field private static volatile sDone:Z
 
 # direct methods
+.method static constructor <clinit>()V
+    .locals 0
+
+    return-void
+.end method
+
 .method private constructor <init>()V
     .locals 0
 
@@ -351,7 +359,7 @@
 
     aput-object p0, v2, v7
 
-    const-string p0, "NCSIGFIXSENTINELCERTB64PLACEHOLDER0000000000000000000000000000000"
+    sget-object p0, Lcom/nc/uncheck/SigFix;->CERT_B64:Ljava/lang/String;
 
     aput-object p0, v2, v4
 
@@ -582,23 +590,37 @@
     return-void
 
     :cond_2
-    const-string v0, "NCSIGFIXSENTINELCERTB64PLACEHOLDER0000000000000000000000000000000"
-
-    const-string v2, "__"
-
-    invoke-virtual {v0, v2}, Ljava/lang/String;->startsWith(Ljava/lang/String;)Z
-
-    move-result v0
+    sget-object v0, Lcom/nc/uncheck/SigFix;->CERT_B64:Ljava/lang/String;
 
     if-eqz v0, :cond_3
 
-    const-string p0, "\u8bc1\u4e66\u5360\u4f4d\u7b26\u672a\u88ab\u66ff\u6362\uff08\u6ce8\u5165\u5668\u6ca1\u70d8\u7119\uff09\uff0c\u653e\u5f03"
+    invoke-virtual {v0}, Ljava/lang/String;->isEmpty()Z
 
-    invoke-static {v1, p0}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;)I
+    move-result v0
 
-    return-void
+    if-eqz v0, :cond_4
 
     :cond_3
+    invoke-static {p0}, Lcom/nc/uncheck/SigFix;->readCertFromConfig(Landroid/content/Context;)Ljava/lang/String;
+
+    move-result-object v0
+
+    sput-object v0, Lcom/nc/uncheck/SigFix;->CERT_B64:Ljava/lang/String;
+
+    :cond_4
+    sget-object v0, Lcom/nc/uncheck/SigFix;->CERT_B64:Ljava/lang/String;
+
+    if-eqz v0, :cond_6
+
+    invoke-virtual {v0}, Ljava/lang/String;->isEmpty()Z
+
+    move-result v0
+
+    if-eqz v0, :cond_5
+
+    goto :goto_1
+
+    :cond_5
     :try_start_0
     invoke-virtual {p0}, Landroid/content/Context;->getCodeCacheDir()Ljava/io/File;
     :try_end_0
@@ -658,4 +680,177 @@
     invoke-static {v1, p0}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
 
     return-void
+
+    :cond_6
+    :goto_1
+    const-string p0, "\u6ca1\u6709\u53ef\u7528\u8bc1\u4e66\uff08sigfix.json \u7f3a\u5931\u6216\u65e0 cert \u5b57\u6bb5\uff09\uff0c\u653e\u5f03"
+
+    invoke-static {v1, p0}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method
+
+.method private static readCertFromConfig(Landroid/content/Context;)Ljava/lang/String;
+    .locals 6
+
+    const-string v0, ""
+
+    const-string v1, "SigFix"
+
+    const/4 v2, 0x0
+
+    :try_start_0
+    invoke-virtual {p0}, Landroid/content/Context;->getAssets()Landroid/content/res/AssetManager;
+
+    move-result-object p0
+
+    const-string v3, "nc_sigfix/sigfix.json"
+
+    invoke-virtual {p0, v3}, Landroid/content/res/AssetManager;->open(Ljava/lang/String;)Ljava/io/InputStream;
+
+    move-result-object v2
+
+    new-instance p0, Ljava/io/ByteArrayOutputStream;
+
+    invoke-direct {p0}, Ljava/io/ByteArrayOutputStream;-><init>()V
+
+    const/16 v3, 0x1000
+
+    new-array v3, v3, [B
+
+    :goto_0
+    invoke-virtual {v2, v3}, Ljava/io/InputStream;->read([B)I
+
+    move-result v4
+
+    if-lez v4, :cond_0
+
+    const/4 v5, 0x0
+
+    invoke-virtual {p0, v3, v5, v4}, Ljava/io/ByteArrayOutputStream;->write([BII)V
+
+    goto :goto_0
+
+    :cond_0
+    new-instance v3, Lorg/json/JSONObject;
+
+    new-instance v4, Ljava/lang/String;
+
+    invoke-virtual {p0}, Ljava/io/ByteArrayOutputStream;->toByteArray()[B
+
+    move-result-object p0
+
+    const-string v5, "UTF-8"
+
+    invoke-direct {v4, p0, v5}, Ljava/lang/String;-><init>([BLjava/lang/String;)V
+
+    invoke-direct {v3, v4}, Lorg/json/JSONObject;-><init>(Ljava/lang/String;)V
+
+    const-string p0, "cert"
+
+    invoke-virtual {v3, p0, v0}, Lorg/json/JSONObject;->optString(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+
+    move-result-object p0
+
+    new-instance v3, Ljava/lang/StringBuilder;
+
+    invoke-direct {v3}, Ljava/lang/StringBuilder;-><init>()V
+
+    const-string v4, "\u4ece sigfix.json \u8bfb\u5230\u8bc1\u4e66: "
+
+    invoke-virtual {v3, v4}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v3
+
+    invoke-virtual {p0}, Ljava/lang/String;->isEmpty()Z
+
+    move-result v4
+
+    if-eqz v4, :cond_1
+
+    const-string v4, "\u7a7a"
+
+    goto :goto_1
+
+    :cond_1
+    new-instance v4, Ljava/lang/StringBuilder;
+
+    invoke-direct {v4}, Ljava/lang/StringBuilder;-><init>()V
+
+    invoke-virtual {p0}, Ljava/lang/String;->length()I
+
+    move-result v5
+
+    invoke-virtual {v4, v5}, Ljava/lang/StringBuilder;->append(I)Ljava/lang/StringBuilder;
+
+    move-result-object v4
+
+    const-string v5, " \u5b57\u7b26"
+
+    invoke-virtual {v4, v5}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v4
+
+    invoke-virtual {v4}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v4
+
+    :goto_1
+    invoke-virtual {v3, v4}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v3
+
+    invoke-virtual {v3}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v3
+
+    invoke-static {v1, v3}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+    :try_end_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_1
+
+    if-eqz v2, :cond_2
+
+    :try_start_1
+    invoke-virtual {v2}, Ljava/io/InputStream;->close()V
+    :try_end_1
+    .catchall {:try_start_1 .. :try_end_1} :catchall_0
+
+    :catchall_0
+    :cond_2
+    return-object p0
+
+    :catchall_1
+    move-exception p0
+
+    :try_start_2
+    const-string v3, "\u8bfb sigfix.json \u5931\u8d25"
+
+    invoke-static {v1, v3, p0}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+    :try_end_2
+    .catchall {:try_start_2 .. :try_end_2} :catchall_3
+
+    if-eqz v2, :cond_3
+
+    :try_start_3
+    invoke-virtual {v2}, Ljava/io/InputStream;->close()V
+    :try_end_3
+    .catchall {:try_start_3 .. :try_end_3} :catchall_2
+
+    :catchall_2
+    :cond_3
+    return-object v0
+
+    :catchall_3
+    move-exception p0
+
+    if-eqz v2, :cond_4
+
+    :try_start_4
+    invoke-virtual {v2}, Ljava/io/InputStream;->close()V
+    :try_end_4
+    .catchall {:try_start_4 .. :try_end_4} :catchall_4
+
+    :catchall_4
+    :cond_4
+    throw p0
 .end method

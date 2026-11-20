@@ -52,8 +52,18 @@ public final class SigFix {
     /** 资产名：注入时由 scripts/uncheck/inject.py 放进 assets/。 */
     private static final String PAYLOAD_ASSET = "nc_sigfix/payload.dex";
 
-    /** 原版证书 DER 的 Base64，由 inject.py 在构建期替换。 */
-    private static final String CERT_B64 = "__NC_SIGFIX_CERT_B64__";
+    /**
+     * 原版证书 DER 的 Base64 —— **运行时从 assets/nc_sigfix/sigfix.json 读**，
+     * 不再烘焙进 dex。
+     *
+     * 为什么改（2026-11-21）：烘焙进 dex 需要重建字符串池（证书长度不固定，
+     * 不能原位替换），对"只消费编译好 dex"的场景不友好，且每换一个目标
+     * App 就要重编一次 dex。挪到 JSON 后 dex 变成静态资产。
+     */
+    private static final String CONFIG_ASSET = "nc_sigfix/sigfix.json";
+
+    /** 兼容旧路径：仍接受由 SigFixApp 传入的证书（它已经从 JSON 读好了）。 */
+    private static String CERT_B64 = null;
 
     private static volatile boolean sDone;
 
@@ -75,8 +85,11 @@ public final class SigFix {
             return;
         }
 
-        if (CERT_B64 == null || CERT_B64.startsWith("__")) {
-            Log.e(TAG, "证书占位符未被替换（注入器没烘焙），放弃");
+        if (CERT_B64 == null || CERT_B64.isEmpty()) {
+            CERT_B64 = readCertFromConfig(ctx);
+        }
+        if (CERT_B64 == null || CERT_B64.isEmpty()) {
+            Log.e(TAG, "没有可用证书（sigfix.json 缺失或无 cert 字段），放弃");
             return;
         }
 
@@ -175,6 +188,35 @@ public final class SigFix {
         install.setAccessible(true);
         install.invoke(null, ctx, CERT_B64);
         Log.i(TAG, "payload install() 调用完成");
+    }
+
+    /** 从 assets/nc_sigfix/sigfix.json 读 cert 字段。失败返回空串。 */
+    private static String readCertFromConfig(Context ctx) {
+        java.io.InputStream in = null;
+        try {
+            in = ctx.getAssets().open(CONFIG_ASSET);
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+            }
+            org.json.JSONObject o =
+                    new org.json.JSONObject(new String(bos.toByteArray(), "UTF-8"));
+            String c = o.optString("cert", "");
+            Log.i(TAG, "从 sigfix.json 读到证书: " + (c.isEmpty() ? "空" : c.length() + " 字符"));
+            return c;
+        } catch (Throwable t) {
+            Log.e(TAG, "读 sigfix.json 失败", t);
+            return "";
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
     }
 
     private static long assetSize(Context ctx, String name) throws Throwable {

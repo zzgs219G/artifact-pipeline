@@ -24,6 +24,7 @@ CLI 契约（与 AGENTS.md §4「模块 = 独立脚本 + <输入> <输出> [参�
 
 ⚠️ 产物未签名。装上之前必须自己签（本模块不碰 keystore）。
 """
+import json
 import os
 import re
 import shutil
@@ -197,6 +198,15 @@ def run(in_apk, out_apk, keep_work=None, api=30):
         if r.returncode != 0:
             raise RuntimeError(f'注入失败:\n{r.stderr}')
 
+        # inject.py 把自己的解析结果写成 json，供后续步骤使用
+        comp_path = os.path.join(decompiled, 'uncheck-components.json')
+        with open(comp_path, encoding='utf-8') as f:
+            comp = json.load(f)
+        cert_b64 = comp.get('certB64', '')
+        original_app_java = comp.get('originalApp', '')
+        if not cert_b64:
+            raise RuntimeError('inject.py 没返回证书（certB64 为空）')
+
         # 3) 找出「本次被改过的」smali 目录 —— 全部要重新汇编。
         #
         # ⚠️ 这是本模块最严重的一处 bug（2026-11-21 真机实测暴露）：
@@ -294,6 +304,21 @@ def run(in_apk, out_apk, keep_work=None, api=30):
             raise RuntimeError('payload.dex magic 非法')
         replaced['assets/nc_sigfix/payload.dex'] = payload_bytes
         print(f'==> 投放 assets/nc_sigfix/payload.dex（{len(payload_bytes)} B）')
+
+        # 6a) 投放配置文件：证书 + 原 Application 类名。
+        #
+        # 这些是**唯一的目标相关数据**，全部集中在这份小 JSON 里。
+        # dex 因此完全静态（不含任何证书/类名），可复用、可下载、可缓存。
+        import json as _json
+        cfg = {
+            'cert': cert_b64,
+            'originalApp': original_app_java or '',
+        }
+        cfg_bytes = _json.dumps(cfg, ensure_ascii=False).encode('utf-8')
+        replaced['assets/nc_sigfix/sigfix.json'] = cfg_bytes
+        print(f'==> 投放 assets/nc_sigfix/sigfix.json'
+              f'（cert {len(cert_b64)} 字符，originalApp='
+              f'{original_app_java or "(无)"}）')
 
         # 6b) 把解包目录里**改写过的 AndroidManifest.xml** 写回产物。
         #

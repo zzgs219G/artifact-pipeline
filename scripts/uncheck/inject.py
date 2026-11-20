@@ -783,29 +783,23 @@ def do_inject(decompiled_dir, apk_path, dry_run=False):
     os.makedirs(pkg_dir, exist_ok=True)
     print(f'✅ 落点: {target_dir}/ → com/nc/uncheck/')
 
-    # 5) 写载荷 smali，把哨兵换成真实证书
+    # 5) 写载荷 smali —— **原样写入，不做任何替换**。
+    #
+    # 证书与原 Application 类名都走 assets/nc_sigfix/sigfix.json（见第 5b 步），
+    # dex 里不含任何目标相关数据。这样 dex 是静态资产：
+    #   · 可入 git
+    #   · 可下载/缓存（ApkForge 侧）
+    #   · 改目标不用重编 dex
     written = []
     for fname in payload_files:
         with open(os.path.join(payload_dir, fname), encoding='utf-8') as f:
             text = f.read()
-        if fname.startswith('SigFixApp'):
-            if ORIGINAL_APP_PH in text:
-                text = text.replace(ORIGINAL_APP_PH,
-                                    original_app_java or SIGFIX_APP)
-        if fname == 'SigFix.smali':
-            if SENTINEL not in text:
-                raise RuntimeError(
-                    'SigFix.smali 里找不到哨兵证书串。\n'
-                    '  payload/build.sh 与 inject.py 的 SENTINEL 常量必须逐字一致。')
-            text = text.replace(SENTINEL, cert_b64)
-            if SENTINEL in text:
-                raise RuntimeError('证书替换不完整，仍有哨兵残留')
         assert_rendered(text, fname)
         out = os.path.join(pkg_dir, fname)
         with open(out, 'w', encoding='utf-8') as f:
             f.write(text)
         written.append(out)
-    print(f'✅ 写入载荷 {len(written)} 个文件（证书已烘焙）')
+    print(f'✅ 写入载荷 {len(written)} 个文件')
 
     # 6) 注入调用点
     injected = []
@@ -883,7 +877,15 @@ def do_inject(decompiled_dir, apk_path, dry_run=False):
         print(f'   · {s}')
 
     # 7) 组件标记（供 clean 精确回滚，绝不越界）
-    comp = {'payload': written, 'calls': injected, 'target_dir': target_dir}
+    comp = {
+        'payload': written,
+        'calls': injected,
+        'target_dir': target_dir,
+        # 供 run.py 写 sigfix.json 用：
+        # dex 里不烘焙这些，全部集中在 assets 的那份小 JSON 里。
+        'certB64': cert_b64,
+        'originalApp': original_app_java or '',
+    }
     with open(os.path.join(decompiled_dir, COMPONENTS_JSON), 'w', encoding='utf-8') as f:
         json.dump(comp, f, ensure_ascii=False, indent=2)
 

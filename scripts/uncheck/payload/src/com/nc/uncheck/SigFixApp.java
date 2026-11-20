@@ -50,10 +50,24 @@ public class SigFixApp extends Application {
     private static final String TAG = "SigFixApp";
 
     /**
-     * 原 Application 的完整类名。由 inject.py 在构建期烘焙进来
-     * （取自改写前的 android:name）。
+     * 可变配置全部来自 assets/nc_sigfix/sigfix.json，**dex 里一个都不存**。
+     *
+     * 为什么这样设计（2026-11-21 重构）：
+     *   原先证书 Base64 与原 Application 类名是"烘焙进 dex 的字符串常量"，
+     *   靠构建期替换 smali 里的哨兵实现。那个做法有两个硬伤：
+     *     ① 证书长度随 keystore 变（888~1152 字符），dex 字符串池要重建，
+     *        不能原位替换 —— 对"只拿得到编译好 dex"的消费者（ApkForge）不友好；
+     *     ② 每换一个目标 App 都要重新编一次 dex，dex 不再是静态资产。
+     *   改成读 JSON 后：dex 完全静态、可缓存、可下载；
+     *   所有可变数据集中在一份小文件里，改它不用碰 dex。
      */
-    private static final String ORIGINAL_APP = "__NC_ORIGINAL_APP__";
+    private static final String CONFIG_ASSET = "nc_sigfix/sigfix.json";
+
+    /** 从 sigfix.json 读到的原 Application 类名（可能为空）。 */
+    private static String sOriginalApp = "";
+
+    /** 从 sigfix.json 读到的原证书 Base64。 */
+    static String sCertB64 = "";
 
     /** 原 Application 实例。 */
     private Application mOriginal;
@@ -77,11 +91,49 @@ public class SigFixApp extends Application {
             Log.e(TAG, "hook 安装失败（不影响 App 启动）", t);
         }
 
-        // ② 创建原 Application 并接管
+        // ② 读配置（证书 + 原 Application 类名）
+        loadConfig(base);
+
+        // ③ 创建原 Application 并接管
         try {
             createOriginalApplication(base);
         } catch (Throwable t) {
             Log.e(TAG, "创建原 Application 失败（App 可能行为异常）", t);
+        }
+    }
+
+    /**
+     * 读 assets/nc_sigfix/sigfix.json：
+     *   { "cert": "<原证书 DER 的 Base64>", "originalApp": "com.x.Y" }
+     *
+     * 读不到不算致命：cert 缺失会导致签名伪造不生效（但有日志），
+     * originalApp 缺失则本类不接管任何原 Application。
+     */
+    private static void loadConfig(Context ctx) {
+        java.io.InputStream in = null;
+        try {
+            in = ctx.getAssets().open(CONFIG_ASSET);
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+            }
+            String json = new String(bos.toByteArray(), "UTF-8");
+            org.json.JSONObject o = new org.json.JSONObject(json);
+            sCertB64 = o.optString("cert", "");
+            sOriginalApp = o.optString("originalApp", "");
+            Log.i(TAG, "配置已读取：cert " + (sCertB64.isEmpty() ? "缺失" : sCertB64.length() + " 字符")
+                    + "，originalApp=" + (sOriginalApp.isEmpty() ? "(无)" : sOriginalApp));
+        } catch (Throwable t) {
+            Log.e(TAG, "读取 " + CONFIG_ASSET + " 失败", t);
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (Throwable ignored) {
+                }
+            }
         }
     }
 
@@ -97,7 +149,7 @@ public class SigFixApp extends Application {
             // 用反射调用而不是直接调：类型是 Application，但实现是原类，
             // 直接 mOriginal.onCreate() 走虚分派即可 —— 这里显式说明意图。
             mOriginal.onCreate();
-            Log.i(TAG, "已转发 onCreate 给 " + ORIGINAL_APP);
+            Log.i(TAG, "已转发 onCreate 给 " + sOriginalApp);
         } catch (Throwable t) {
             Log.e(TAG, "转发 onCreate 失败", t);
         }
@@ -110,15 +162,15 @@ public class SigFixApp extends Application {
      * 否则它内部的 getResources()/getPackageName() 等全是 null。
      */
     private void createOriginalApplication(Context base) throws Throwable {
-        if (ORIGINAL_APP == null || ORIGINAL_APP.startsWith("__")
-                || ORIGINAL_APP.equals(SigFixApp.class.getName())) {
+        if (sOriginalApp == null || sOriginalApp.isEmpty()
+                || sOriginalApp.equals(SigFixApp.class.getName())) {
             Log.i(TAG, "无原 Application 需要接管（原包没有 android:name）");
             return;
         }
 
-        Class<?> cls = Class.forName(ORIGINAL_APP, false, base.getClassLoader());
+        Class<?> cls = Class.forName(sOriginalApp, false, base.getClassLoader());
         if (!Application.class.isAssignableFrom(cls)) {
-            Log.w(TAG, ORIGINAL_APP + " 不是 Application 子类，跳过");
+            Log.w(TAG, sOriginalApp + " 不是 Application 子类，跳过");
             return;
         }
 
@@ -159,7 +211,7 @@ public class SigFixApp extends Application {
 
         // 替换 ActivityThread.mInitialApplication —— 让系统认为原实例才是真的
         replaceInitialApplication(app);
-        Log.i(TAG, "已接管原 Application: " + ORIGINAL_APP);
+        Log.i(TAG, "已接管原 Application: " + sOriginalApp);
     }
 
     private Application newApplicationViaInstrumentation(Class<?> cls, Context base)
