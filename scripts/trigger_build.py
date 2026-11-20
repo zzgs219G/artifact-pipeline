@@ -886,7 +886,7 @@ def main() -> int:
     if args.config:
         # 透传模式：给非 protect 卡片（如 configs/v2 去校验）用。
         # 为什么需要它：protect-modules.yml 的 input 叫 protect_config，
-        # 而 uncheck.yml 叫 uncheck_config —— 名字不同，写死一个就传不进去。
+        # 而另一个流水线的配置 input 若叫别的名字，写死一个就传不进去。
         # relay 侧是「向 workflow 自己问有哪些 input」的，所以只要字段名对就行。
         try:
             json.loads(args.config)

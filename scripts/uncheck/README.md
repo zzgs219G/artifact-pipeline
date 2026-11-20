@@ -13,11 +13,11 @@
 
 ```bash
 RELAY_TOKEN=<token> python3 scripts/trigger_build.py app.apk \
-    --workflow uncheck.yml \
+    --workflow protect-uncheck.yml \
     --config '{"schema_version":2,"uncheck":{"enabled":true,"pms":true,"report":true}}'
 ```
 
-对应 `.github/workflows/uncheck.yml`。卡片定义在 `configs/v2/config-schema.json`
+对应 `.github/workflows/protect-uncheck.yml`。卡片定义在 `configs/v2/config-schema.json`
 （v1 是加固，互不影响）。
 
 ### 本地（Termux / Linux）
