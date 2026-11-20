@@ -101,6 +101,9 @@ echo "    引导器收 ${#BOOT_CLASSES[@]} 个 class"
 java -cp "$D8_JAR" com.android.tools.r8.D8 --release --min-api 21 \
      --output "$WORK/dex-boot" "${BOOT_CLASSES[@]}"
 [ -f "$WORK/dex-boot/classes.dex" ] || { echo "❌ 引导器 d8 失败" >&2; exit 1; }
+# 同时把编译好的引导器 dex 作为独立产物保留：
+# ApkForge 等消费者直接拿这份 dex 塞进目标 APK（不需要 smali / 不需要回编）。
+cp "$WORK/dex-boot/classes.dex" "$OUT_DIR/boot.dex"
 
 python3 - "$WORK" <<'PY'
 import sys, zipfile, os

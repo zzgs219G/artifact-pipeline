@@ -177,6 +177,62 @@ scripts/uncheck/
 
 ---
 
+## AXML 改写的两个致命细节（真机实测）
+
+挂载 `android:name` 需要写二进制 AXML。这两点写错时的症状**完全一样**
+（系统读不到该属性、App 照旧跑原类、没有任何报错），但原因不同：
+
+### ① 属性必须插在 resourceId 升序位置，不能追加末尾
+
+`PackageParser` 解析 `<application>` 时按 framework 资源 ID 升序读，
+**遇到乱序会提前停止扫描**，后面的属性全部丢弃。
+
+`android:name` 的 ID 是 `0x01010003`，在这批属性里最小 → 必须插最前。
+对照 MT 生成的包（`JMComic3v2.1.14_kill.apk`）逐字节验证：
+
+```
+MT  : [3]  41000000 03000000 4d000000 0800 00 03 4d000000   ← 插在第 4 位
+错误: [11] ...                                              ← 追加到末尾，系统读不到
+```
+
+### ② rawValue 必须是字符串池索引，不是 NO_INDEX
+
+属性 20 字节布局：
+
+```
+ns(4) name(4) rawValue(4) size(2) res0(1) dataType(1) data(4)
+```
+
+`rawValue` 与 `typedValue.data` **都要填字符串池索引**（两者相同）。
+写成 `NO_INDEX(0xFFFFFFFF)` 时 androguard 和系统都读不出值。
+
+原包自带的 `appComponentFactory` 就是这个形态（`raw=0x2e data=0x2e`），
+可以直接拿来对照。
+
+### 验证方法
+
+```bash
+# 1) 自己的解析器能读回
+python3 scripts/uncheck/axml_edit.py get-app-name <manifest>
+
+# 2) androguard 也能读回（独立实现，能发现自洽性错误）
+repy -c "
+import logging; logging.disable(logging.CRITICAL)
+from androguard.core.axml import AXMLPrinter
+import re
+p=AXMLPrinter(open('<manifest>','rb').read())
+xml=p.get_xml().decode()
+print(re.search(r'android:name="([^"]*)"', re.search(r'<application[^>]*', xml).group(0)).group(1))
+"
+
+# 3) 装机后看系统是否识别（唯一权威判据）
+adb shell "dumpsys package <pkg> | grep -oE 'ApplicationInfo\{[^}]*\}'"
+#   能看到 className=<我们的类> 才算真的生效
+
+# 4) 回归测试（用真实 Manifest 做夹具）
+python3 scripts/uncheck/tests/test-axml.py <manifest>
+```
+
 ## 改代码前必读
 
 1. `SigFix.smali` 是**生成物**。改载荷请改 `payload/src/SigFix.java`，

@@ -63,7 +63,9 @@ RES_XML_TYPE = 0x0003
 RES_XML_START_ELEMENT_TYPE = 0x0102
 RES_XML_RESOURCE_MAP_TYPE = 0x0180
 TYPE_STRING = 0x03
+TYPE_REFERENCE = 0x08
 ATTR_TYPE_STRING = 0x03
+TYPE_REFERENCE = 0x08
 NO_INDEX = 0xFFFFFFFF
 
 # android:name 的资源 ID（framework 固定值）
@@ -240,6 +242,8 @@ def find_application_element(data, pool):
 def read_attrs(data, elem_off, hsize, attr_start, attr_count, attr_size):
     """读出一个 START_ELEMENT 的所有属性，返回 [(ns, name, raw, type, data)]。"""
     out = []
+    # 实测：chunk@5064 hsize=16 attrStart=20 →
+    #   5064+20=5084 是错的（读到 ns=58），5064+16+20=5100 才对（ns=65）
     base = elem_off + hsize + attr_start
     for i in range(attr_count):
         p = base + i * attr_size
@@ -289,6 +293,7 @@ def set_app_name(path, new_class):
     if pool_off is None:
         raise AxmlError("找不到字符串池")
 
+    _load_res_map(data)
     pool = StringPool(data, pool_off)
     found = find_application_element(data, pool)
     if not found:
@@ -327,6 +332,48 @@ def set_app_name(path, new_class):
                     extra_attr=(ns_i, name_i))
 
 
+# resource map：属性 name 索引 → framework 资源 ID。
+# 每个 Manifest 都要重新加载（不同包的属性索引不同）。
+RES_MAP = {}
+
+
+def _load_res_map(data):
+    """从 0x0180 chunk 读属性名索引 → resourceId 的映射。"""
+    global RES_MAP
+    RES_MAP = {}
+    for (ctype, off, hsize, size) in iter_chunks(data):
+        if ctype != RES_XML_RESOURCE_MAP_TYPE:
+            continue
+        n = (size - hsize) // 4
+        ids = struct.unpack_from(f"<{n}I", data, off + hsize)
+        for i, rid in enumerate(ids):
+            RES_MAP[i] = rid
+        break
+    return RES_MAP
+
+
+def _attr_insert_index(pool, new_name_idx, attr_count, rest, attr_base, attr_size):
+    """按 resourceId 升序决定新属性插在第几位。
+
+    resource map chunk（0x0180）把属性 name 索引映射到 framework 资源 ID
+    （android:name → 0x01010003）。PackageParser 读 <application> 的属性时
+    期望按该 ID 升序，乱序会让它提前停止扫描、后面的属性全部丢失
+    （实测：追加到末尾时系统读不到 android:name）。
+
+    拿不到 resourceId 的属性（ID 视为最大）排最后。
+    """
+    new_id = RES_MAP.get(new_name_idx, 0xFFFFFFFF)
+    if new_id == 0xFFFFFFFF:
+        return attr_count
+    for i in range(attr_count):
+        p = attr_base + i * attr_size
+        ns, nm = struct.unpack_from("<II", rest, p)
+        cur_id = RES_MAP.get(nm, 0xFFFFFFFF)
+        if new_id < cur_id:
+            return i
+    return attr_count
+
+
 def _rewrite(path, pool, elem_off, elem_hsize, elem_size, attr_start, attr_count,
              attr_size, replace_idx, value_idx, new_class, extra_attr=None):
     """统一的重写路径：重建字符串池 + 必要时扩属性数组。"""
@@ -350,13 +397,50 @@ def _rewrite(path, pool, elem_off, elem_hsize, elem_size, attr_start, attr_count
         # 找到 START_ELEMENT 里的 attrStart/attrCount 位置
         # rest 中 elem 的偏移 = elem_off - (pool.off + old_pool_size)
         e = elem_off - (pool.off + old_pool_size)
+        # START_ELEMENT body: ns(4) name(4) attrStart(2) attrSize(2) attrCount(2)
+        # 这三项在 chunk 内 headerSize+8 处；attrStart 本身是从 chunk 起点算的偏移
         attr_start_e, attr_size_e, attr_count_e = struct.unpack_from(
             "<HHH", rest, e + elem_hsize + 8)
         if attr_size_e != 20:
             raise AxmlError(f"属性尺寸不是 20（实际 {attr_size_e}），不支持")
-        ins_at = e + elem_hsize + attr_start_e + attr_count_e * attr_size_e
-        attr = struct.pack("<III", ns_i, name_i, value_idx)
-        attr += struct.pack("<HBBI", ATTR_TYPE_STRING, 0, 0, value_idx)
+        # ⚠️ 插入位置不是"追加到末尾"，而是**按 resourceId 升序插入**。
+        #
+        # 实测对照（/storage/.../JMComic3v2.1.14_kill.apk，MT 生成）：
+        #   MT 把 android:name 插在属性数组的 index 3（最前面），
+        #   而不是追加到末尾。原因是 PackageParser 解析 <application>
+        #   时按 resourceId 升序读，属性乱序会导致后面的属性被跳过。
+        #   android:name 的 resourceId = 0x01010003，是这几个里最小的，
+        #   必须放最前。
+        #
+        # 判定依据：resource map chunk（0x0180）把「属性 name 索引」映射到
+        # resourceId。拿不到映射的（如 android:name 之外的普通属性）排在后面。
+        ins_index = _attr_insert_index(pool, name_i, attr_count_e,
+                                       rest, e + elem_hsize + attr_start_e, attr_size_e)
+        ins_at = e + elem_hsize + attr_start_e + ins_index * attr_size_e
+        # 属性 20 字节布局（实测自原包 appComponentFactory）：
+        #   ns(4) name(4) rawValue(4) size(2) res0(1) dataType(1) data(4)
+        #   rawValue = 0xFFFFFFFF(NO_INDEX)：表示"值不在字符串池 raw 里，
+        #              请看 typedValue"，这是我们这种生成属性的正确形态
+        # ns(4) + name(4) + rawValue(4) + size(2) = 14 字节
+        # ⚠️ rawValue 必须是**字符串池索引**，不是 NO_INDEX。
+        # 实测 MT（/storage/.../JMComic3v2.1.14_kill.apk）的正确形态：
+        #   41000000 03000000 4d000000 0800 00 03 4d000000
+        #   ns=65 name=3 raw=0x4d size=8 type=0x03 data=0x4d
+        # raw 与 data 相同，都是字符串池索引。
+        # 原包里的 appComponentFactory 也是同一形态（raw=0x2e data=0x2e）。
+        attr = struct.pack("<IIIH", ns_i, name_i, value_idx, 8)
+        # ⚠️ typedValue 必须是 **resourceId + TYPE_REFERENCE(0x08)**，
+        # 不能用字符串类型：
+        #   系统解析 <application> 的属性时按 resourceId 匹配（android:name
+        #   固定是 0x01010003），不看属性名字符串。
+        #   写成 type=0x03/data=字符串池索引 → 系统认不出这是 android:name，
+        #   当成未知属性丢弃 → 装上后 Application 仍是原类（实测踩过：
+        #   dumpsys package 的 applicationInfo 里没有 className）。
+        # typedValue 尾部：res0(1) dataType(1) data(4)
+        # dataType 用 TYPE_STRING(0x03)，data 是字符串池索引 ——
+        # 属性的"身份"由 chunk 0x0180（resource map）里的 name 索引对应关系决定，
+        # 不需要把 resourceId 塞进 typedValue（塞了反而解析不出来）。
+        attr += bytes([0, TYPE_STRING]) + struct.pack("<I", value_idx)
         rest[ins_at:ins_at] = attr
         # attrCount +1
         struct.pack_into("<H", rest, e + elem_hsize + 8 + 4, attr_count_e + 1)
@@ -366,11 +450,17 @@ def _rewrite(path, pool, elem_off, elem_hsize, elem_size, attr_start, attr_count
     else:
         # 替换已有属性的 raw 与 typedValue.data
         e = elem_off - (pool.off + old_pool_size)
+        # START_ELEMENT body: ns(4) name(4) attrStart(2) attrSize(2) attrCount(2)
+        # 这三项在 chunk 内 headerSize+8 处；attrStart 本身是从 chunk 起点算的偏移
         attr_start_e, attr_size_e, attr_count_e = struct.unpack_from(
             "<HHH", rest, e + elem_hsize + 8)
         p = e + elem_hsize + attr_start_e + replace_idx * attr_size_e
-        struct.pack_into("<I", rest, p + 8, value_idx)          # rawValue
-        struct.pack_into("<I", rest, p + 16, value_idx)         # typedValue.data
+        # 与 appendAttr 同一形态：rawValue 与 typedValue.data 都是字符串索引
+        struct.pack_into("<I", rest, p + 8, value_idx)
+        struct.pack_into("<H", rest, p + 12, 8)
+        rest[p + 14] = 0
+        rest[p + 15] = TYPE_STRING
+        struct.pack_into("<I", rest, p + 16, value_idx)
 
     out = bytearray()
     out.extend(head)
