@@ -42,11 +42,26 @@ Java 桩：SEED = JniBridge.gseed()      → 密钥来自壳 so，去掉壳就�
 ├── d2c/                   ← 上游 d2c（只读参考，不要改）
 ├── dpt-shell/             ← 基础加壳
 ├── EdgeRelay/             ← 触发网关（Cloudflare Worker）
+├── ApkForge/              ← 本地 APK 工具（dex 注入 + 去签名校验，日常用它）
+├── json/                  ← schema 镜像 + 去校验载荷分发
 └── jian_box/              ← 被加固的目标 App（keystore 在这）
 ```
 
 **改 so 层的东西去 `nox`，不要在 `artifact-pipeline` 里找 `nc_guard_*.c`**
 ——那已经在 2026-10-30 迁走上游了。
+
+### ⚠️ 本仓库有两条方向相反的线
+
+| 线 | 目录 | 卡片 | workflow | 文档 |
+|---|---|---|---|---|
+| **加固** | `scripts/guard/` 等 | `configs/v1`（7 模块） | `protect-modules.yml` | `流程文档.md` / `模块联动关系.md` |
+| **去校验** | `scripts/uncheck/` | `configs/v2`（1 开关） | `uncheck.yml` | `去签名校验模块.md` |
+
+两条线**不共用代码、不共用 workflow、不共用文档**。
+把去校验的改动混进加固文档是明确禁止的；反之亦然。
+
+**去校验的日常入口是 `ApkForge`（本地 App），不是本仓库的脚本**
+（本仓库只做上游参考实现 + 云端执行端）。详见 `去签名校验模块.md` §6。
 
 ---
 

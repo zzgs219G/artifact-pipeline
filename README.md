@@ -16,6 +16,17 @@ GitHub Actions 脚本集合，按配置顺序执行构建步骤。
 | **查某个决定当时为什么这么做** | [docs/变更历史.md](docs/变更历史.md)（**按关键词搜，不要通读**） |
 | **配置项怎么填** | [docs/配置schema.md](docs/配置schema.md) |
 | **模块之间怎么联动** | [docs/模块联动关系.md](docs/模块联动关系.md) |
+| **去签名校验模块**（`scripts/uncheck/`，**不是加固**） | [scripts/uncheck/README.md](scripts/uncheck/README.md) |
+
+### ⚠️ 本仓库有两条方向相反的线
+
+```
+scripts/guard/    等  → 加固：给 APK 加防御（configs/v1 卡片）
+scripts/uncheck/       → 去校验：拆掉别人的防御（configs/v2 卡片）
+```
+
+两者**不共用代码、不共用一个 workflow、不共用一个文档**。
+改其中一条之前先确认自己在哪条线上 —— 把去校验的改动混进加固文档是明确禁止的。
 
 ### ⚠️ 两条文档使用纪律
 

@@ -7,6 +7,28 @@
 
 ---
 
+## 现在的主入口在 ApkForge，不在这里
+
+**同一套逻辑已经移植到本地 App（`ApkForge`）**，那才是日常使用的形态：
+
+```
+ApkForge → 选 APK → 开始处理（约 3 秒，纯本地）→ 自己签名 → 装机
+```
+
+| | ApkForge（推荐） | 本目录（Python） |
+|---|---|---|
+| 形态 | 手机 App，点按钮 | shell / Python 脚本 |
+| 运行环境 | 任意 Android | Termux（需 java + apktool） |
+| 速度 | 约 3 秒 | 约 10~15 秒（apktool 解包占大头） |
+| 载荷 | 从 json 仓库下载 | 本地 `payload/` 目录 |
+
+**本目录的定位**：上游参考实现 + 云端 workflow 的执行端。
+改逻辑时两边都要同步（`scripts/uncheck/payload/src/` 是唯一真相源，
+ApkForge 用 `payload/build.sh` 的产物）。
+ApkForge 侧的完整说明见它的 `docs/去签名校验.md`。
+
+---
+
 ## 用法
 
 ### 云端（App / CLI 触发）
