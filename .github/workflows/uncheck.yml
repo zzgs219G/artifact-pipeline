@@ -88,15 +88,22 @@ jobs:
         env:
           UNCHECK_CONFIG: ${{ inputs.protect_config }}
         run: |
-          # 单卡片 schema，参数由 resolve.py 统一解释（与 protect 那边同构）
-          python3 scripts/uncheck/resolve.py <<< "$UNCHECK_CONFIG" \
-            > work/args.txt 2> work/resolve.err || {
-              cat work/resolve.err; exit 1; }
-          cat work/resolve.err || true
+          set -euo pipefail
+          # 用 printf 管道而不是 here-string：
+          #   here-string (`<<<`) 在 set -e 下的失败传播行为依赖 bash 版本，
+          #   而且忘写末尾的 `-` 时 resolve.py 会把整篇 usage 打到 stdout，
+          #   然后 exit 2 —— 报错完全指不出真正原因（实测 run 44800089327）。
+          printf '%s' "$UNCHECK_CONFIG" \
+            | python3 scripts/uncheck/resolve.py - > work/args.txt 2> work/resolve.err \
+            || { echo "❌ 配置解析失败："; cat work/resolve.err; exit 1; }
+
+          # 警告/提示（非致命）照常打印
+          [ -s work/resolve.err ] && cat work/resolve.err || true
+
           echo "--- 解析出的参数 ---"
           cat work/args.txt
-          # 空参数 = 什么都没选，不要静默出一个没改动的包
-          test -s work/args.txt || { echo "❌ 配置未启用任何手段"; exit 1; }
+          # 空参数 = 没启用任何动作，不要静默出一个没改动的包
+          test -s work/args.txt || { echo "❌ 配置未启用任何动作"; exit 1; }
 
       - name: 执行去校验
         run: |

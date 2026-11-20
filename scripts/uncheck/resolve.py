@@ -118,6 +118,19 @@ def main(argv):
                 cfg = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
             die(f'配置读取失败: {e}')
+    elif len(argv) == 1:
+        # 无参数 = 读 stdin。
+        #
+        # 为什么不强制要求写 `-`：workflow 里用 `<<<` here-string 重定向
+        # 是最自然的写法，忘写 `-` 时本可以正常工作，却会因为"参数个数不对"
+        # 打出整篇 usage 然后 exit 2 —— 那个报错完全没提示真正原因
+        # （实测踩过：run 44800089327 失败在「解析配置」，日志里只有
+        #   exit code 1，看不到任何有用信息）。
+        # 默认读 stdin 让两种写法都成立，且不会误伤「传了文件路径」的情形。
+        try:
+            cfg = json.load(sys.stdin)
+        except json.JSONDecodeError as e:
+            die(f'stdin 不是合法 JSON: {e}')
     else:
         print(__doc__)
         return 2
