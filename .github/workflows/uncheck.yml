@@ -25,9 +25,27 @@ on:
       apk_url:
         description: 'APK 下载链接（原始包，需含 v2/v3 签名以便提取原证书）'
         required: true
-      uncheck_config:
-        description: '去校验配置 JSON（结构与 configs/v2/config-schema.json 一致）'
+      # ⚠️ 字段名必须是 protect_config，不能用 uncheck_config。
+      # 原因：这是 App → EdgeRelay → workflow 三方冻结的传输契约。
+      #   jian_box 的 EdgeRelayClient.BuildRequest 里写死
+      #     @SerialName("protect_config") val protectConfig: String
+      #   EdgeRelay 按这个字段名转发到 workflow input。
+      # 改这里意味着要同时改 App 的序列化模型（那是另一个仓库、一个已发布
+      # 的 App），代价远大于「workflow 里改个名字」。
+      # 内容语义由 schema 决定（这里是 configs/v2 的去校验卡片），字段名不需要
+      # 跟着卡片变 —— 它只是个「配置载荷」的信封。
+      protect_config:
+        description: '配置 JSON（结构与 configs/v2/config-schema.json 一致）'
         required: true
+      # 声明式卡片版本（2026-11-21）：App 读这个 input 名就知道该拉哪张 schema，
+      # 不用在 App 里维护「workflow 文件名 → 卡片版本」的映射表。
+      # 命名规则 `schema_v<N>`，N 必须与 configs/v<N>/ 目录名一致。
+      # 加新卡片时只改自己 workflow 的这一行，App 零改动。
+      schema_v2:
+        description: '内部标记：本流水线使用 configs/v2 卡片（App 据此渲染表单，请勿修改）'
+        required: false
+        type: boolean
+        default: true
       sign:
         description: '是否签名产物（默认 false=保持"未签名"契约，由使用者自行签）'
         required: false
@@ -68,7 +86,7 @@ jobs:
 
       - name: 解析配置
         env:
-          UNCHECK_CONFIG: ${{ inputs.uncheck_config }}
+          UNCHECK_CONFIG: ${{ inputs.protect_config }}
         run: |
           # 单卡片 schema，参数由 resolve.py 统一解释（与 protect 那边同构）
           python3 scripts/uncheck/resolve.py <<< "$UNCHECK_CONFIG" \
