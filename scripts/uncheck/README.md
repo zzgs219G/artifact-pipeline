@@ -14,7 +14,7 @@
 ```bash
 RELAY_TOKEN=<token> python3 scripts/trigger_build.py app.apk \
     --workflow uncheck.yml \
-    --config '{"schema_version":2,"uncheck":{"enabled":true,"pms":true,"report":true}}'
+    --config '{"schema_version":2,"uncheck":true}'
 ```
 
 对应 `.github/workflows/uncheck.yml`。卡片定义在 `configs/v2/config-schema.json`
@@ -24,7 +24,7 @@ RELAY_TOKEN=<token> python3 scripts/trigger_build.py app.apk \
 
 ```bash
 # 一条命令
-bash scripts/uncheck/uncheck.sh in.apk out-unsigned.apk --pms --report
+bash scripts/uncheck/uncheck.sh in.apk out-unsigned.apk --uncheck
 
 # 然后自己签
 apksigner sign --ks my.jks --out final.apk out-unsigned.apk
@@ -112,8 +112,8 @@ LAUNCHER.onCreate              ← 最晚，兜底
 | 上报服务端裁决 | ❌ **无解** | 本地无法胜出 |
 | Play Integrity / SafetyNet / Key Attestation | ❌ **无解** | 硬件级证明 |
 
-后两类是**结构性无解**，不是「还没做」。`--report` 检出时应明确报 UNBYPASSABLE，
-而不是产出一个装上去才发现没用的包。
+后两类是**结构性无解**，不是「还没做」。工具不会假装能处理它们，
+也不会在这种包上产出一个「装上去才发现没用」的结果。
 
 ---
 
@@ -144,7 +144,7 @@ scripts/uncheck/
 | 项 | 状态 |
 |---|---|
 | `--file-redirect`（自读 APK 覆盖） | 勾选后 **fail-fast**，不静默降级 |
-| `scan.py`（体检报告） | 未实现，`--report` 会明确告警后继续 |
+| 出包前体检（扫描 App 用了哪类取签名途径） | 未实现 |
 | 贴顶大包新建 `classesN.dex` | 原包 `classes.dex` 方法数贴顶时 `run.py` 会报错退出 |
 
 ---
