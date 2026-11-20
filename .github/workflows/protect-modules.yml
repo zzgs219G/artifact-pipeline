@@ -126,9 +126,19 @@ jobs:
         if: steps.scope.outputs.docs == 'true'
         run: python3 scripts/actions/tests/test-docs-paths.py
 
-      - name: schema 结构自检
+      - name: schema 结构自检（全部卡片）
         if: steps.scope.outputs.code == 'true'
-        run: python3 scripts/actions/check-schema.py configs/v1/config-schema.json
+        run: |
+          # 多张卡片：configs/v{N}/config-schema.json 各自独立校验。
+          # 新增卡片只要建目录 + 在 check-schema.py 的 EXPECTED_KEYS 登记，这里零改动。
+          shopt -s nullglob
+          found=0
+          for f in configs/v*/config-schema.json; do
+            echo "==> $f"
+            python3 scripts/actions/check-schema.py "$f"
+            found=$((found+1))
+          done
+          [ "$found" -gt 0 ] || { echo "❌ 没找到任何 configs/v*/config-schema.json"; exit 1; }
 
       - name: schema 解释器回归（40 用例）
         if: steps.scope.outputs.code == 'true'

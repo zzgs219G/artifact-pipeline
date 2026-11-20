@@ -718,6 +718,26 @@ def _report_nox_version() -> None:
         print(f"   VMP: {subs} 个 VM 子段（{tier}档）")
 
 
+def guess_config_key(workflow: str) -> str:
+    """按 workflow 文件名猜它的配置 input 名。
+
+    为什么不写死 protect_config：
+      protect-modules.yml 的 input 叫 protect_config，
+      uncheck.yml 叫 uncheck_config —— 名字不同，写死一个另一个就传不进去。
+      relay 侧是「读 workflow yml 的 on.workflow_dispatch.inputs」来决定转发
+      哪些字段的，所以只要【字段名对得上】就能工作，不需要改 relay。
+
+    规则：取 workflow 文件名（去扩展名）里的第一个词 + _config。
+      protect-modules.yml → protect_config   （与既有约定一致）
+      uncheck.yml         → uncheck_config
+    """
+    stem = os.path.splitext(os.path.basename(workflow))[0]
+    word = re.split(r'[-_.]', stem)[0]
+    if not word:
+        return "protect_config"
+    return word + "_config"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="命令行触发 EdgeRelay 构建",
@@ -731,6 +751,12 @@ def main() -> int:
     ap.add_argument("--token", default=os.environ.get("RELAY_TOKEN"),
                     help="Bearer 令牌（默认读 RELAY_TOKEN 环境变量）")
     ap.add_argument("--workflow", default=DEFAULT_WORKFLOW, help="workflow 文件名")
+    ap.add_argument("--config", default="",
+                    help="原样透传的配置 JSON（给非 protect 卡片用，如 configs/v2 的"
+                         "去校验卡片）。指定后【忽略】下面所有 --sigcheck/--dex2c 等开关，"
+                         "并把 JSON 作为配置字段发给 workflow。"
+                         "字段名由 --config-key 决定（默认按 workflow 猜："
+                         "protect-modules.yml → protect_config，其余 → <卡片名>_config）")
     ap.add_argument("--name", default="", help="任务显示名（面板可见）")
     ap.add_argument("--dpt-extra", default="", help="附加 dpt.jar 参数")
     ap.add_argument("--direct", action="store_true",
@@ -877,7 +903,22 @@ def main() -> int:
     safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in base_name)
     key = f"apks/{digest}-{safe_name}"
 
-    config = build_config(args)
+    if args.config:
+        # 透传模式：给非 protect 卡片（如 configs/v2 去校验）用。
+        # 为什么需要它：protect-modules.yml 的 input 叫 protect_config，
+        # 而 uncheck.yml 叫 uncheck_config —— 名字不同，写死一个就传不进去。
+        # relay 侧是「向 workflow 自己问有哪些 input」的，所以只要字段名对就行。
+        try:
+            json.loads(args.config)
+        except json.JSONDecodeError as e:
+            print(f"❌ --config 不是合法 JSON: {e}", file=sys.stderr)
+            return 2
+        cfg_key = guess_config_key(args.workflow)
+        config = args.config
+        print(f"  配置字段: {cfg_key}（--config 透传，忽略模块开关）")
+    else:
+        cfg_key = "protect_config"
+        config = build_config(args)
     _report_nox_version()
 
     # ── 模块清单：触发【前】就让人看清勾了什么 ──────────────────────
@@ -896,7 +937,7 @@ def main() -> int:
     payload = {
         "apk_url": public_url,
         "workflow_file": args.workflow,
-        "protect_config": config,
+        cfg_key: config,
         "dpt_extra_args": args.dpt_extra,
         "display_name": args.name or base_name,
     }

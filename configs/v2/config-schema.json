@@ -1,0 +1,46 @@
+{
+  "schema_version": 2,
+  "modules_expected": [
+    "uncheck"
+  ],
+  "modules": [
+    {
+      "key": "uncheck",
+      "label": "去签名校验",
+      "desc": "把 APK 改成「签名校验必然通过」的包。\n\n改的是「App 问系统要签名」这一层：在 IPackageManager 接口上挂代理，让 App 拿到原版证书。App 自己的校验代码一个字都不动，所以它用什么方式写校验、混淆成什么样都不影响。\n\n产物未签名 —— 用你自己的 keystore 签。",
+      "type": "parent",
+      "default": true,
+      "arg": "--uncheck",
+      "group_label": "覆盖范围",
+      "children": [
+        {
+          "key": "pms",
+          "label": "PackageManager 代理",
+          "desc": "覆盖 getPackageInfo().signatures / .signingInfo / getApkContentsSigners / getSigningCertificateHistory / checkSignatures / getPackageArchiveInfo。\n现实中绝大部分 App 走这条。dex 约 +20KB，无 so、无 native。",
+          "type": "checkbox",
+          "default": true,
+          "value_kind": "flag",
+          "arg_on": "--pms"
+        },
+        {
+          "key": "file_redirect",
+          "label": "自读 APK 文件的重定向",
+          "desc": "覆盖「App 自己打开 sourceDir 解析 APK / 比对文件大小」这类校验。\n需要把原包副本一起打进产物（体积 +原包大小）。\n\n⚠️ 当前版本未实现：勾选会在构建时 fail-fast，不会静默产出坏包。",
+          "type": "checkbox",
+          "default": false,
+          "value_kind": "flag",
+          "arg_on": "--file-redirect"
+        },
+        {
+          "key": "report",
+          "label": "出包前先体检",
+          "desc": "扫描目标包用了哪些取签名途径，报告本工具覆盖了哪些、哪些没覆盖。\n\n为什么要它：服务端裁决 / Play Integrity 这类本地无解的校验，应该【出包前】就告诉你不行，而不是装上才发现白做。",
+          "type": "checkbox",
+          "default": true,
+          "value_kind": "flag",
+          "arg_on": "--report"
+        }
+      ]
+    }
+  ]
+}

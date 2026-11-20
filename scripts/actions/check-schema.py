@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""configs/v1/config-schema.json 校验：
+"""config-schema.json 校验：
 - JSON 可解析
 - schema_version 与目录名一致（§10.6）
 - 模块 key 唯一、arg 格式、required 结构
+
+支持多张卡片：configs/v{N}/config-schema.json 各自独立校验。
+本次改动（v2 引入）：原断言写死 `schema_version == 1`，导致 v2 无法通过。
+改为「版本号必须等于所在目录名」，这是 §10.6 的原始意图 —— 目录名与版本号
+背离会让 App 按 schema_version 拼路径时 404，且失败发生在运行期。
 """
 import json
+import os
 import re
 import sys
 
@@ -12,7 +18,14 @@ path = sys.argv[1]
 with open(path, encoding="utf-8") as f:
     d = json.load(f)
 
-assert d["schema_version"] == 1, f"schema_version 应为 1（目录 v1），实际 {d['schema_version']}"
+# §10.6：schema_version 必须与目录名一致（configs/v2/ → 2）。
+# 用目录名反推而不是写死常量，新增卡片时零改动。
+_dir = os.path.basename(os.path.dirname(os.path.abspath(path)))
+assert re.fullmatch(r"v\d+", _dir), (
+    f"schema 必须放在 configs/v<N>/ 下，实际目录名 {_dir!r}")
+_expect = int(_dir[1:])
+assert d["schema_version"] == _expect, (
+    f"schema_version 应为 {_expect}（目录 {_dir}），实际 {d['schema_version']}")
 
 keys = []
 for m in d["modules"]:
@@ -83,15 +96,34 @@ for m in d["modules"]:
                     f"{k}.{c['key']}: visible_when 不支持链式（{vw['key']} 自己也有 visible_when）")
 
 assert len(keys) == len(set(keys)), "模块 key 重复"
-# key 顺序 = 勾选 UI 的展示顺序 = protect.sh 的固定执行顺序
-# （protect.sh 阶段序：指纹 → dex2c 转译(唯一引擎) → 组装 NDK(含 envcheck 并入 libnc.so) → 编译
-#   → mark-native → stringenc → anti-diff → 回编 → packer。
-#   envcheck 在 NDK 组装阶段并入 so，与 packer 一样排在列表末位。）
-# ⚠️ 旧引擎 dcc 已于 2026-12 下线、2026-10 从 schema 移除，此处断言不得再要求它。
-# obfuscate（2026-11-05）曾是独立模块；2026-11-14 并入 vmp ——
-# 两者都作用于同一批 so 函数，且必须同时加载 Amice 插件，分成两个
-# 顶层勾选框只会让用户以为「开了 VMP 就能不开混淆」或反之。
-# 现在 vmp 是 parent：VMP 是主体，混淆是它的子项（VMP 覆盖不到的盲区）。
-assert keys == ["sigcheck", "dex2c", "soguard", "stringenc", "antidiff",
-                "envcheck", "packer"], keys
-print("schema OK:", keys)
+
+# ── 模块清单：卡片自描述（2026-11-21 改为自动识别）────────────────────
+#
+# 【为什么删掉了 EXPECTED_KEYS 白名单】
+# 原实现是：
+#     assert keys == ["sigcheck", "dex2c", ...]      # 写死 v1 的 7 个
+# 后果：每新增一张卡片（v2 逆向、v3 ...）都要回来改这个文件一行。
+# 而漏改的表现是 CI 红一条 assert，报错信息是「模块清单不符」，
+# 与「你新加了张卡片」这件事看不出因果关系 —— 维护者要读源码才知道该改哪。
+#
+# 【现在的做法】
+# 卡片自己声明「我期望的模块清单与顺序」，用可选字段 modules_expected：
+#     { "schema_version": 3, "modules_expected": ["a","b"], "modules": [...] }
+#   · 有该字段 → 比对（仍然防住「加了模块忘了同步文档/顺序」）
+#   · 没有该字段 → 跳过比对，只做结构校验
+# 两种情况都【不需要改本文件】。
+#
+# 【放弃了什么（如实）】
+# 白名单时代，v1 的 7 个模块顺序被钉死，任何人误删/误排都会 CI 红。
+# 现在这个保护由卡片自己声明承担；卡片不写 modules_expected 就只剩结构校验。
+# 这是「零改动加卡片」换来的代价，明确记在这里，不假装没有。
+_expected = d.get("modules_expected")
+if _expected is not None:
+    assert isinstance(_expected, list) and all(isinstance(x, str) for x in _expected), (
+        f"configs/{_dir}/: modules_expected 必须是字符串数组")
+    assert keys == _expected, (
+        f"configs/{_dir}/ 模块清单/顺序与自身声明不符：\n"
+        f"  声明 = {_expected}\n"
+        f"  实际 = {keys}")
+
+print("schema OK:", _dir, keys)

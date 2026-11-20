@@ -144,16 +144,25 @@ def main():
     r = subprocess.run([sys.executable, CHECK, SCHEMA],
                        capture_output=True, text=True)
     check("check-schema 通过", r.returncode == 0, r.stderr[-300:])
-    # 断言它是【真的】在验顺序，而不是随便写了个列表
+    # 断言它是【真的】在验顺序，而不是随便写了个列表。
+    #
+    # 2026-11-21 演进（v2 引入 + 去白名单）：
+    #   ① 最早：assert keys == [...]                → 正则刮源码文本
+    #   ② 中间：EXPECTED_KEYS = {1: [...], 2: [...]} → ast 取字典
+    #   ③ 现在：卡片自描述 modules_expected          → 读卡片字段
+    # ①②都要求「加卡片就改代码」，③ 不再要求。本测试相应改为：
+    # 验「卡片声明了清单，且声明 == 实际」，顺序保护仍在，只是归属地变了。
+    actual = [x['key'] for x in schema['modules']]
+    declared = schema.get('modules_expected')
+    check("卡片声明了 modules_expected（顺序保护的归属地）",
+          declared is not None,
+          "缺失则该卡片只剩结构校验，顺序不再受保护")
+    if declared is not None:
+        check("声明清单 == schema 实际顺序", declared == actual,
+              f"声明={declared} 实际={actual}")
+    # 再确认 check-schema 真的会比对它（不是写了个字段却没人读）
     cs = read(CHECK)
-    m = re.search(r'assert keys == \[(.*?)\]', cs, re.S)
-    check("check-schema 里有顺序断言", m is not None)
-    if m:
-        in_assert = [x.strip().strip('"\'') for x in m.group(1).split(',') if x.strip()]
-        in_assert = [x for x in in_assert if x]
-        actual = [x['key'] for x in schema['modules']]
-        check("断言列表 == schema 实际顺序", in_assert == actual,
-              f"断言={in_assert} 实际={actual}")
+    check("check-schema 真的读取 modules_expected", "modules_expected" in cs)
 
     print("[3/5] resolve-config 转 argv")
     rc, lines, out = resolve({

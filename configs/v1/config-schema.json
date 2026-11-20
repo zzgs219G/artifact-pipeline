@@ -1,5 +1,14 @@
 {
   "schema_version": 1,
+  "modules_expected": [
+    "sigcheck",
+    "dex2c",
+    "soguard",
+    "stringenc",
+    "antidiff",
+    "envcheck",
+    "packer"
+  ],
   "modules": [
     {
       "key": "sigcheck",

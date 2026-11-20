@@ -1,0 +1,180 @@
+# ==============================================================================
+# uncheck.yml — 去签名校验（configs/v2 卡片的执行端）
+# ==============================================================================
+# 与 protect-modules.yml 的关系：**两条完全独立的流水线**。
+#   protect-modules.yml → 加固（configs/v1，7 个模块，要用 NDK/Amice/nox）
+#   uncheck.yml         → 去校验（configs/v2，1 个模块，纯 Python，无 NDK）
+#
+# 为什么不合并成一个 workflow：
+#   1. 方向相反。合并后「勾 sigcheck（加校验）同时又勾 uncheck（去校验）」
+#      是个自相矛盾且无法给出合理语义的配置，只能在 UI 上互斥；
+#   2. 依赖天差地别。加固要 NDK/Amice/nox（几分钟环境准备），
+#      去校验只要 JDK（apktool + d8），合并等于让小事也付大代价；
+#   3. 失败面隔离。去校验出错不该让加固流水线变红，反之亦然。
+#
+# 卡片发现机制（2026-11-21）：App 拉 configs/v{N}/config-schema.json 生成 UI，
+# 提交时带 schema_version。EdgeRelay 的 workflow_file 由 App 传且无白名单，
+# 所以 App 传 uncheck.yml 就路由到这里 —— relay 侧零改动。
+# ==============================================================================
+
+name: Uncheck (remove signature verification)
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: 'APK 下载链接（原始包，需含 v2/v3 签名以便提取原证书）'
+        required: true
+      uncheck_config:
+        description: '去校验配置 JSON（结构与 configs/v2/config-schema.json 一致）'
+        required: true
+      sign:
+        description: '是否签名产物（默认 false=保持"未签名"契约，由使用者自行签）'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  # apktool 3.0.3 在 JDK17 上跑得最稳；JDK21 有过 jaxb 相关告警
+  JAVA_OPTS: '-Xmx2g'
+
+jobs:
+  uncheck:
+    name: Remove signature verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 校验卡片与解释器
+        run: |
+          python3 scripts/actions/check-schema.py configs/v2/config-schema.json
+
+      - name: 下载 APK
+        run: |
+          mkdir -p work
+          curl -fL --retry 3 -o work/app.apk "${{ inputs.apk_url }}"
+          ls -la work/app.apk | tee -a work/build.log
+          # 文件大小必须 > 0，否则后面解包会给出难懂的报错
+          test -s work/app.apk || { echo "❌ 下载的 APK 为空"; exit 1; }
+
+      - name: 解析配置
+        env:
+          UNCHECK_CONFIG: ${{ inputs.uncheck_config }}
+        run: |
+          # 单卡片 schema，参数由 resolve.py 统一解释（与 protect 那边同构）
+          python3 scripts/uncheck/resolve.py <<< "$UNCHECK_CONFIG" \
+            > work/args.txt 2> work/resolve.err || {
+              cat work/resolve.err; exit 1; }
+          cat work/resolve.err || true
+          echo "--- 解析出的参数 ---"
+          cat work/args.txt
+          # 空参数 = 什么都没选，不要静默出一个没改动的包
+          test -s work/args.txt || { echo "❌ 配置未启用任何手段"; exit 1; }
+
+      - name: 执行去校验
+        run: |
+          mapfile -t ARGS < work/args.txt
+          bash scripts/uncheck/uncheck.sh work/app.apk work/out-unsigned.apk "${ARGS[@]}" \
+            2>&1 | tee -a work/build.log
+
+      - name: 产物自检
+        run: |
+          # 不签名也能验的部分：文件存在、dex 结构、载荷在位
+          test -s work/out-unsigned.apk || { echo "❌ 产物为空"; exit 1; }
+          ls -la work/out-unsigned.apk | tee -a work/build.log
+          # uncheck.sh 内部已做 dex 自检；这里再确认一次产物不是原包（大小必不同）
+          orig=$(stat -c%s work/app.apk)
+          out=$(stat -c%s work/out-unsigned.apk)
+          echo "原包 $orig B → 产物 $out B"
+          [ "$orig" != "$out" ] || { echo "❌ 产物与原包等大，注入可能没生效"; exit 1; }
+
+      # ── 签名（可选，默认关）────────────────────────────────────────────
+      # 与 protect-modules.yml 的 sign 契约完全一致：
+      #   默认 false = 产物未签名，由使用者自行签；
+      #   true  = 用同一套 KEYSTORE_* Secrets 签，产出可直接安装。
+      # ⚠️ 注意与加固的关键差异：加固包的 so 锁箱密钥绑定【上传包】证书，
+      #    换证书重签会 -12 起不来。去校验产物没有这层绑定，
+      #    但它内部伪造的证书必须等于【原包】证书 —— 而那是构建期从
+      #    输入 APK 提的，与用哪个 keystore 签无关。所以这里换证书安全。
+      - name: 签名（可选）
+        if: inputs.sign == true
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          miss=0
+          for v in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!v:-}" ]; then echo "❌ 缺 secret: $v"; miss=1; fi
+          done
+          [ "$miss" -eq 0 ] || { echo "签名被请求但 secrets 不全，拒绝静默产出未签名包"; exit 1; }
+
+          command -v apksigner >/dev/null || {
+            echo "❌ 找不到 apksigner（runner 未预装 build-tools）"; exit 1; }
+
+          # keystore 只落 RUNNER_TEMP，跑完随 runner 销毁，不写 workspace
+          KS="$RUNNER_TEMP/sign.jks"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+
+          # zipalign 必须在 apksigner 之前（签完再对齐会破坏签名）
+          # uncheck.sh 内部已做过 zipalign，这里不重复
+          apksigner sign \
+            --ks "$KS" \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass "pass:$KEY_PASSWORD" \
+            --out work/out-signed.apk \
+            work/out-unsigned.apk
+
+          apksigner verify --verbose work/out-signed.apk | tee -a work/build.log
+          rm -f "$KS"
+
+      - name: 上传产物
+        run: |
+          # 与 protect 同一套 R2 Secrets 与命名约定；失败时 Artifact 兜底
+          FN="${GITHUB_RUN_ID}_去校验包.apk"
+          if [ -f work/out-signed.apk ]; then SRC=work/out-signed.apk; else SRC=work/out-unsigned.apk; fi
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
+
+          if [ -n "${R2_ACCESS_KEY:-}" ] && command -v aws >/dev/null 2>&1; then
+            AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY" \
+            AWS_SECRET_ACCESS_KEY="$R2_SECRET_KEY" \
+            aws s3 cp "$SRC" "s3://$R2_BUCKET/apks/$FN" \
+              --endpoint-url "$R2_ENDPOINT" || echo "⚠️ R2 上传失败，走 Artifact 兜底"
+            echo "::notice title=产物::${R2_PUBLIC_DOMAIN}/apks/$FN"
+          else
+            echo "⚠️ 未配置 R2，仅上传 Artifact"
+          fi
+        env:
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_DOMAIN: ${{ secrets.R2_PUBLIC_DOMAIN }}
+
+      - name: Artifact 兜底
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uncheck-output
+          path: |
+            work/out-*.apk
+            work/build.log
+          if-no-files-found: warn
+
+      - name: 构建日志
+        if: always()
+        run: |
+          echo "===== 构建日志尾巴 ====="
+          tail -60 work/build.log 2>/dev/null || echo "(无日志)"

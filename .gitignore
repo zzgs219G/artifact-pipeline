@@ -39,3 +39,6 @@ dist/
 #    哪几个压根没防护。它只该出现在 CI 的 Step Summary 与短期 artifact 里。
 /protect-report.md
 /protect-report.json
+
+# scripts/uncheck 的编译缓存（VerifySmali 由 run.py 首次运行时 javac 生成）
+scripts/uncheck/tools/*.class
