@@ -34,7 +34,7 @@ usage() {
 用法: uncheck.sh <输入.apk> <输出_未签名.apk> [--pms] [--file-redirect] [--report]
 
   --pms             PackageManager 接口层代理（核心能力，建议总是开）
-  --file-redirect   自读 APK 文件重定向（当前未实现，开了会 fail-fast）
+  --file-redirect   自读 APK 文件重定向（当前未实现，仅保留参数位；schema 已移除该选项）
   --report          出包前体检，报告覆盖了哪些、哪些没覆盖
 EOF
   exit 2

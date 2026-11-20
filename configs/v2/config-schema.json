@@ -9,7 +9,7 @@
     {
       "key": "uncheck",
       "label": "去签名校验",
-      "desc": "把 APK 改成「签名校验必然通过」的包。\n\n改的是「App 问系统要签名」这一层：在 IPackageManager 接口上挂代理，让 App 拿到原版证书。App 自己的校验代码一个字都不动，所以它用什么方式写校验、混淆成什么样都不影响。\n\n产物未签名 —— 用你自己的 keystore 签。",
+      "desc": "把 APK 改成「签名校验必然通过」的包。\n\n改的是「App 问系统要签名」这一层：在 IPackageManager 接口上挂代理，让 App 拿到原版证书。App 自己的校验代码一个字都不动，所以它用什么方式写校验、混淆成什么样都不影响。\n\n产物未签名 —— 用你自己的 keystore 签。\n\n覆盖边界：\n✅ App 通过系统接口查签名（PackageManager / checkSignatures / getPackageArchiveInfo）\n❌ App 自己打开 APK 文件解析（sourceDir + ZipFile / 比对文件大小）—— 后续版本支持\n❌ 上报服务端裁决 / Play Integrity —— 本地无解，本工具不尝试",
       "type": "parent",
       "default": true,
       "arg": "--uncheck",
@@ -23,15 +23,6 @@
           "default": true,
           "value_kind": "flag",
           "arg_on": "--pms"
-        },
-        {
-          "key": "file_redirect",
-          "label": "自读 APK 文件的重定向",
-          "desc": "覆盖「App 自己打开 sourceDir 解析 APK / 比对文件大小」这类校验。\n需要把原包副本一起打进产物（体积 +原包大小）。\n\n⚠️ 当前版本未实现：勾选会在构建时 fail-fast，不会静默产出坏包。",
-          "type": "checkbox",
-          "default": false,
-          "value_kind": "flag",
-          "arg_on": "--file-redirect"
         },
         {
           "key": "report",

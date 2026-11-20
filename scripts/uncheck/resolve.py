@@ -157,7 +157,21 @@ def build_args(schema, cfg):
         child_keys = {c['key'] for c in m['children']}
         stray = sorted(set(node) - child_keys - {'enabled'})
         if stray:
-            die(f'{key} 出现未定义的子 key: {stray}')
+            # 已下线的子 key 兼容（2026-11-21）：file_redirect 曾出现在 schema 里，
+            # 但功能未实现，勾了就必然构建失败。已从 schema 移除。
+            # App 可能缓存了旧 schema 并在配置里带上它 —— 这里**静默忽略**而不是
+            # die：用户没做错什么（他勾的是当时界面允许的选项），
+            # 报错只会让人困惑「为什么昨天能提交今天不行」。
+            # 但要打警告，免得「勾了没生效」变成静默劣化。
+            RETIRED_CHILD_KEYS = {'file_redirect'}
+            retired = [k for k in stray if k in RETIRED_CHILD_KEYS]
+            remaining = [k for k in stray if k not in RETIRED_CHILD_KEYS]
+            if retired:
+                notes.append(
+                    f'⚠️ {key} 忽略了已下线的选项 {retired}（该功能未实现，'
+                    f'此前勾选会导致构建失败；已从 schema 移除）')
+            if remaining:
+                die(f'{key} 出现未定义的子 key: {remaining}')
 
         if not enabled:
             continue
