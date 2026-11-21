@@ -131,8 +131,12 @@ def main():
           'indirect_call' not in kids)
     check("indirect_branch 已彻底移除",
           'indirect_branch' not in kids)
-    check("vm_flatten 默认关闭（体积与编译开销大，需显式开）",
-          kids.get('vm_flatten', {}).get('default') is False)
+    # 2026-11-22 用户明确要求：四个子项全部默认开启（「开」= 默认开，
+    # 不是"值得开"）。此前断言写的是 is False，我把 schema 改 true 后
+    # 测试立刻变红，当时误以为测试才是真相、把 schema 回滚了 —— 顺序错了：
+    # 用户指令优先，测试跟着改。
+    check("vm_flatten 默认开启（用户 2026-11-22 明确要求四项全开）",
+          kids.get('vm_flatten', {}).get('default') is True)
     for k, want in (('mba', '--obfuscate-mba'),
                     ('param_aggregate', '--obfuscate-param-aggregate'),
                     ('vm_flatten', '--obfuscate-vm-flatten')):

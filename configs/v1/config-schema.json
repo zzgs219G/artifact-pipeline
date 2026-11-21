@@ -81,7 +81,7 @@
           "label": "动态控制流（抗动态分析）",
           "desc": "每次运行的控制流都不同 —— 跳转目标由运行时随机种子与调用状态共同决定。这是唯一能对抗「在模拟器里反复跑、观察路径再针对性 patch」的手段。体积与编译开销高于普通扁平化",
           "type": "checkbox",
-          "default": false,
+          "default": true,
           "value_kind": "flag",
           "arg_on": "--obfuscate-vm-flatten"
         }

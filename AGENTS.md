@@ -192,18 +192,21 @@ tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
 | `flatten` | 静态状态机 | 中等 | ❌ 与 `vm_flatten` 同类，重复 | 不开 |
 | `shuffle_blocks`/`split_basic_block` | 块顺序/拆分 | 小 | ❌ 画个 CFG 就还原 | 不开 |
 
-### 当前配置（4 个子项，默认开 3 个）
+### 当前配置（4 个子项，全部默认开）
 
 ```
-默认开 ：vm + mba + param_aggregate
-需显式开：vm_flatten（体积与编译开销大，见 schema default=false）
+vm + mba + param_aggregate + vm_flatten
 ```
 
-> ⚠️ **本节此前写「当前配置 4 个子项：vm + mba + param_aggregate + vm_flatten」，
-> 与 schema 不符**（2026-11-22 校正）。`configs/v1/config-schema.json` 里
-> `vm_flatten` 的 `default` 是 **false**，且 `scripts/actions/tests/test_obfuscate_args.py`
-> 有断言钉住这一点（"vm_flatten 默认关闭（体积与编译开销大，需显式开）"）。
-> 上表"结论"列的「开」指的是**值得开**，不是**默认开**——两回事，别混。
+> **2026-11-22 用户明确要求四项全开**（原话「开」）。中间走过一段弯路：
+> 当时把 schema 的 `vm_flatten` 改成 `true` 后，`test_obfuscate_args.py`
+> 立刻变红（它的断言写的是 `is False`），我误以为"测试才是真相"把 schema
+> 回滚了 —— **顺序错了：用户指令优先，测试跟着改**。
+> 现在 schema 与断言都已改为 `true`。
+>
+> ⚠️ 代价如实：`vm_flatten` 体积与编译开销高于普通扁平化。它也是唯一能
+> 对抗「在模拟器里反复跑、观察路径再针对性 patch」的手段 —— 这是选择
+> 默认开它的理由。
 
 ### 选型判据
 
