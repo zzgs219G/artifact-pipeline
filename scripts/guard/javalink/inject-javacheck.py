@@ -316,6 +316,36 @@ def render_guard(wrapper_desc):
 
     :try_start_0
     invoke-static {{}}, {BRIDGE_DESC}->ensureLoaded()V
+    # ── 把本 APK 路径写进环境变量（2026-11-22）─────────────────────────
+    # 为什么需要：native 侧 find_apk_path 原来只有「/proc/self/maps」和
+    # 「so 路径反推」两路可用（/data/app 扫描在 Android 11+ 被 SELinux 拒，
+    # errno=13）。而 so 路径本身又是从 maps 拿的 → 实际是【单点】：
+    # 攻击者只要让 maps 读到假内容，两路一起失效。
+    #
+    # 环境变量这一路【完全不经文件系统】—— 只是读进程内存里的字符串，
+    # 没有 open/read 可供 Hook。这是 dpt 壳已有的做法（DPT_APK_PATH），
+    # 这里借用同一思路，变量名用 NC_APK_PATH 避免与其冲突。
+    #
+    # 取路径用 getPackageCodePath()：Context 上直接可调，返回 base.apk
+    # 的绝对路径，不需要额外权限。p0 就是本方法的 Context 入参。
+    #
+    # ⚠️ 整段包在独立 try/catch 里：任何一步失败都不能影响下面的
+    #    ensureLoaded（否则「路径拿不到」会变成「so 加载不了」→ 整个 App
+    #    起不来）。失败就让 native 侧回退到 maps 那两路。
+    .catch Ljava/lang/Throwable; {{:try_env_start .. :try_env_end}} :catch_env
+    :try_env_start
+    invoke-virtual {{p0}}, Landroid/content/Context;->getPackageCodePath()Ljava/lang/String;
+    move-result-object v0
+    invoke-static {{v0}}, Ljava/lang/String;->valueOf(Ljava/lang/Object;)Ljava/lang/String;
+    move-result-object v0
+    const-string v1, "NC_APK_PATH"
+    invoke-static {{v1, v0}}, Landroid/system/Os;->setenv(Ljava/lang/String;Ljava/lang/String;Z)V
+    :try_env_end
+    goto :env_ok
+    :catch_env
+    # 静默失败：native 侧有 maps 兜底，不因为这里挂了就影响加载
+    :env_ok
+
     # .ncx 段自解密自检(2026-12):so 已加载即触发一次性解锁。
     # 59 = 完整链路通过;-100 = 已自检过;负数 = 解锁失败(码表见 nc_guard_boot.c)。
     # ⚠️ 必须用【独立的 try/catch】包住:2026-10-17 曾把 selftest 直接放在

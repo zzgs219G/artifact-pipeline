@@ -625,6 +625,35 @@ static int find_apk_path(char *out, size_t outlen) {
     }
 #endif
 
+    /* ── 路径 0：环境变量（2026-11-22，最先试）─────────────────────────
+     *
+     * 为什么放在 maps 之前：这是唯一【不经文件系统】的路径 —— 只是读进程
+     * 内存里的一块字符串，没有 open/read 可供 Hook。dpt 壳一直用这招
+     * （DPT_APK_PATH），我们在 inject-javacheck.py 注入的 c(Context) 里
+     * 用 getPackageCodePath() + Os.setenv 写同一个值。
+     *
+     * 补它的直接原因（实测）：原来只有 maps + so 路径反推两路可用，
+     * 而 so 路径本身又是从 maps 拿的 → 实际是【单点】。攻击者让 maps
+     * 读到假内容，两路一起失效。第三条 /data/app 扫描在 Android 11+ 被
+     * SELinux 拒（errno=13），等于没有。
+     *
+     * 失败无副作用：环境变量不存在（未注入、或 setenv 被 ROM 拒）时
+     * 直接落到原来的 maps 逻辑，行为与改动前完全一致。
+     */
+    {
+        const char *ev = getenv("NC_APK_PATH");
+        if (ev && ev[0] == '/') {
+            /* access 确认可读再采用：路径本身也可能被伪造（攻击者塞一个
+             * 指向诱饵 APK 的环境变量）。读不到就当没有，继续走 maps。 */
+            if (access(ev, R_OK) == 0 && strlen(ev) + 1 <= outlen) {
+                snprintf(out, outlen, "%s", ev);
+                /*LSG:ENVAPK_OK|【成功】环境变量直接给出 APK 路径(不经文件系统)*/
+                LSGI(LSG_ENVAPK_OK, "%s", out);
+                return 0;
+            }
+        }
+    }
+
     {
         char _mb[24];
         const char *_mp = lsg_s(LSGS_PATH_MAPS2, _mb, sizeof(_mb));
