@@ -345,9 +345,17 @@ CFGEOF
 for src in nc_strdec.c nc_strdec_jni.c; do
   hdr="${src%.c}.h"
   # 直接对源文件跑预处理器，取它实际看到的宏值
-  got=$("$CC" -E -dM -DNC_STRDEC_HOST_TEST -I"$W/cfgtest" -I"$CSRC" \
-        "$CSRC/$src" 2>/dev/null \
+  # ⚠️ 用 NDK_CC 而不是 CC（2026-11-22）：本断言只需预处理，但源文件头部
+  #    还需要 Android 头（<jni.h> 等）才能展开；宿主 gcc 上会因缺头而
+  #    中途失败 → awk 取不到值 → 实得 "/"。
+  got=$("$NDK_CC" -E -dM -DNC_STRDEC_HOST_TEST -I"$W/cfgtest" -I"$CSRC" \
+        "$CSRC/$src" 2>"$W/pp_$src.log" \
         | awk '/^#define NC_STRDEC_ALGO /{a=$3} /^#define NC_STRDEC_NKEYS /{n=$3} END{print a"/"n}')
+  if [[ "$got" != "2/1" ]]; then
+    echo "       NDK_CC = $NDK_CC" >&2
+    echo "       cfg.h  = $(ls "$W/cfgtest" 2>/dev/null | tr '\n' ' ')" >&2
+    head -3 "$W/pp_$src.log" 2>/dev/null | sed 's/^/         /' >&2
+  fi
   chk "$src 取到 cfg.h 的 ALGO/NKEYS（非默认 0）" "$got" "2/1"
 done
 
