@@ -21,7 +21,7 @@
   通过：.text 存在、size > 0、addr == off、区间内重定位数 == 0
   失败：任一不满足，打印具体原因与落在 .text 内的重定位示例
 
-用法: python3 scripts/verify_text_crc_ready.py <so路径>
+用法: python3 scripts/repack/verify_text_crc_ready.py <so路径>
 退出码: 0 通过 / 1 不满足 / 2 用法错误
 """
 import re

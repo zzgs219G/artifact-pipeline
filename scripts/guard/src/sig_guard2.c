@@ -68,7 +68,7 @@
 
 /*LSGS:G2_BLOCK_MAGIC|APK Sig Block 42*/
 /* 路径 ①② 用到的字面量（2026-10-22 补）。
- * 实测报告（见 docs/so层防御/外部实测报告结论汇总.md §三 3.1）明确点名这批串：
+ * 实测报告（2026-10-22）明确点名这批串：
  *   "apk path from maps: %s" / "/data/app" / "base.apk" …
  *   报告说"相当于把校验流程的伪代码印在了 .rodata 里"。
  * 本文件此前只做了 magic，路径串漏了 —— 复测实测 so 里仍可 strings 到。 */

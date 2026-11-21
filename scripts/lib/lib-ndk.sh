@@ -74,8 +74,28 @@ APP_CFLAGS   := -fvisibility=hidden -fno-ident -Oz -ffunction-sections -fdata-se
                 -DNC_GUARD_SECTIONED -DNCG_PATH_STRICT
 APP_CFLAGS.arm64 += -mbranch-protection=standard
 APP_PLATFORM := android-21
-APP_ABI := armeabi-v7a arm64-v8a
+APP_ABI := __NC_APP_ABI__
 EOF
+
+  # ── ABI 列表可覆盖（2026-11-22）─────────────────────────────────
+  # 默认双 ABI（生产/云端必须走这个）。本地迭代时设 NC_APP_ABI=arm64-v8a
+  # 只编一半，构建快约 20s。
+  #
+  # ⚠️ 为什么保留默认双 ABI：v7a 是本项目历史上最容易出问题的一侧
+  #    （2026-11-02 的 v7a SIGILL 漏了几个月），而它**没有真机可验**
+  #    （只有 arm64 设备，v7a 只能靠离线 ELF 解析验证）。所以云端出包
+  #    必须双编，至少保证"能编出来且 ELF32 结构正确"。
+  #    单 ABI 是【本地快速迭代】专用，产物不可发布。
+  #
+  # 为什么用 heredoc 占位 + 事后替换，而不是直接展开变量：
+  #   Application.mk 正文里有大量 $ 字面量（LOCAL_CFLAGS 等），
+  #   去掉 heredoc 引号会让 shell 提前展开它们 → mk 语法被破坏。
+  local abis="${NC_APP_ABI:-armeabi-v7a arm64-v8a}"
+  sed -i "s|^APP_ABI := __NC_APP_ABI__$|APP_ABI := ${abis}|" "$jni/Application.mk"
+
+  if [[ "$abis" != "armeabi-v7a arm64-v8a" ]]; then
+    echo "  [abi] ⚠️ 单 ABI 构建（NC_APP_ABI=$abis）—— 产物不完整，不可发布" >&2
+  fi
 
   # ── 调试报告（2026-11-19）────────────────────────────────────────
   # 默认【不定义】NCGUARD_DEBUG_REPORT → nc_guard_report.c 的
@@ -83,7 +103,7 @@ EOF
   # xixin_debug / NCG_REPORT_PATH（外部 0 信息逆向报告标 ★★★ 的弱点）。
   #
   # 要出调试包时设 DEBUG_REPORT=1：
-  #     DEBUG_REPORT=1 python3 scripts/trigger_build.py app.apk --sigcheck --vmp
+  #     python3 scripts/trigger_build.py app.apk --sigcheck --vmp --debug-report
   #
   # ⚠️ 调试包不能发给用户（带调试开关），但强度与正式包相同，可用于真机排障。
   # ⚠️ 这是【临时调试开关】，不是产品选项：不走 config-schema.json。
@@ -200,8 +220,7 @@ EOF
   #   （动态注册真机会崩，回退短名绑定），protect.sh 里也再无任何生成点。
   #   后果：version script 自 a7d9cbc 起从未生效过，.dynsym 一直导出全部
   #   Java_* 业务符号。--strip-all 只删 .symtab/.strtab，删不掉 .dynsym，
-  #   所以补不上这个洞。实测报告（docs/so层防御/历史结论索引.md §2.1
-  #   「致命：符号表完全未处理」）给符号表打 0.0 分即由此而来。
+  #   所以补不上这个洞。外部实测报告据此给符号表打 0.0 分。
   #
   # ── 白名单为什么是 Java_* 而不是 Java_com_nc_* ──────────────────
   #   这里曾有一轮误判（e0e6bb2）：它断言「dex2c 产物本来就是动态注册的，

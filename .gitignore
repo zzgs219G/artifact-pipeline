@@ -31,6 +31,11 @@ dist/
 # resolve-config.py 的运行期输出（一行一个参数，每次运行 makedirs 重建）。
 # 它是 configs/ → protect.sh 的参数传递通道，不是配置源；改配置请改 configs/。
 # 提交它会造成每次构建都产生无意义 diff（同 /scripts/string-enc/tests/work/ 一类）。
+#
+# 2026-11-22：从仓库根 /schema_rules/ 挪到 /build/schema_rules/。
+# 它本来就是中间产物，跟 scripts/ docs/ configs/ 平起平坐看着像源码；
+# build/ 已在 .gitignore 第 1 行被忽略，放进去自动覆盖，无需单独规则。
+# 保留这一行只为清掉旧克隆里的残留目录（勿再新建）。
 /schema_rules/
 
 # 函数级防护报告（2026-11-17）：protect.sh 在【仓库根目录】生成。

@@ -3,7 +3,7 @@ name: APK加固-模块勾选
 # 勾选式统一入口（schema 驱动动态配置版）：
 #   App 拉取 configs/v1/config-schema.json 生成父子级勾选 UI → 生成 protect_config
 #   JSON → dispatch 传入 → scripts/actions/resolve-config.py 按 schema 解释成
-#   protect.sh 参数（schema_rules/args.txt，一行一个）→ 执行。
+#   protect.sh 参数（build/schema_rules/args.txt，一行一个）→ 执行。
 #   加新模块/子选项只改 configs/v1/config-schema.json 一份文件（App 与本 yml 零改动）。
 # 执行顺序由 protect.sh 固定为
 #   签名校验 → Dex2C(唯一转译引擎) → 字符串加密 → 防对比混淆(anti-diff) → 环境检测(envcheck) → 基础加壳(packer)
@@ -71,6 +71,15 @@ on:
         required: false
         type: boolean
         default: false
+      debug_report:
+        description: '【调试】编入 so 自检报告（段熵/VMP/崩溃定位）。报告开关默认不编进产物，此开关会编入，产物不可分发'
+        required: false
+        type: boolean
+        default: false
+      abis:
+        description: '【调试】只编指定 ABI（如 arm64-v8a）以加速构建。留空=双 ABI（生产默认）。单 ABI 产物不完整，不可发布'
+        required: false
+        default: ''
 
 jobs:
   # ── 秒级回归（2026-11-01 新增）────────────────────────────────────
@@ -698,6 +707,13 @@ jobs:
       # 与 TMP_NOLOCK 不是一回事：这个连 nox 的 .c 都不编进 so。
       # 见 protect.sh 里 TMP_NONOX 的注释（量模块体积用的那一段）。
       TMP_NONOX: ${{ inputs.no_nox && '1' || '0' }}
+      # 调试自检报告：编进 libnc.so（lib-ndk.sh 读它决定是否加 -DNCGUARD_DEBUG_REPORT）。
+      # 为什么用 env 而不是 schema：报告只对"改 so 层的人"有用，App 端不该看到这个开关。
+      # ⚠️ 产物不可分发（多了个哨兵文件/环境变量可触发的报告模块）。
+      DEBUG_REPORT: ${{ inputs.debug_report && '1' || '0' }}
+      # ABI 覆盖：留空 = 双 ABI（生产）。只用于快速迭代，产物不可发布。
+      # lib-ndk.sh 的 ndk_write_mk 读它决定 APP_ABI。
+      NC_APP_ABI: ${{ inputs.abis }}
       R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
       R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
       R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
@@ -725,6 +741,7 @@ jobs:
           DISPLAY_NAME: ${{ inputs.display_name }}
           NO_LOCK: ${{ inputs.no_lock }}
           NO_NOX: ${{ inputs.no_nox }}
+          DEBUG_REPORT: ${{ inputs.debug_report }}
         run: python3 scripts/actions/render-summary.py
 
       # 环境准备与 test job 共用同一个 composite action（唯一真相）。
@@ -869,9 +886,9 @@ jobs:
           python3 scripts/actions/resolve-config.py 2>&1 | tee -a build.log
           {
             echo "=== args.txt（一行一个参数）==="
-            cat schema_rules/args.txt
-            for f in schema_rules/*.txt; do
-              [[ "$f" == schema_rules/args.txt ]] && continue
+            cat build/schema_rules/args.txt
+            for f in build/schema_rules/*.txt; do
+              [[ "$f" == build/schema_rules/args.txt ]] && continue
               echo "=== $f ==="; cat "$f"
             done
           } | tee -a build.log
@@ -938,7 +955,7 @@ jobs:
           chmod +x scripts/pipelines/protect.sh
           # §10.2：读取时必须过滤空行（禁止直接 mapfile < args.txt）；
           # 一行一个参数 + "${ARGS[@]}" 引用展开，禁止空格分隔单行 + 无引号 $ARGS
-          mapfile -t ARGS < <(grep -v '^$' schema_rules/args.txt)
+          mapfile -t ARGS < <(grep -v '^$' build/schema_rules/args.txt)
           EXTRA_ARGS=()
           [[ -n "${INPUT_DPT_EXTRA_ARGS:-}" ]] && EXTRA_ARGS+=(--dpt-extra-args "$INPUT_DPT_EXTRA_ARGS")
           set -o pipefail

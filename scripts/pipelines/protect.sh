@@ -268,7 +268,10 @@ while [[ $# -gt 0 ]]; do
                 if [[ $# -ge 1 && "$1" != --* ]]; then
                   DEX2C_RULES="$(normalize_path "$1")"; shift
                 fi ;;
-    --stringenc) WANT_STRINGENC=1; shift
+    --stringenc) WANT_STRINGENC=1; WANT_NATIVE_STUB=1; STUB_IMPL=native; shift
+                # 2026-11-22：默认即纯 C 桩。Java 桩已归档
+                # （docs/备份/java桩-归档-2026-11-22/），C 桩是唯一实现，
+                # 所以 --stringenc 直接带 WANT_NATIVE_STUB=1，不再二选一。
                 # 规则文件必填(字符串加密必须明确范围,不做"自动抽主类"兜底)
                 if [[ $# -ge 1 && "$1" != --* ]]; then
                   STRING_RULES="$(normalize_path "$1")"; shift
@@ -891,8 +894,8 @@ fi
 # ⚠️ 本轮改动：nc_guard_unlock.c → nc_guard_boot.c（零冻结路线）
 #   unlock.c 仍是冻结资产、保留在仓库，但【不再进 NDK 工程】。
 #   boot.c 承接运行期职责：明文 stub(.text) + unlock 本体(.ncxh 密文)。
-#   理由：把"开锁器"也锁进箱子，否则 unlock.c 整份逻辑在 .text 明文可读
-#   （外部逆向报告 docs/so层防御/简盒-06 §6.2 的实测结论）。
+#   理由：把"开锁器"也锁进箱子。否则 unlock.c 整份逻辑在 .text 明文可读，
+#   攻击者反汇编一个函数就知道怎么解 slot、怎么跑 RC4，静态十分钟走通。
 #   不改 unlock.c 本身 = 不动冻结纪律；它以历史存档形式留存。
 #
 # ndk_write_mk 的两级 wildcard 已收 *.c，放 jni/nc/ 或 jni/ 根都能编入。

@@ -45,6 +45,7 @@ TEST_SWITCHES = {
     "no_lock": "跳过 so 锁箱（.ncx/.ncxr/.ncxh 保持明文）",
     "no_nox": "完全不注入 nox（量模块自身体积用）",
     "amice_probe": "只跑 Amice 插件探路，不出包",
+    "debug_report": "编入 so 自检报告（段熵/VMP/崩溃定位），产物不可分发",
 }
 
 
@@ -89,6 +90,12 @@ def render_child(line: list, child: dict, val) -> None:
 
     if kind == "flag":
         shown = "✅ 开" if val is True else "⬜ 关"
+    elif kind == "choice":
+        # 打印 option 的 label 而不是裸 value —— "c" 对人没意义，「纯 C 桩」才有。
+        # 与 resolve-config.py 的 _dump_plan 保持同一口径（2026-11-22）。
+        lab = next((o.get("label", o.get("value"))
+                    for o in child.get("options", []) if o.get("value") == val), val)
+        shown = str(lab)
     elif kind == "rules_file":
         if not val:
             shown = "（留空 = 自动抽主类）"

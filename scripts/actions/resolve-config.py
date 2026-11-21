@@ -3,18 +3,18 @@
 
 设计依据：《联合任务-设计方案.md》（仓库根目录，2025-09-18 用户逐条拍板）
   - §3.1/§3.2  enabled 语义与 config 生成规则的逆过程
-  - §5.2       保险丝 a0/a/b/c/d/e/f 与输出格式（schema_rules/，一行一个参数）
+  - §5.2       保险丝 a0/a/b/c/d/e/f 与输出格式（build/schema_rules/，一行一个参数）
   - §10.1      schema 有、config 无 → 视为 disabled 继续；反向（未知 key）→ fail-fast
   - §10.2      args.txt 结尾无空行；workflow 侧读取时仍须过滤空行
   - §10.5      schema 路径写死，经 GITHUB_WORKSPACE 或 __file__ 推算仓库根，不依赖 cwd
-  - AGENTS.md  冻结模块零接触；本脚本只读 schema、写 schema_rules/，不碰任何冻结文件
+  - AGENTS.md  冻结模块零接触；本脚本只读 schema、写 build/schema_rules/，不碰任何冻结文件
 
 用法（workflow 同 step 内）:
   env:
     INPUT_PROTECT_CONFIG: ${{ inputs.protect_config }}
   run: |
     python3 scripts/actions/resolve-config.py
-    mapfile -t ARGS < <(grep -v '^$' schema_rules/args.txt)
+    mapfile -t ARGS < <(grep -v '^$' build/schema_rules/args.txt)
     ./scripts/pipelines/protect.sh app.apk protected_unsigned.apk "${ARGS[@]}"
 """
 import json
@@ -26,7 +26,15 @@ import sys
 ROOT = os.environ.get("GITHUB_WORKSPACE") or \
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SCHEMA_PATH = os.path.join(ROOT, "configs", "v1", "config-schema.json")
-OUT_DIR = os.path.join(ROOT, "schema_rules")
+# ⚠️ 输出目录放在 build/ 下，不放仓库根（2026-11-22 调整）。
+# 为什么：schema_rules/ 是【构建中间产物】(每次运行 makedirs 重建、不入库)，
+# 放在根目录会和 scripts/ docs/ configs/ 平起平坐，看着像源码的一部分，
+# 名字也误导（"schema_rules" 听着像 schema 的规则定义，实际是解析后的
+# 参数清单）。build/ 本来就是这个仓库的"中间产物"约定位置（.gitignore 第 1 行）。
+OUT_DIR = os.path.join(ROOT, "build", "schema_rules")
+# 传给 protect.sh 的规则文件路径必须相对【仓库根】（protect.sh 在根下跑），
+# 所以单独留一个相对前缀，不能直接用 OUT_DIR。
+OUT_REL = "build/schema_rules"
 
 # 保险丝 b：arg 白名单。注意 --dex2c 含数字 2，字符类必须含 0-9；
 # 设计文档原文 ^--[a-z-]+$ 匹配不了它（已实测），此处收紧为 [a-z0-9-]+ 且
@@ -178,6 +186,25 @@ for m in modules:
         # .enabled 语义接受，此处因模块 type=leaf 同样跳过子字段循环。
         continue
 
+    # ── 已下线子 key 的兼容剥离（2026-11-22）──────────────────────────
+    # 背景：stringenc.stub_impl 在 2026-11-22 随 Java 桩一起下线
+    # （Java 桩源码归档到 docs/备份/java桩-归档-2026-11-22/）。
+    # 但存量 App 快照里一定还有这个 key，若不剥离，下面的保险丝 a 会
+    # 直接 die → **所有旧 App 用户的构建全部失败**。
+    #
+    # 处置：静默丢弃，不报错、不警告、不产生任何参数。
+    #   为什么静默：这不是用户的错，也没法让用户改（旧 App 已发布）。
+    #   为什么不映射成别的值：C 桩现在是唯一实现，该 key 已无选择语义。
+    RETIRED_CHILD_KEYS = {
+        "stringenc": {"stub_impl"},   # Java 桩下线，C 桩成为唯一实现
+    }
+    if key in RETIRED_CHILD_KEYS and isinstance(cfg_node, dict):
+        retired = RETIRED_CHILD_KEYS[key] & set(cfg_node)
+        if retired:
+            cfg_node = {k: v for k, v in cfg_node.items() if k not in retired}
+            config = dict(config)
+            config[key] = cfg_node
+
     # 保险丝 a（模块内）：未知子 key 拒绝
     child_keys = {c.get("key") for c in m.get("children", [])}
     unknown_in_mod = sorted(set(cfg_node) - {"enabled"} - child_keys)
@@ -188,7 +215,7 @@ for m in modules:
     # 原因：protect.sh 用 `--stringenc` / `--dex2c` 的值解析守卫
     #   `if [[ $# -ge 1 && "$1" != --* ]]`   （protect.sh:123）
     # 即"下一个 token 若以 -- 开头就认为没给规则文件"。于是
-    #   --stringenc --dex2c-stub schema_rules/stringenc.txt
+    #   --stringenc --dex2c-stub build/schema_rules/stringenc.txt
     # 会让 rules 被解析成未提供 → 报「必须提供类名规则文件」→ exit 1。
     #
     # 而规则文件在 argv 里的位置【原本由 schema 的 children 数组顺序决定】——
@@ -336,10 +363,10 @@ for m in modules:
         # 空但通过 unless 豁免 → 只吐 arg 不追加文件（dex2c 联合 sigcheck 自动抽主类）
         if not blank:
             rule_files.append((key, value))
-            # §5.2：路径以 workspace 相对形式追加（schema_rules/<key>.txt），
+            # §5.2：路径以 workspace 相对形式追加（build/schema_rules/<key>.txt），
             # workflow 在仓库根执行，protect.sh 与后续步骤均按相对路径可访问。
             # 先入 deferred_paths，循环结束后统一插回 arg 之后（见 arg_pos 处注释）。
-            deferred_paths.append(f"schema_rules/{key}.txt")
+            deferred_paths.append(f"{OUT_REL}/{key}.txt")
 
     # 把规则文件路径插回模块 arg 的正后方，恢复「--stringenc <path> [子项 flags]」
     # 的解析友好顺序，且与 schema 数组顺序彻底解耦。
@@ -394,19 +421,31 @@ def _dump_plan(cfg):
         if isinstance(val, dict):
             for ch in mod.get("children", []):
                 ck = ch["key"]
-                if ck not in val:
-                    continue
+                # ⚠️ 不能写成 `if ck not in val: continue`（2026-11-22 修）。
+                # 子键【未提交】≠ 子项【未生效】—— 执行侧走的是
+                # `cfg_node.get(ckey, c.get("default", False))`，schema 的
+                # default 会兜底生效。旧写法只打印显式提交的子项，导致
+                # 「产物带了 --obfuscate-mba，回执里一个子项都看不见」：
+                # 用户以为没勾，实际勾了。回执存在就是为了消灭这种不一致，
+                # 所以必须按【执行侧同一个算法】算出生效值再打印。
+                vk = ch.get("value_kind")
+                if vk in ("flag", "arg_value"):
+                    cv = val.get(ck, ch.get("default", False))
+                elif vk == "choice":
+                    cv = val.get(ck, ch.get("default", ""))
+                else:
+                    cv = val.get(ck, ch.get("default", ""))
+                    if ck not in val and not cv:
+                        continue        # 纯文本子项：既没提交也没默认值 → 无意义
                 # visible_when 不满足 → 该子项不存在，回执里也别印出来
-                # （否则用户看到「✅ 解密桩也抽进 so」而产物里没有该参数，
-                #   正是本回执存在要解决的"勾了与产物不一致"问题）
+                # （否则用户看到「✅ 解密桩也抽进 so」而产物里没有该参数）
                 vw = ch.get("visible_when")
                 if vw and val.get(vw.get("key")) != vw.get("equals"):
                     continue
-                cv = val[ck]
-                if ch.get("value_kind") in ("flag", "arg_value"):
+                if vk in ("flag", "arg_value"):
                     cm = "✅" if cv else "⬜"
                     print(f"      {cm} {ch.get('label', ck)}")
-                elif ch.get("value_kind") == "choice":
+                elif vk == "choice":
                     # 显示选中项的 label，不是裸 value（"c" 对人没意义，"纯 C 桩"才有）
                     lab = next((o.get("label", o.get("value"))
                                 for o in ch.get("options", []) if o.get("value") == cv), cv)

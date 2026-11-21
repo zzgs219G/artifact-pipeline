@@ -283,7 +283,7 @@ static void siglog(const char *prio, const char *fmt, ...) {
  * 而同文件里 delayed_kill_0/1/2 与 sig_raw_die 早已进密文段——
  * "杀的逻辑藏了，判的逻辑露着"。
  *
- * 实测收益（原型，见 docs/so层防御/交接文档-so加固-2026-10-29.md §二）：
+ * 实测收益（原型，2026-10-29 外部报告 §二）：
  *   .ncx 段从 5092 B → 8472 B（+3380 B 指令变密文）
  *   .text 内 v2 block id(0x7109) 装载指令 3 条 → 1 条
  *   selftest 仍为 59（端到端通过）

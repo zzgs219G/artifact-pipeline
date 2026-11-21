@@ -97,37 +97,11 @@
       "group_label": "加密范围",
       "children": [
         {
-          "key": "stub_impl",
-          "label": "解密桩实现",
-          "desc": "与「解密桩也抽进 so」互斥，二选一。性能：首次解密多算几条 mix64，走缓存后无差异",
-          "type": "select",
-          "value_kind": "choice",
-          "default": "java",
-          "options": [
-            {
-              "value": "java",
-              "label": "Java 桩（默认）",
-              "desc": "解密算法写在 dex 里，密钥是 StrDec 类的字面量。可配「解密桩也抽进 so」交给 dex2c 转译内核。",
-              "arg_on": ""
-            },
-            {
-              "value": "c",
-              "label": "纯 C 桩",
-              "desc": "算法与密钥流编进 libnc.so 的 .ncx 加密段，dex 侧只剩 native 声明（无算法、无密钥）。脱壳也拿不到算法。",
-              "arg_on": "--stringenc-native"
-            }
-          ]
-        },
-        {
           "key": "algo",
           "label": "密钥流算法",
           "type": "radio",
           "value_kind": "choice",
           "default": "splitmix64",
-          "visible_when": {
-            "key": "stub_impl",
-            "equals": "c"
-          },
           "options": [
             {
               "value": "splitmix64",
@@ -146,15 +120,11 @@
         {
           "key": "dex2c_stub",
           "label": "解密桩也抽进 so",
-          "desc": "解密桩内核也编进 so，dex 里只剩声明。性能：运行期无损（解密结果进缓存，只算一次）；构建 +30~60s（解包/回编变 2 次）",
+          "desc": "把【流水线中途注入的 Java 代码】交给 dex2c 内部接口转译进 libnc.so。⚠️ 与当前的纯 C 解密桩互斥（C 桩没有 Java 内核可转译），勾了会 fail-fast；该开关留给之后的 Java 插桩模块。性能：构建 +30~60s（解包/回编变 2 次）",
           "type": "checkbox",
-          "default": true,
+          "default": false,
           "value_kind": "flag",
-          "arg_on": "--dex2c-stub",
-          "visible_when": {
-            "key": "stub_impl",
-            "equals": "java"
-          }
+          "arg_on": "--dex2c-stub"
         },
         {
           "key": "rules_file",

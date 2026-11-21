@@ -59,10 +59,12 @@ STUB_FILE = 'StrDec.smali'
 STUB_GEN_MARK = '# nc-strdec-gen v2'          # 桩文件内的生成标记(识别"这是我们写的")
 # 解密主方法名 —— 「只盯最危险一步」的警报器只管这个方法(见 _check_stub_registers)
 STUB_DECRYPT_METHOD = 'd'
-# 桩实现选择（--stub-impl）：'java'（默认）| 'native'
-# 默认 java = 与改动前逐字节一致，零漂移。
+# 桩实现选择（--stub-impl）：'native'（默认）| 'java'（已归档）
+# 2026-11-22：默认从 java 改为 native。理由见 docs/备份/java桩-归档-2026-11-22/README.md
+#   —— C 桩在每一项上都更优（算法天然在 so、无额外回编轮次、dex 零残留），
+#   且两条路产出的密文格式完全相同（本常量不参与加密）。
 # native 走 csrc/nc_strdec.c（纯 C 算法编进 libnc.so），dex 侧只有声明。
-STUB_IMPL = 'java'
+STUB_IMPL = 'native'
 # 解密内核方法名(2026-10 两层拆分):算法本体在 dn(),d() 只剩 try/catch 壳。
 # 桩随机化只改 d 不改 dn —— dn 是 dex2c 联动要转译的目标(见 protect.sh
 # --dex2c 分支),且它是真正调用系统 Base64 解码工具的方法(报错二十二锚点)。
@@ -2172,11 +2174,12 @@ def main():
     ap.add_argument('--stub-name',
                     help="固定桩名 '包名.类名[:方法名]'(如 com.nc.strdec.StrDec:d),"
                          "仅供测试/复现;不传 = 每包随机生成(生产默认,防引擎固定签名)")
-    ap.add_argument('--stub-impl', choices=('java', 'native'), default='java',
-                    help="解密桩实现：java（默认，现有 Java 桩 + 可选 dex2c 联动）"
-                         "或 native（纯 C，算法在 libnc.so，dex 侧只有 native 声明）。"
-                         "native 模式下 --emit-stub-filter / --emit-stub-dex "
-                         "无意义（不存在 Java 内核可转译），会被显式拒绝。")
+    ap.add_argument('--stub-impl', choices=('java', 'native'), default='native',
+                    help="解密桩实现：native（默认，纯 C，算法在 libnc.so，dex 侧"
+                         "只有 native 声明）或 java（【已归档 2026-11-22】旧 Java 桩，"
+                         "源码在 docs/备份/java桩-归档-2026-11-22/，恢复步骤见那里的 "
+                         "README）。java 模式需要 --emit-stub-filter 等参数配合，"
+                         "而在 native 模式下它们会被显式拒绝。")
     ap.add_argument('--algo', choices=(ALGO_SPLITMIX, ALGO_CHACHA20),
                     default=ALGO_SPLITMIX,
                     help="密钥流算法（仅对 --stub-impl native 有意义）："

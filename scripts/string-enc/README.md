@@ -38,7 +38,7 @@ splitmix64 常量与密钥流逻辑仍可读——"算法进 so"名不副实。
 
 > 2026-10-12 验收注记：真机实测本模块成本 ≈10-20ms（非冷启动主因），体积代价
 > ≈0.95MB dex（Base64 +33% 膨胀）。曾短暂讨论下线，最终保留（防静态可见性仍有
-> 价值，且 L1 缓存已消除性能顾虑）。数据见 `docs/简盒-加壳对比测试报告.md` §六。
+> 价值，且 L1 缓存已消除性能顾虑）。实测数据见 `docs/变更历史/03-stringenc与anti-diff.md`。
 
 ## 文件与数据流
 
@@ -59,7 +59,7 @@ encrypt-strings.py ◄─────────────────┘
 | `build-stub.sh` | 编译链 javac → d8 → baksmali → 桩骨架 smali（含三道自检） |
 | `stub-src/StrDec.smali` | **自动生成的中间产物，人永远不要手改**（报错二十一/二十二/二十五） |
 | `encrypt-strings.py` | 构建期主脚本：找字符串 → 加密 → 改写 → 注入桩（最大单体） |
-| `tools/d8.jar` | 固定版本 D8（r8 9.3.16，与 apktool.jar 同待遇，勿换版） |
+| `scripts/string-enc/tools/d8.jar` | 固定版本 D8（r8 9.3.16，与 apktool.jar 同待遇，勿换版） |
 | `tests/` | 冒烟 / 密钥流对拍 / 结构与续跑 / 桩随机化 / 联动端到端 五套件 + P3/P5 宿主工具 |
 
 ## 选类语法与硬排除
@@ -255,7 +255,7 @@ keyByte(JJ)I               --dynamic-register 时 dex 内 Java 调用一律按
 - **桩内用 raw 类型**：泛型字段会让 javac 产出 `.annotation Signature` 块，撞桩骨架
   "类体顶层裸指令"守卫；缓存读写整体在 try 内（报错二十二守卫禁止向参数寄存器写常量）
 - 实测（2026-10-12 真机）：缓存生效但冷启动持平——stringenc 全模块成本 ≈10-20ms，
-  非冷启动主因（详见 `docs/字符串架构优化.md` 与简盒报告 §六）；L1 保留的理由是
+  非冷启动主因（详见 `docs/变更历史/03-stringenc与anti-diff.md`）；L1 保留的理由是
   无回归 + CPU/PSS 改善 + intern 语义，而非当初的 ~200ms 假设
 
 ## 桩随机化（2026-10-13,防引擎固定签名）
@@ -476,7 +476,7 @@ NKEYS=4        ：块密钥流 = XOR over t of mix64(key[t] + (blk+t)*gamma[t])
 
 ## 依赖与环境
 
-- `javac`（JDK）、`tools/d8.jar`、`tools/dcc/tools/apktool.jar`（提供 baksmali）
+- `javac`（JDK）、`scripts/string-enc/tools/d8.jar`、`tools/apktool.jar`（提供 baksmali）
 - 编译期 classpath 需要 `android.util.Base64`：默认找
   `$HOME/tmp/toolchain/android-all.jar`，可用 `STUB_ANDROID_JAR` 覆盖；
   本机缺失时用 `tests/shims/android/util/Base64.java` 编一个最小 jar 即可

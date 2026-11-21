@@ -38,9 +38,16 @@ inputs = trigger["workflow_dispatch"]["inputs"]
 # 与 no_lock 不是一回事：
 #   no_lock = 注入 nox 但不加密（段明文）
 #   no_nox  = 连 nox 的 .c 都不编进 so（量模块自身体积用）
+# debug_report（2026-11-22）：编入 so 自检报告。此前只有 lib-ndk.sh 读的
+# 环境变量 DEBUG_REPORT，本地设了传不到 runner（trigger_build.py 不认识、
+# workflow 无 input）—— 是个「文档教了但跑不通」的功能，这次补成正式 input。
+# abis（2026-11-22）：只编指定 ABI 的加速开关，默认空=双 ABI。
+# 存在的理由：v7a 没有真机可验（只有 arm64 设备），而它历史上最容易出问题
+# （2026-11-02 SIGILL 漏了几个月）—— 所以生产必须双编，单 ABI 只给快速迭代用。
 assert set(inputs) == {"apk_url", "protect_config", "schema_v1", "dpt_extra_args",
-                       "sign", "amice_probe", "no_lock", "no_nox"}, \
-    f"inputs 应为 apk_url+protect_config+schema_v1+dpt_extra_args+sign+amice_probe+no_lock+no_nox: {list(inputs)}"
+                       "sign", "amice_probe", "no_lock", "no_nox",
+                       "debug_report", "abis"}, \
+    f"inputs 清单与预期不符（新增/删除 input 时必须同步本条）: {sorted(inputs)}"
 # schema_v1（2026-11-21）：声明式卡片标记，App 读它决定拉 configs/v1。
 # 是给 App 的元数据，不是用户选项 —— App 侧会把它从通用表单里过滤掉。
 # 命名规则 `schema_v<N>`，N 必须与 configs/v<N>/ 目录名一致。
@@ -160,7 +167,7 @@ if grep -q 'apksigner sign' "$YML"; then
     echo "❌ zipalign($za) 必须在 apksigner sign($as) 之前"; fail=1
   fi
 fi
-grep -q 'mapfile -t ARGS < <(grep -v .\^$.\? schema_rules/args.txt)' "$YML" 2>/dev/null || \
+grep -q 'mapfile -t ARGS < <(grep -v .\^$.\? build/schema_rules/args.txt)' "$YML" 2>/dev/null || \
   grep -F 'grep -v' "$YML" | grep -q 'args.txt' || { echo "❌ mapfile 未过滤空行（§10.2）"; fail=1; }
 grep -F '"${ARGS[@]}"' "$YML" >/dev/null || { echo "❌ ARGS 未用引用展开"; fail=1; }
 for legacy in inputs.sigcheck inputs.dex2c_rules inputs.string_rules inputs.lightobf inputs.packer inputs.antidiff inputs.envcheck; do

@@ -55,13 +55,13 @@ Java 桩：SEED = JniBridge.gseed()      → 密钥来自壳 so，去掉壳就�
 | 线 | 目录 | 卡片 | workflow | 文档 |
 |---|---|---|---|---|
 | **加固** | `scripts/guard/` 等 | `configs/v1`（7 模块） | `protect-modules.yml` | `流程文档.md` / `模块联动关系.md` |
-| **去校验** | `scripts/uncheck/` | `configs/v2`（1 开关） | `uncheck.yml` | `去签名校验模块.md` |
+| **去校验** | `scripts/uncheck/` | `configs/v2`（1 开关） | `uncheck.yml` | `scripts/uncheck/README.md` |
 
 两条线**不共用代码、不共用 workflow、不共用文档**。
 把去校验的改动混进加固文档是明确禁止的；反之亦然。
 
 **去校验的日常入口是 `ApkForge`（本地 App），不是本仓库的脚本**
-（本仓库只做上游参考实现 + 云端执行端）。详见 `去签名校验模块.md` §6。
+（本仓库只做上游参考实现 + 云端执行端）。详见 `scripts/uncheck/README.md`。
 
 ---
 
@@ -381,11 +381,8 @@ classloader 未建立），而不是 `JNI_OnLoad` 里调（ART 主动回调，�
 
 ### 8.2 冻结模块不能随便改
 
-`artifact-pipeline/AGENTS.md` 有清单。改之前必须在当次对话里**用户明确点名**，
-并跑完全部回归 + 在 `变更历史.md` 留痕。
-
-具体包括：`guard/src/*.c`（`sig_check.c` / `env_check.c` / `nc_link.c` /
-`sig_guard2.c`）、`nox/so-guard/nc_guard_layout.h`。
+**清单在 `AGENTS.md` §1，本文不抄**（抄一遍就是第二份真相，必然漂移）。
+改之前必须在当次对话里**用户明确点名**，并跑完全部回归 + 在 `docs/变更历史/` 留痕。
 
 ### 8.3 改 `.c` 必须双 ABI 验证
 
@@ -423,7 +420,7 @@ echo "[strip] ⚠️ .comment 移除失败（objcopy 异常）——继续但不
 **正确姿势**：
 ```bash
 RELAY_TOKEN=... python3 scripts/trigger_build.py --sigcheck --stringenc \
-    --stringenc-native --stringenc-rules '**' --sign
+    --stringenc-rules '**' --sign
 # → 下载 → adb install → 看 logcat
 ```
 
@@ -494,134 +491,18 @@ CI 的 `setup-toolchain` action 会校验，源码形态会直接失败：
 
 ---
 
-## 9.5 当前进度与下一步（2026-11-09 更新）
+## 9.5 待办（仍没做的）
 
-> **新接手的 AI 先读这一节。** 它回答"现在做到哪了、接下来该干什么"——
-> 这是本文其他地方都不覆盖的信息。
-
-### 已完成并真机验证
+> 已完成的项已归档到 `docs/变更历史/01-架构演进-2026-11.md`。
+> 这里只留**现在仍然没做**的 —— 写"已完成"的清单会一直过期。
 
 | 项 | 状态 |
 |---|---|
-| **纯 C 解密桩**（`--stringenc-native`） | ✅ 云端 r27d / r29 产物均真机跑通 |
-| 算法与密钥离开 dex | ✅ dex 内 `GAMMA/keyByte/mix64/nc_strdec` 命中 **0 处** |
-| 算法进 `.ncx` 锁箱段 | ✅ arm64 0x1e70，`objdump` 看到的是密文 |
-| **纯 C 桩密钥改为运行期从壳取**（2026-11-10） | ✅ 产物验证：`libnc.so` 无种子常量、依赖 `dl_iterate_phdr`/`dlsym`；壳 so 导出 `T ncg_strkey` |
-| **包壳时不编密钥常量**（同上） | ✅ 去掉壳 so → 无密钥 → fail-closed。这才是「去不掉壳」的实现方式 |
-| 密钥编译进 so | ✅ `nc_strdec_cfg.h` 的 `NC_STRDEC_KEY_BYTES`，dex 零密钥 |
-| JNI 短名绑定（不进 `.dynsym`） | ✅ 只导出 `Java_<随机包名>_<随机方法名>` |
-| 三套测试进 CI | ✅ 291 + 184 + 13 项 |
-
-### 当前配置的实际形态
-
-```
-schema: stringenc.stub_impl  ← type=select, value_kind=choice（2026-11-09 起）
-        default "java" → Java 桩
-        选 "c"         → --stringenc-native（纯 C 桩）
-```
-
-**注意：`stub_impl`（下拉框）和 `dex2c_stub`（复选框）在 UI 上仍是两个独立控件，
-可以同时选** —— 那是非法组合，靠 CLI / `protect.sh` / 云端 `resolve-config`
-三层 fail-fast 拦。**UI 层没拦**（schema 没有表达"互斥"的能力，
-`required.unless` 只能表达"必填豁免"）。
-
-### 下一步（按优先级）
-
-#### ① 把 Java/C 桩改成真单选 —— ✅ **已完成（2026-11-09）**
-
-> **裁决：用「下拉框」，不用「单选框」。** 判据与反例见 `docs/配置schema.md` §4.2。
-> 摘要：子项复选框被压到 20dp（行高 36dp 所迫），20dp 的圆（radio）与 20dp 的
-> 圆角方框（checkbox）并排时形状差异基本不存在，用户无法区分"这个框是单选还是
-> 多选"；下拉框用**折叠/展开的形态差异**把语义区分开。
-> （例外：APP 顶层「加固方案」用 radio 是对的 —— 独立 SectionCard + 每项带 subtitle。）
-
-**落地内容**（4 个文件，jian_box 零改动）：
-
-```
-configs/v1/config-schema.json         type=checkbox/flag → type=select/value_kind=choice
-                                      options: java(arg_on="") / c(--stringenc-native)
-scripts/actions/resolve-config.py     新增 value_kind=="choice" 分支 + 旧布尔快照兼容
-                                      + _dump_plan 显示 option 的 label 而非裸 value
-scripts/actions/check-schema.py       choice 结构断言 5 条（value 唯一 / 每项有 label 与
-                                      arg_on / 带 arg_on 的最多 1 个 / default ∈ options）
-scripts/actions/tests/                 T17a~T17g 七例（44 通过）
-scripts/trigger_build.py              写入值 True → "c"；读点同步改判 == "c"
-```
-
-**为什么 jian_box 零改动**：`type=select` 的通路在 APP 侧早已完整 ——
-`default` 走 `optString`、状态存 `String`、`buildProtectConfig` 走 else 分支写字符串、
-`:143` 已分发 `"select"` → `ChildSelect()`。**schema 从未用过 select，但代码是通的。**
-
-**旧快照兼容**（这条容易漏）：`stub_impl` 曾是 `value_kind=flag`，旧 App 会提交
-`true`/`false`。`resolve-config.py` 遇到布尔值映射到"恰好一个带 `arg_on` 的选项"
-（多于一个就 `die()`，不瞎猜），`check-schema.py` 用 `len(nd) <= 1` 静态保障这个前提。
-不写这 10 行的话，旧 App 用户提交 `true` 会被判"值必须是字符串"直接报错 ——
-**一个原本能跑的构建突然失败**。
-
-**⚠️ 仍未解决**：UI 层不拦互斥。`stub_impl`（下拉）与 `dex2c_stub`（复选框）
-在 UI 上仍是两个控件，**同时选仍然可选**。互斥靠 `trigger_build.py` /
-`protect.sh` / `resolve-config` 三层 fail-fast 兜底。要真正在 UI 层拦住，
-需要 `ProtectConfigSchema.validate()` 支持跨字段约束 —— schema 当前没有这个
-表达力（`required.unless` 只能表达"必填豁免"，不能表达"互斥"）。
-**这是"错了才发现"而非"不允许错"，如实记录为缺口。**
-
-#### ② 算法可选框（splitmix64 / ChaCha20）—— ✅ **已完成（2026-11-09）**
-
-**动机不是速度**，而是**可逆性**：
-
-```
-splitmix64：可逆 —— 猜中任意一条明文 → 反解种子 → 全包沦陷
-ChaCha20  ：不可逆 —— 猜中一条只泄漏那一条
-```
-
-**落地形态**（与原计划的差异，都是实测后改的）：
-
-| 原计划 | 实际做的 | 为什么改 |
-|---|---|---|
-| 每条多存 nonce，Base64 变长 | **0 增长**：offset 直接当 counter | offset 本来就是全包唯一的，满足 ChaCha20 的 counter 不重复前提 |
-| 只影响 `key_byte()` 与 `nc_block_ks()` | 还改了**块粒度**（8→64 字节） | 硬套 8 字节契约会算了 64 字节只用 8 字节，浪费 8 倍 |
-| 只影响 C 侧 | 还改了 `nc_strdec.c` 的 include 顺序 | `cfg.h` 曾被头文件的 `#ifndef` 挡住，注入的档位从未生效 |
-
-**UI**：`stringenc.algo`，`type=radio`（横向单选）+ `visible_when{stub_impl,c}`。
-选 Java 桩时整行不显示 —— Java 桩的算法在 dex 里，换算法要重做整条
-d8→baksmali 链路与 384 项对拍，不在范围。
-
-> **为什么用横向单选而不是下拉框**：同一模块里已有一个下拉框（解密桩实现），
-> 两个长得一样会分不清。详见 `docs/配置schema.md` §4.2。
-
-**性能：只写比值，不写绝对 MB/s。**
-
-```
-ChaCha20 块粒度 8 字节 → 64 字节：加速 7.6~8.3×（理论值精确 8.0×）
-  · 旧版每 8 字节重跑一次 20 轮 = 算了 64 字节只用 8 字节，白算 7/8
-  · 新版每 64 字节跑一次，用满整块
-```
-
-换算整包（5526 位点）：增量从 1.7~4.2 ms 降到 **0.15~0.77 ms**。
-
-> ⚠️ **为什么不写绝对吞吐**：2026-11-09 曾报「63 → 311 MB/s（4.9×）」，
-> 那是拿两个不同时刻的数字相除 —— 当时 `load average 21.5`（4 核）、
-> CPU 降频到 1.0 GHz，之后用同一份代码重测得到 490~700 MB/s，
-> **连自己的结论都复现不了**。正确做法是同进程交替测（两版内联进一个
-> 程序、交替跑多轮取平均），比值才可信。测之前先看 `load average`
-> 与 `/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq`。
->
-> 复现命令：`bash scripts/string-enc/tests/bench-chacha20-blocksize.sh`
-> （两版块粒度内联进同一程序交替跑 5 轮，输出比值并做区间判定）。
-
-**真机（云端构建 + 装机）**：splitmix64 版与 ChaCha20 版均 TotalTime ≈300ms、
-进程存活、零崩溃、Room 无密文表名报错。
-
-**仍未做**：ChaCha20 真机耗时未单独测量（TotalTime 差异在噪声内，
-只能说"没有可测的代价"，不能说"更快"）；SIMD 未做（v7a 的 NEON 是可选扩展，
-且 §8.4.1 的 SIMD 栈布局问题未查清）。
-
-#### ③ 其他待办（优先级低）
-
-- `armeabi-v7a` 真机验证（本机只有 arm64）
-- 本地 Termux 环境为何产出坏 so（22 字节 SIMD 栈偏移差异，原因未查清）
-- `--stringenc-native` 纯桩（不带 `--sigcheck`）为何崩（`.ncx` 缺 `.ncxr`，
-  锁箱链不完整）—— 目前靠"必须配 sigcheck"规避
+| **UI 层不拦 `stub_impl` × `dex2c_stub` 互斥** | 两者在 UI 上仍可同时选，靠 `trigger_build.py` / `protect.sh` / `resolve-config` 三层 fail-fast 兜底。schema 没有表达"互斥"的能力（`required.unless` 只能表达"必填豁免"）。要真拦需 `ProtectConfigSchema.validate()` 支持跨字段约束 |
+| `armeabi-v7a` 真机验证 | 本机只有 arm64 |
+| 本地 Termux 产出坏 so 的根因 | 22 字节 SIMD 栈偏移差异，原因未查清。见 §8.4.1 |
+| **ChaCha20 真机耗时** | 未单独测量。TotalTime 差异在噪声内 —— 只能说"没有可测的代价"，不能说"更快" |
+| ChaCha20 SIMD | 未做。v7a 的 NEON 是可选扩展，且 §8.4.1 的 SIMD 栈布局问题未查清 |
 
 ### 千万别做的事
 
@@ -653,4 +534,4 @@ docs/模块联动关系.md  §1.0 跨仓库参数总表
 `变更历史.md` 150+ 条报错），但它们**描述的是当时的代码**。改之前先
 `grep` 一下源码，确认文档说的还在不在。
 
-反过来，**踩坑经验一定要写回 `变更历史.md`** —— 这个项目靠它避免了大量重复劳动。
+反过来，**踩坑经验一定要写回 `docs/变更历史/`** —— 这个项目靠它避免了大量重复劳动。

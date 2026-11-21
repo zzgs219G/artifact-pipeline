@@ -82,7 +82,7 @@ def resolve(cfg):
     env['GITHUB_WORKSPACE'] = tmp
     r = subprocess.run([sys.executable, RESOLVE], env=env, cwd=tmp,
                        capture_output=True, text=True)
-    args_path = os.path.join(tmp, 'schema_rules', 'args.txt')
+    args_path = os.path.join(tmp, 'build', 'schema_rules', 'args.txt')
     lines = []
     if os.path.isfile(args_path):
         with open(args_path, encoding='utf-8') as f:

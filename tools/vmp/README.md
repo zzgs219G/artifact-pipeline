@@ -31,4 +31,4 @@ python3 vmpcheck.py <解出的 libnc.so> <对应 apk>
 | `VmVirtualize` 日志出现过 | 构建时 `RUST_LOG=amice=debug` |
 | `.text` / `.rodata` 体积差 | 对照组做减法 |
 
-详见 `docs/so层防御/VMP接入交接-2026-11-11.md` §4.3.1。
+详见 `nox/docs/so防护架构.md` §12–13（VMP profile 配置）。

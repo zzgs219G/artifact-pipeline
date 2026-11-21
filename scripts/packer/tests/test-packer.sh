@@ -270,13 +270,13 @@ cp "$SCHEMA" "$RESOLVE_ROOT/configs/v1/"
   GITHUB_WORKSPACE="$RESOLVE_ROOT" python3 "$ROOT/scripts/actions/resolve-config.py" \
   >"$STUB_DIR/resolve.log" 2>&1)
 check "⑰勾选 packer → 吐 --packer" \
-  "$(grep -cx -- '--packer' "$RESOLVE_ROOT/schema_rules/args.txt" 2>/dev/null || echo 0)" "1"
+  "$(grep -cx -- '--packer' "$RESOLVE_ROOT/build/schema_rules/args.txt" 2>/dev/null || echo 0)" "1"
 
 (cd "$RESOLVE_ROOT" && INPUT_PROTECT_CONFIG='{"schema_version":1,"sigcheck":true}' \
   GITHUB_WORKSPACE="$RESOLVE_ROOT" python3 "$ROOT/scripts/actions/resolve-config.py" \
   >"$STUB_DIR/resolve2.log" 2>&1)
 check "⑱旧 App 快照无 packer 键 → 不报错(向后兼容)" \
-  "$(grep -c -- '--packer' "$RESOLVE_ROOT/schema_rules/args.txt" 2>/dev/null | head -1)" "0"
+  "$(grep -c -- '--packer' "$RESOLVE_ROOT/build/schema_rules/args.txt" 2>/dev/null | head -1)" "0"
 
 echo ""
 [[ $fail -eq 0 ]] && echo "packer 冒烟全绿" || echo "packer 冒烟有失败"

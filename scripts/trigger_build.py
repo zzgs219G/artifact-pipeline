@@ -202,7 +202,7 @@ def build_config(args) -> str:
 
     # ── 规则文件：值是【文件内容】而非路径 ───────────────────────────
     # resolve-config.py 的 value_kind=rules_file 语义：非空 → 写
-    # schema_rules/<module>_<child>.txt，把路径追加在 arg 后；
+    # build/schema_rules/<module>_<child>.txt，把路径追加在 arg 后；
     # 空 → 只吐 arg。
     #
     # ⚠️ 字段名必须是 schema 里的 child key（rules_file），不是 "rules"。
@@ -754,6 +754,15 @@ def main() -> int:
                          "用途是量「模块自己」的 so 体积（--no-lock 做不到这一点，"
                          "它只是不加密，nox 代码照样编进去占体积）。"
                          "产物无任何加壳保护，不可发布")
+    ap.add_argument("--abi", default="",
+                    help="只编指定 ABI（如 arm64-v8a）——【本地迭代加速】专用，"
+                         "构建约快 20s。默认空 = 双 ABI（armeabi-v7a + arm64-v8a），"
+                         "与云端生产一致。⚠️ 单 ABI 产物不完整：v7a 设备会装不上，"
+                         "不可发布。云端构建请留空。")
+    ap.add_argument("--debug-report", action="store_true",
+                    help="【调试】编入 so 自检报告：装机后可读 ncguard_log.md，"
+                         "看段熵/VMP/崩溃定位，不用反汇编。"
+                         "⚠️ 产物不可分发（多了可被哨兵文件或环境变量触发的报告模块）。")
 
     g = ap.add_argument_group("模块勾选")
     g.add_argument("--sigcheck", action="store_true", help="签名校验")
@@ -928,6 +937,12 @@ def main() -> int:
         payload["no_lock"] = True
     if args.no_nox:
         payload["no_nox"] = True
+    if args.debug_report:
+        payload["debug_report"] = True
+    if args.abi:
+        # 单 ABI 是本地/CI 调试专用的加速开关，只在 --direct 模式有意义
+        # （relay 侧只转发它认识的字段，新参数会被静默丢弃）。
+        payload["abis"] = args.abi
     print(f"  workflow: {args.workflow}")
 
     if args.direct:

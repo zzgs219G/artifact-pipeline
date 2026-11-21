@@ -25,7 +25,7 @@ ApkForge → 选 APK → 开始处理（约 3 秒，纯本地）→ 自己签名
 **本目录的定位**：上游参考实现 + 云端 workflow 的执行端。
 改逻辑时两边都要同步（`scripts/uncheck/payload/src/` 是唯一真相源，
 ApkForge 用 `payload/build.sh` 的产物）。
-ApkForge 侧的完整说明见它的 `docs/去签名校验.md`。
+ApkForge 侧的完整说明见它的 `../ApkForge/docs/去签名校验.md`。
 
 ---
 
@@ -255,12 +255,78 @@ adb shell "dumpsys package <pkg> | grep -oE 'ApplicationInfo\{[^}]*\}'"
 python3 scripts/uncheck/tests/test-axml.py <manifest>
 ```
 
-## 改代码前必读
+## 改代码前必读（清单）
 
 1. `SigFix.smali` 是**生成物**。改载荷请改 `payload/src/SigFix.java`，
    然后 `bash payload/build.sh`。直接改 smali 会在下次构建被覆盖。
 2. `inject.py` 的 `SENTINEL` 必须与 `payload/build.sh` 的逐字一致，
    否则证书烘焙会静默失败（有自检拦截）。
 3. 载荷里**不得新增 `catch` 之外的抛出路径**。`install()` 是「宁可没生效，
-   也不能让宿主闪退」的语义，任何新增代码都要满足这条。
+   更不能让宿主闪退」的语义，任何新增代码都要满足这条。
 4. 改完跑 `tests/`，并在真机上验证一次 —— 静态合法不等于运行正常。
+
+## 实现要点（为什么这么设计）
+
+### 载荷分两个 dex，不能合并
+
+```
+boot.dex      SigFix + SigFixApp  → 进目标 App 的 classes{N+1}.dex
+payload.dex   SigFixImpl           → 进 assets，运行时 new DexFile(path) 加载
+```
+
+`SigFixImpl` 必须由 **BootClassLoader** 加载才能反射访问 hidden API。
+编进 App 自己的 dex → 应用域 → 反射被拦（实测 Android 17：
+`setHiddenApiExemptions` 直接 `blocked`，报 `NoSuchMethodException`）。
+
+### 载荷类是静态的，配置在 JSON 里
+
+```
+payload/*.dex              不含任何目标相关数据（可入 git / 可下载 / 可缓存）
+assets/nc_sigfix/sigfix.json  唯一的目标相关数据：
+                              {"cert": "<原证书 DER 的 Base64>", "originalApp": "com.x.Y"}
+```
+
+为什么不做「烘焙进 dex」：证书长度随 keystore 变（888~1152 字符），
+改 dex 字符串池要重建；且每换一个目标 App 就要重编 dex。
+
+### 每一步都必须兜住异常
+
+`install()` / `attachBaseContext()` 里**严禁往上抛**。
+目标 App 千奇百怪，我们的假设随时会错；崩了就等于这个模块不可用。
+
+MT 的实现在简盒 v2.1.2 上就是栽在这：`IllegalAccessException`（改 static final
+被拒）→ 抛 `RuntimeException` → `ExceptionInInitializerError` → App 在
+`makeApplicationInner` 阶段崩。我们遇到同一条异常只记日志。
+
+### 载荷类禁止读静态字段
+
+handler 会被 `handlerLoader` 重新加载成另一个 Class 副本，静态字段不共享。
+数据一律经构造器传入。
+
+---
+
+
+## 两边同步纪律与回归测试
+
+
+| 改什么 | 同步到 |
+|---|---|
+| `scripts/uncheck/payload/src/*.java` | 跑 `payload/build.sh` → 产物 `boot.dex` / `payload.dex` 发布到 json 仓库 |
+| `scripts/uncheck/axml_edit.py` 的逻辑 | `ApkForge/core/axml/AxmlEditor.kt` 必须同步改（两份实现，同样两条红线） |
+| 载荷版本 | json 仓库 `backend/uncheck/index.json` 的 version + sha256 |
+
+**唯一真相源是 `payload/src/`**，ApkForge 只消费编译产物。
+
+---
+
+## 回归测试
+
+```bash
+# AXML 改写（8 组断言，用真实 Manifest 做夹具）
+python3 scripts/uncheck/tests/test-axml.py <path-to-AndroidManifest.xml>
+
+# 夹具从任意 APK 取：
+unzip -p app.apk AndroidManifest.xml > /tmp/m.xml
+```
+
+T4（插在升序位）/ T5（`raw == data` 且为字符串类型）钉死的正是坑 39 的两个根因。

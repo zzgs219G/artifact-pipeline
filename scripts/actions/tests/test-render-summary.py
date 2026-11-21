@@ -101,7 +101,10 @@ check("动态控制流也在表格里且带参数",
       [l for l in md2.splitlines() if "vm_flatten" in l])
 check("rules_file 显示行数", "已填（2 行规则）" in md2,
       [l for l in md2.splitlines() if "rules_file" in l])
-check("text 值原样", "| chacha20 |" in md2)
+# 2026-11-22：algo 是 value_kind=choice，应打印 option 的 label 而不是裸 value
+# （"chacha20" 对人没意义，「安全优先」才有）。与 resolve-config 的 _dump_plan 同口径。
+check("choice 打印 label 而非裸 value", "| 安全优先 |" in md2,
+      [l for l in md2.splitlines() if "algo" in l or "密钥流" in l])
 
 # rules_file 留空时的提示
 md3 = render({"schema_version": 1, "stringenc": {"enabled": True, "rules_file": ""}})

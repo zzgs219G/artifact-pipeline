@@ -173,7 +173,7 @@ tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
 3. **修复冻结模块的真实 bug**: 必须满足——
    - 用户在当次对话明确报告了该模块的错误行为(附日志/复现);
    - 改动后回归测试全绿(若 `tests/` 目录存在);
-   - 在 `docs/变更历史.md` 追加一行(报错 N)记录根因。
+   - 在 `docs/变更历史/` 对应分卷追加一行(报错 N)记录根因。
 4. **扩展冻结模块**(加日志、加防御): 只允许**追加**,不允许改写已有逻辑行。
 
 ## 2.5 混淆 pass 选型：按「改哪一类信息」分类，不按数量堆
@@ -192,11 +192,18 @@ tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
 | `flatten` | 静态状态机 | 中等 | ❌ 与 `vm_flatten` 同类，重复 | 不开 |
 | `shuffle_blocks`/`split_basic_block` | 块顺序/拆分 | 小 | ❌ 画个 CFG 就还原 | 不开 |
 
-### 当前配置（4 个子项）
+### 当前配置（4 个子项，默认开 3 个）
 
 ```
-vm + mba + param_aggregate + vm_flatten
+默认开 ：vm + mba + param_aggregate
+需显式开：vm_flatten（体积与编译开销大，见 schema default=false）
 ```
+
+> ⚠️ **本节此前写「当前配置 4 个子项：vm + mba + param_aggregate + vm_flatten」，
+> 与 schema 不符**（2026-11-22 校正）。`configs/v1/config-schema.json` 里
+> `vm_flatten` 的 `default` 是 **false**，且 `scripts/actions/tests/test_obfuscate_args.py`
+> 有断言钉住这一点（"vm_flatten 默认关闭（体积与编译开销大，需显式开）"）。
+> 上表"结论"列的「开」指的是**值得开**，不是**默认开**——两回事，别混。
 
 ### 选型判据
 
@@ -238,7 +245,7 @@ vm + mba + param_aggregate + vm_flatten
 决定是否加宏。出调试包：
 
 ```bash
-DEBUG_REPORT=1 python3 scripts/trigger_build.py app.apk --sigcheck --vmp
+python3 scripts/trigger_build.py app.apk --sigcheck --vmp --debug-report
 ```
 
 详见 `docs/调试包怎么出.md`。
@@ -252,7 +259,7 @@ git diff                          # 自查: 只含预期改动
 ```
 
 (原 `tests/run-tests.sh` 与 module-guard.yml CI 守卫已移除;改动冻结模块
-仍需自查 diff,并在 docs/变更历史.md 留痕。)
+仍需自查 diff,并在 docs/变更历史/ 留痕。)
 
 > ⚠️ **CI 的测试覆盖是分层的（按 `.github/workflows/protect-modules.yml` 实际 step 核对，2026-11-05）**：
 >
@@ -287,5 +294,5 @@ git diff                          # 自查: 只含预期改动
   其他模块的内部函数(公共能力放 `scripts/lib/`)。
 - so 名统一 `nc`;`ndk_write_mk` 是唯一 mk 模板来源(报错十一)。
 - 每个新模块必须带最小回归测试(若仓库恢复 `tests/` 目录则挂进运行入口)。
-- 文档 `docs/流程文档.md` 与代码同步更新；变更留痕写进 `docs/变更历史.md`
+- 文档 `docs/流程文档.md` 与代码同步更新；变更留痕写进 `docs/变更历史/`
   （按时间倒序追加一行，格式同 §3）。

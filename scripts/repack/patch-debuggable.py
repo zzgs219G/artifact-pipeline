@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """patch-debuggable.py — 二进制 AXML 原位改写 android:debuggable（强制 false）。
 
-背景（见 docs/so层防御/外部实测报告结论汇总.md §三 3.2 的直接修复）：
+背景（2026-10-29 外部实测报告 §三 3.2 的直接修复）：
   报告原文："debuggable=true + extractNativeLibs=true → so 落盘可直接替换、
   可 run-as 读写应用目录。虽然后续校验会拦，但给了攻击者替换+观察的便利。"
 

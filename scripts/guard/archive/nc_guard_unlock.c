@@ -39,8 +39,9 @@
  *           + wrapped_k_mac(16) + expect_mac(32)。
  *   k_so  = HKDF(master, SHA256(certDER), "nc-so-v1"+package)
  *   k_mac = HKDF(master, SHA256(certDER), "nc-so-mac-v1"+package)
- *   ⚠️ 证书绑定目前只在【构建期】生效（运行期不做 HKDF、不读 APK），
- *   这是已知短板，见 docs/so层防御/简盒-06-防御强度统一评判.md §1.2。
+ *   ⚠️ 证书绑定目前只在【构建期】生效（运行期不做 HKDF、不读 APK）——
+ *   这是本文件作为历史存档的已知短板。现行 boot.c 已在运行期从已安装
+ *   APK 重提证书派生，本文件不再进 NDK 工程，此处仅作记录。
  */
 #include <elf.h>
 #include <fcntl.h>

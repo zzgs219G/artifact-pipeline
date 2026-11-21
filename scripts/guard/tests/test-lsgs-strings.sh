@@ -230,11 +230,28 @@ else
     bad "② LSG_KEY_LEN 不是 32 —— 可能退回旧实现"
 fi
 
-# ③ 旧的固定 key 字面量不得再出现（防止代码/注释里残留 5ac3119ef037b26d）
-if grep -rq "0x5A, 0xC3, 0x11, 0x9E" "$ROOT/scripts/guard/log/make-sig-log.py" 2>/dev/null; then
-    bad "③ 生成器里仍有旧的固定 key 字面量（5ac3119ef037b26d）"
+# ③ 旧的固定 key 字面量不得再出现在【整个 scripts/ 树】里
+#   （防止代码/注释里残留 5ac3119ef037b26d）
+#
+# 为什么从"只查 make-sig-log.py"扩到"查整个 scripts/"（2026-11-22）：
+#   原来只查生成器一个文件，于是 scripts/tools/so-harden.py 里那行
+#   XOR_KEY = bytes([0x5A, 0xC3, 0x11, 0x9E, ...]) 一直留着 —— 它是
+#   同一把全局固定 key，实测报告说"10 行 Python 全解出"。该文件已删，
+#   但断言若只盯着一个文件，下次换个地方重新引入照样抓不到。
+#   固定 key 的危险性是【全局】的：任何一处用了，所有包都能互解。
+#
+# 排除两类（都不是"活代码"，出现在里面是合理的）：
+#   · 本测试自己 —— 检查语句里必须写出这个字面量才能 grep 它
+#   · scripts/guard/archive/ —— 历史存档，不进 NDK 工程、不参与构建
+#   旧实现就是靠这把 key（那时候还没有证书派生），存档保留旧值是
+#   "当时的事实"，改它反而失真。
+_OLDKEY_HITS=$(grep -rl "0x5A, 0xC3, 0x11, 0x9E" "$ROOT/scripts/" 2>/dev/null \
+    | grep -v "/tests/test-lsgs-strings.sh$" \
+    | grep -v "/archive/" || true)
+if [ -n "$_OLDKEY_HITS" ]; then
+    bad "③ scripts/ 下仍有旧的固定 key 字面量（5ac3119ef037b26d）: $_OLDKEY_HITS"
 else
-    ok "③ 旧固定 key 字面量已消失（不再硬编码 5ac3119ef037b26d）"
+    ok "③ 旧固定 key 字面量已消失（scripts/ 活代码树零命中）"
 fi
 
 # ④ 域分离：不同消息的相同前缀，密文必须不同

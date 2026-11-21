@@ -12,8 +12,12 @@
 
 检查范围：
   · AGENTS.md、README.md（仓库根）
-  · docs/*.md（不含 docs/备份/ 归档、不含 so层防御/ 的历史复盘——
+  · docs/*.md（不含 docs/备份/ 归档——
     那些是"当时的事实"档案，路径本就该保持原样）
+  · scripts/**/README.md 与 modules 自己的 docs/（2026-11-22 扩）
+    —— 起因：环境校验的两份文档从 docs/ 移到 scripts/guard/docs/ 后，
+    断言范围仍是 docs/ 单根，结果这两份**静默掉出覆盖**。模块文档跟着
+    代码走是对的，但断言必须跟着扩大，否则「移出去 = 不用查了」。
 
 判定规则：
   只校验"看起来像仓库内路径"的反引号内容：必须含 `/` 且以已知扩展名结尾。
@@ -30,14 +34,22 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")
 
 # 需要校验的文档
 DOC_FILES = ["AGENTS.md", "README.md"]
-DOC_DIRS = ["docs"]
+DOC_DIRS = ["docs", "scripts", "tools"]
+
+# 只在这些路径模式下才纳入 scripts/ 与 tools/ 下的 md，
+# 避免把冻结模块的说明性文件、构建产物说明拉进来。
+MODULE_DOC_GLOBS = ("README.md",)
 
 # 归档 / 历史 / 计划类文档：内容是"当时的事实"或"待办设想"，
 # 路径不跟随迁移。判定依据是它们自己的头注（变更历史.md 明写"路径都是当时的"）。
 SKIP_FILES = {"变更历史.md", "报错速查.md"}
 
 # 归档目录
-SKIP_DIRS = {"备份", "so层防御"}
+SKIP_DIRS = {"备份"}
+
+# 归档目录（按路径前缀）：变更历史已从单文件拆为 docs/变更历史/，
+# 里面每条记录都写着当时的路径，同一份"历史事实不跟随迁移"的理由。
+SKIP_PREFIXES = ("docs/变更历史/",)
 
 # 只校验以这些【仓库顶层目录】开头的路径。
 # 不这么做的话会把大量"相对简写"（表格里的 lib/common.sh 指 scripts/lib/common.sh）
@@ -89,12 +101,27 @@ def collect_docs():
         base = os.path.join(ROOT, d)
         if not os.path.isdir(base):
             continue
+        # docs/ 下全收；scripts/ 与 tools/ 只收 README.md 与 **/docs/*.md
+        is_top_docs = (d == "docs")
         for dirpath, dirnames, filenames in os.walk(base):
-            # 原地裁剪，避免走进归档目录
-            dirnames[:] = [x for x in dirnames if x not in SKIP_DIRS]
+            # 原地裁剪，避免走进归档目录与构建产物目录
+            dirnames[:] = [x for x in dirnames
+                           if x not in SKIP_DIRS
+                           and os.path.relpath(os.path.join(dirpath, x), ROOT)
+                           .replace(os.sep, "/") + "/" not in BUILD_ARTIFACT_PREFIXES]
             for fn in filenames:
-                if fn.endswith(".md") and fn not in SKIP_FILES:
-                    out.append(os.path.join(dirpath, fn))
+                if not fn.endswith(".md") or fn in SKIP_FILES:
+                    continue
+                full = os.path.join(dirpath, fn)
+                rel = os.path.relpath(full, ROOT).replace(os.sep, "/")
+                if any(rel.startswith(p) for p in SKIP_PREFIXES):
+                    continue
+                if not is_top_docs:
+                    # 模块文档只有两种：<mod>/README.md 或 <mod>/docs/*.md
+                    in_docs_dir = os.sep + "docs" + os.sep in os.sep + rel
+                    if not (fn in MODULE_DOC_GLOBS or in_docs_dir):
+                        continue
+                out.append(full)
     return sorted(out)
 
 

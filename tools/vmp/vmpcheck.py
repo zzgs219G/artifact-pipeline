@@ -18,7 +18,7 @@
    可靠判据只有两条：
      · `RUST_LOG=amice=debug` 里 VmVirtualize 是否出现过
      · 对照组 `.text` / `.rodata` 体积差
-   详见 docs/so层防御/VMP接入交接-2026-11-11.md §4.3.1。
+详见 `nox/docs/so防护架构.md` §12–13（VMP profile 配置）。
 本脚本用于「单个产物自查」——解出 .ncx 看函数序言是否符合 VMP wrapper 特征。
 """
 import struct, zlib, hashlib, hmac, sys, re, math

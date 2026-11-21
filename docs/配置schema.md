@@ -37,7 +37,7 @@ configs/v1/config-schema.json          ← 唯一真相源（UI + 校验 + 执�
 
 | 字段 | 必填 | 取值 | 说明 |
 |---|---|---|---|
-| `key` | ✅ | 全仓唯一 | 同时是 `protect_config` 的顶层 key、argv 的来源、`schema_rules/<key>.txt` 的文件名 |
+| `key` | ✅ | 全仓唯一 | 同时是 `protect_config` 的顶层 key、argv 的来源、`build/schema_rules/<key>.txt` 的文件名 |
 | `label` | ✅ | 中文字符串 | UI 行标题 |
 | `desc` | ✅ | 中文字符串 | UI 帮助弹窗；**性能影响必须写在这里**（项目约定，见 §5） |
 | `type` | ✅ | `"leaf"` \| `"parent"` | leaf=无子选项；parent=有 `children` |
@@ -162,11 +162,11 @@ value_kind = 怎么执行      （resolve-config.py 唯一关心的）
 
 | 输入 | 输出 |
 |---|---|
-| 非空 | 写 `schema_rules/<模块key>.txt`，argv 追加该**相对路径** |
+| 非空 | 写 `build/schema_rules/<模块key>.txt`，argv 追加该**相对路径** |
 | 空 + 通过 `unless` 豁免 | 只吐模块 `arg`，不追加文件 |
 | 空 + 无豁免 | **保险丝 d 集中报错**（拼上 `hint`） |
 
-⚠️ **规则内容永不进 argv**（保险丝 f）。路径以 `schema_rules/` 相对形式追加，
+⚠️ **规则内容永不进 argv**（保险丝 f）。路径以 `build/schema_rules/` 相对形式追加，
 不是绝对路径 —— 绝对路径碰上 Actions workspace 前缀会混进 argv。
 
 ⚠️ **`.txt` 文件名用的是「模块 key」，不是子项 key。** 两个模块的
@@ -353,7 +353,7 @@ keys == ["sigcheck", "dex2c", "vmp", "stringenc",
 `protect.sh` 报「必须提供类名规则文件」→ `exit 1`。
 
 2026-11-09 就踩了这个：把 `stub_impl` 提到首位后 argv 变成
-`--stringenc --dex2c-stub schema_rules/stringenc.txt`，**改 UI 排序把构建改挂了**，
+`--stringenc --dex2c-stub build/schema_rules/stringenc.txt`，**改 UI 排序把构建改挂了**，
 而当时只有 T6/T6o 两条纯顺序断言变红，看不出这是真故障。
 
 修法是 `resolve-config.py` **不再依赖数组顺序**：把规则文件路径先攒进
@@ -447,6 +447,44 @@ config 有、schema 没有 → **拒绝执行**。方向性不对称是刻意的
 
 如 `--stringenc-native` 与 `--dex2c-stub` 互斥在 `protect.sh` 里有独立 fail-fast，
 不依赖 schema 层拦截。**三层任一层拦住都算成功，但不能只有 UI 层拦。**
+
+### 6.4 回执：`_dump_plan` 打印「实际生效」而不是「提交了什么」
+
+`resolve-config.py` 解析完会往 stdout 打一份人类可读回执，同时进 `build.log`，
+所以 **GitHub run 页面能看到**：
+
+```
+=== 本次勾选的模块 ===
+  ✅ so层保护
+      ✅ VMP 虚拟化
+      ✅ 算术混淆（MBA）
+      ✅ 参数聚合
+      ⬜ 动态控制流（抗动态分析）
+```
+
+**关键规则：回执按「执行侧同一个算法」算生效值，不是打印提交的 JSON。**
+
+为什么这么设计（2026-11-22 修）：子键**未提交** ≠ 子项**未生效**。执行侧走的是
+
+```python
+value = cfg_node.get(ckey, c.get("default", False))   # ← schema default 兜底
+```
+
+旧的回执写成 `if ck not in val: continue`，只打印显式提交的子项。结果是
+**产物带了 `--obfuscate-mba`，回执里一个子项都看不见** —— 用户以为没勾，
+实际勾了。这正是「回执存在要解决的勾了与产物不一致」问题本身。
+
+配套约束：
+
+| 约束 | 说明 |
+|---|---|
+| `visible_when` 不满足 → 不打印 | 否则用户看到「✅ 解密桩也抽进 so」而产物里没这个参数 |
+| 纯文本子项既没提交也没默认值 → 不打印 | 打印一排 `(空=自动)` 是噪音 |
+| `choice` 打印 option 的 `label` 不是裸 `value` | `"c"` 对人没意义，「纯 C 桩」才有 |
+
+> ⚠️ **加新 `value_kind` 时必须同步改 `_dump_plan`**，否则新字段在回执里消失。
+> 这不是可选项：回执是用户核对「我到底勾了什么」的唯一可见载体。
+
 
 ---
 
