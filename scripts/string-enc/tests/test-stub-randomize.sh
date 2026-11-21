@@ -49,7 +49,8 @@ SMALI
 
 echo "══ ①② 首跑:不传 --stub-name,桩名必须随机 ══"
 make_dec "$WORK/dec"
-python3 "$_ENC" "$WORK/dec" "$WORK/rules.txt" --seed-hex 0123456789abcdef --quiet
+python3 "$_ENC" "$WORK/dec" "$WORK/rules.txt" --stub-impl java \
+    --seed-hex 0123456789abcdef --quiet
 
 STAMP="$WORK/dec/stringenc-components.json"
 chk "组件标记存在" test -f "$STAMP"
@@ -125,7 +126,8 @@ cat > "$DEC2/smali/com/demo/A.smali" <<'SMALI'
 .end method
 SMALI
 printf '**\n' > "$WORK/rules2.txt"
-python3 "$_ENC" "$DEC2" "$WORK/rules2.txt" --seed-hex 0123456789abcdef --quiet
+python3 "$_ENC" "$DEC2" "$WORK/rules2.txt" --stub-impl java \
+    --seed-hex 0123456789abcdef --quiet
 cat > "$DEC2/smali/com/demo/B.smali" <<'SMALI'
 .class public Lcom/demo/B;
 .super Ljava/lang/Object;

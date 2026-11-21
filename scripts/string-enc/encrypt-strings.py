@@ -57,6 +57,10 @@ STUB_DESC = 'Lcom/nc/strdec/StrDec;'
 STUB_PKG_DIR = ('com', 'nc', 'strdec')
 STUB_FILE = 'StrDec.smali'
 STUB_GEN_MARK = '# nc-strdec-gen v2'          # 桩文件内的生成标记(识别"这是我们写的")
+# 纯 C 桩的生成标记（必须与 native_stub.NATIVE_GEN_MARK 逐字一致 ——
+# 两处分开定义是因为 native_stub 是延迟 import 的，见 write_native_stub 调用点；
+# 一致性由 tests/test-cstrdec.sh 断言钉住）。
+_NATIVE_GEN_MARK = '# nc-strdec-native v1'
 # 解密主方法名 —— 「只盯最危险一步」的警报器只管这个方法(见 _check_stub_registers)
 STUB_DECRYPT_METHOD = 'd'
 # 桩实现选择（--stub-impl）：'native'（默认）| 'java'（已归档）
@@ -1039,10 +1043,21 @@ def recover_identifiers_from_stamp(decompiled_dir: str) -> bool:
                          f'   解包目录可能被重建过,请 clean 后重新加密。')
     with open(src, encoding='utf-8') as fp:
         content = fp.read()
-    if STUB_GEN_MARK not in content:
+    # ⚠️ 必须同时认两种桩的生成标记（2026-11-22）：
+    #   Java 桩   → STUB_GEN_MARK   '# nc-strdec-gen v2'
+    #   native 桩 → NATIVE_GEN_MARK '# nc-strdec-native v1'
+    # 此前只认前者。默认实现改成 native 后，续跑读到 native 桩会误判成
+    # "不是本工具生成的桩" → fail-fast。这是纯 C 桩路径启动时的第一个真 bug，
+    # 因为以前默认 java，这条分支从未被 native 桩走到过。
+    if STUB_GEN_MARK not in content and _NATIVE_GEN_MARK not in content:
         raise SystemExit(f'❌ 组件标记指向的文件不是本工具生成的桩: {src}')
-    mm = re.search(r'^\.method public static (\S+)\(Ljava/lang/String;\)Ljava/lang/String;',
-                   content, re.M)
+    # 两种桩的声明形态不同，正则必须同时匹配（2026-11-22）：
+    #   Java 桩  : .method public static <name>(Ljava/lang/String;)Ljava/lang/String;
+    #   native 桩: .method public static native <name>(Ljava/lang/String;)Ljava/lang/String;
+    # 只匹配前者会让 native 桩续跑时判定"签名形态变了"。
+    mm = re.search(
+        r'^\.method public static (?:native )?(\S+)\(Ljava/lang/String;\)Ljava/lang/String;',
+        content, re.M)
     if not mm:
         raise SystemExit(f'❌ 桩文件里找不到解密主方法(签名形态变了?): {src}')
     apply_stub_identifiers(pkg_slash.replace('/', '.'), cls_name, mm.group(1))
@@ -1680,9 +1695,20 @@ def read_existing_salt(decompiled_dir: str):
         return None, True
     with open(stub_path, encoding='utf-8') as fp:
         content = fp.read()
-    if STUB_GEN_MARK not in content:
+    # 两种桩的标记都要认（2026-11-22）：默认实现改 native 后，这里读到的是
+    # native 桩，只认 STUB_GEN_MARK 会把自家产物判成"用户同名类"→ 拒绝覆盖。
+    if STUB_GEN_MARK not in content and _NATIVE_GEN_MARK not in content:
         raise SystemExit(f'❌ 已存在同名类但非本工具生成,拒绝覆盖: {stub_path}\n'
                          f'   请改名或移走用户的 {STUB_DESC} 后重试')
+
+    # ⚠️ native 桩的种子【不在 dex 里】（2026-11-22）：
+    #   Java 桩  : SEED 字段的初值就是种子 → 可从文件读回（旧密文才解不开）
+    #   native 桩: 算法与密钥都在 libnc.so，dex 侧只有 native 声明
+    #              → 文件里根本没有种子可读。
+    # 此时返回 None = 沿用调用方传入的 seed（protect.sh 每轮传同一个），
+    # 不能抛"缺少 SEED 字段"——那是把 Java 桩的前提套到 native 桩上。
+    if _NATIVE_GEN_MARK in content and STUB_GEN_MARK not in content:
+        return None, False
     return read_stub_seed(content), False
 
 def _pick_smali_root(decompiled_dir: str) -> str:
@@ -1764,7 +1790,8 @@ def clean_components(decompiled_dir: str) -> int:
         if not os.path.isfile(target):
             continue
         with open(target, encoding='utf-8') as fp:
-            if STUB_GEN_MARK not in fp.read():
+            _c = fp.read()
+            if STUB_GEN_MARK not in _c and _NATIVE_GEN_MARK not in _c:
                 continue                            # 不是我们的文件 → 不删
         os.remove(target)
         removed += 1

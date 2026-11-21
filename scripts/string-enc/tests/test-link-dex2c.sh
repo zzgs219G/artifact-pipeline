@@ -67,6 +67,7 @@ cat > work/rules.txt <<'EOF'
 com.demo.**
 EOF
 python3 "$SE/encrypt-strings.py" work/dec work/rules.txt \
+    --stub-impl java \
     --seed-hex 0123456789abcdef \
     --emit-stub-filter work/stub_filter.txt 2>&1 | tail -5
 echo "   filter 内容:"

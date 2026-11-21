@@ -8,6 +8,12 @@
 #   ④ 注入的桩含真种子、零哨兵残留、无 .line/.source
 #   ⑤ 幂等: 再跑一次,产物字节完全一致
 #   ⑥ 种子复用: 第二次跑读回第一次的种子(不重新生成)
+#
+# ⚠️ 本套只测【Java 桩】（--stub-impl java）。2026-11-22 起默认实现改成
+#    纯 C 桩，Java 桩降为归档兼容路径（源码在 stub-src/，恢复说明见
+#    docs/备份/java桩-归档-2026-11-22/README.md）。所以这里必须显式指定，
+#    否则会吃到新默认值 → 27 个断言全部对着 native 桩跑，必然红。
+#    C 桩的回归在 test-cstrdec.sh / test-cstrdec-e2e.sh。
 #   ⑦ 桩【真过 apktool 汇编】(报错二十七): 注入后的 smali 必须能被 apktool
 #      真正汇编成 dex —— 文本断言(含真种子/零哨兵)拦不住"文件被腰斩"这类
 #      结构损坏, 只有真汇编才暴露(历史: mismatched input '' expecting
@@ -45,7 +51,8 @@ printf 'com.demo.**\n' > "$WORK/rules.txt"
 
 SEED=0123456789abcdef
 echo "══ 第 1 次运行(指定种子 $SEED)══"
-python3 "$_ENC" "$WORK/decompiled" "$WORK/rules.txt" --seed-hex "$SEED" --stub-name com.nc.strdec.StrDec:d
+python3 "$_ENC" "$WORK/decompiled" "$WORK/rules.txt" --stub-impl java \
+    --seed-hex "$SEED" --stub-name com.nc.strdec.StrDec:d
 DEMO="$WORK/decompiled/smali/com/demo/Demo.smali"
 STUB="$WORK/decompiled/smali/com/nc/strdec/StrDec.smali"
 
@@ -109,14 +116,16 @@ fi
 echo
 echo "══ 第 2 次运行(幂等: 不指定种子)══"
 BEFORE="$(cat "$DEMO" "$STUB" | md5sum)"
-python3 "$_ENC" "$WORK/decompiled" "$WORK/rules.txt" --stub-name com.nc.strdec.StrDec:d --quiet
+python3 "$_ENC" "$WORK/decompiled" "$WORK/rules.txt" --stub-impl java \
+    --stub-name com.nc.strdec.StrDec:d --quiet
 AFTER="$(cat "$DEMO" "$STUB" | md5sum)"
 chk "产物字节完全一致(幂等)" "[ '$BEFORE' = '$AFTER' ]"
 chk "种子被复用(未重新生成)" "grep -q 'SEED:J = 0x${SEED}L' '$STUB'"
 
 echo
 echo "══ 第 3 次运行(显式冲突种子应被已有桩覆盖)══"
-python3 "$_ENC" "$WORK/decompiled" "$WORK/rules.txt" --seed-hex ffffffffffffffff --stub-name com.nc.strdec.StrDec:d --quiet
+python3 "$_ENC" "$WORK/decompiled" "$WORK/rules.txt" --stub-impl java \
+    --seed-hex ffffffffffffffff --stub-name com.nc.strdec.StrDec:d --quiet
 chk "已有桩的种子优先(旧密文仍可解)" "grep -q 'SEED:J = 0x${SEED}L' '$STUB'"
 
 echo
