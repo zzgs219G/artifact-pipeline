@@ -126,6 +126,20 @@ runs:
         echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
         echo "导出 ANDROID_NDK_HOME=$NDK（供宿主测试定位 sysroot）"
 
+        # 诊断落日志：宿主测试失败时能一眼看到本次环境的实际形态，
+        # 不用去猜"CI 上到底是哪个 clang、哪个 sysroot"（2026-11-22）。
+        {
+          echo "── 宿主测试编译环境 ──"
+          echo "  NDK           = $NDK"
+          echo "  ANDROID_CLANG = $ANDROID_CLANG"
+          echo "  裸 clang      = $(command -v clang)"
+          echo "  clang 版本    = $(clang --version 2>/dev/null | head -1)"
+          echo "  sysroot 头    = $(ls "$ANDROID_CLANG" 2>/dev/null | head -1)"
+          for d in "$NDK"/toolchains/llvm/prebuilt/*/sysroot/usr/include; do
+            if [ -f "$d/jni.h" ]; then echo "  jni.h         = $d/jni.h"; fi
+          done
+        } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
     - name: 解压 dex2c 分发包
       shell: bash
       run: |

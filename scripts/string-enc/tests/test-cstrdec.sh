@@ -471,6 +471,15 @@ if command -v "$CC" >/dev/null 2>&1 && [ -n "$_JNI_INC" ]; then
          -o "$W/jnic/$_mode.o" 2>"$W/jnic/$_mode.log"; then
       ok; echo "   ✅ nc_strdec_jni.c 真实编译（$_mode 形态，jni.h=$_JNI_INC）"
     else
+      # 失败时把诊断信息一并打出来 —— 否则只看到一行 "stdlib.h:36"，
+      # 完全看不出用的是哪个 CC、有没有 sysroot（2026-11-22 排查教训）。
+      {
+        echo "       CC     = $(command -v "$CC" 2>/dev/null || echo "$CC")"
+        echo "       _JNI_INC = ${_JNI_INC:-<空>}"
+        echo "       _JNI_FLAG = ${_JNI_FLAG[*]:-<空>}"
+        echo "       ANDROID_NDK_HOME = ${ANDROID_NDK_HOME:-<空>}"
+        echo "       首 3 行错误:"; head -3 "$W/jnic/$_mode.log" | sed 's/^/         /'
+      } >&2
       bad "nc_strdec_jni.c 编译失败（$_mode 形态）：$(head -2 "$W/jnic/$_mode.log" | tr '\n' ' ')"
     fi
   done
