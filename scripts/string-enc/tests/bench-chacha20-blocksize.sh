@@ -25,7 +25,13 @@
 
 set -uo pipefail
 
-CC="${CC:-clang}"
+# ⚠️ 必须选【能在本机执行产物】的编译器（2026-11-22）：
+#    CI 的 setup-toolchain 会把裸 clang 转发到 NDK aarch64 包装器
+#    （为了让 jni.h 可达），编出的 ARM 产物在 x86_64 runner 上跑不了
+#    → 断言全部拿到空字符串，症状是"期望 X 实得 （空）"，极易误判成
+#    被测代码有 bug。判据用可执行性，不是编译器名字。详见 lib/host-cc.sh。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/host-cc.sh"
+CC="${CC:-$(nc_pick_host_cc || echo clang)}"
 command -v "$CC" >/dev/null 2>&1 || CC=cc
 
 W="$(mktemp -d)"

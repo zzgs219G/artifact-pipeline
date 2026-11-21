@@ -26,33 +26,18 @@ SE="$(cd "$HERE/.." && pwd)"                   # scripts/string-enc
 ROOT="$(cd "$SE/../.." && pwd)"                # 仓库根
 CSRC="$SE/csrc"
 # ⚠️ CC 必须是【能在本机执行产物】的编译器（2026-11-22）：
-#    本套件的绝大多数断言都要跑产物（host_cstrdec 驱动 + dlopen 假壳 so），
+#    本套件绝大多数断言都要跑产物（host_cstrdec 驱动 + dlopen 假壳 so），
 #    而 CI 的 setup-toolchain 会把裸 clang 转发到 NDK aarch64 包装器
 #    （为了让 jni.h 可用）—— 编出 ARM 产物在 x86_64 runner 上跑不了，
-#    输出为空 → 327 项全红。
-#    所以这里显式做【可执行性探测】选宿主编译器；
-#    NDK 只在「需要 jni.h 且只需编译不需执行」的那一段单独用（NDK_CC）。
-_pick_host_cc() {
-  local c d
-  d="$(mktemp -d)" || return 1
-  printf 'int main(void){return 0;}\n' > "$d/t.c"
-  for c in clang gcc cc; do
-    command -v "$c" >/dev/null 2>&1 || continue
-    if "$c" "$d/t.c" -o "$d/t" >/dev/null 2>&1 && "$d/t" >/dev/null 2>&1; then
-      rm -rf "$d"; echo "$c"; return 0
-    fi
-  done
-  rm -rf "$d"; return 1
-}
-CC="${CC:-$(_pick_host_cc || echo clang)}"
+#    输出为空 → 327 项全红。判据与说明见 scripts/lib/host-cc.sh。
+source "$ROOT/scripts/lib/host-cc.sh"
+CC="${CC:-$(nc_pick_host_cc || echo clang)}"
 command -v "$CC" >/dev/null 2>&1 || CC=cc
 
-# NDK_CC：只用于"要 jni.h、只编译不执行"的断言（nc_strdec_jni.c 真实编译）。
-# 默认与 CC 相同；若环境里有 NDK target 包装器则优先用它（自带 sysroot）。
-NDK_CC="$CC"
-for _c in "${ANDROID_NDK_HOME:-}"/toolchains/llvm/prebuilt/*/bin/aarch64-linux-android[0-9]*-clang; do
-  [ -x "$_c" ] && NDK_CC="$_c" && break
-done
+# NDK_CC：只用于"要 jni.h、只编译不执行"的断言（nc_strdec_jni.c 真实编译、
+# 预处理取宏值）。没有 NDK 时回落成 CC。
+NDK_CC="$(nc_pick_ndk_cc 2>/dev/null || echo "$CC")"
+command -v "$NDK_CC" >/dev/null 2>&1 || NDK_CC="$CC"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); }
