@@ -117,6 +117,15 @@ runs:
         done
         echo "✔ 裸 clang 已可编 Android 头（jni.h / android/log.h 验证通过）"
 
+        # ⚠️ 把 NDK 根目录导出成环境变量（2026-11-22）：
+        #    test-cstrdec.sh 等测试用 ${ANDROID_NDK_HOME}/toolchains/.../sysroot
+        #    找 jni.h。此前该变量只在 protect job 的【执行模块编排】那一步
+        #    局部设置，test job 里是空的 → 探测全部落空 → 退回 ${PREFIX}/include
+        #    → 拿到 Termux/系统头文件 → 报"stdlib.h 里的错"，指向完全错误的方向。
+        echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+        echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
+        echo "导出 ANDROID_NDK_HOME=$NDK（供宿主测试定位 sysroot）"
+
     - name: 解压 dex2c 分发包
       shell: bash
       run: |

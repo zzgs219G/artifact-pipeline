@@ -450,8 +450,24 @@ if command -v "$CC" >/dev/null 2>&1 && [ -n "$_JNI_INC" ]; then
       [ "$_mode" = nopack ] && echo '#define NC_STRDEC_KEY_BYTES { 1,2,3,4,5,6,7,8 }'
       echo '#endif'
     } > "$W/jnic/nc_strdec_cfg.h"
+    # ⚠️ 不传 -I"$_JNI_INC"（2026-11-22）：
+    #    如果 $CC 是 NDK 的 target 包装器（aarch64-linux-androidNN-clang），
+    #    它【自带 sysroot】，jni.h 与 stdlib.h 天然配套。
+    #    硬塞 -I 指向 sysroot 会打乱头文件解析顺序 → stdlib.h 从宿主取
+    #    → 报 /data/.../usr/include/stdlib.h 的错，方向完全误导。
+    #    只有在 $CC 是【宿主 clang】时才需要 -I（那时没有 sysroot 可用）。
+    _JNI_FLAG=()
+    # 判据不能靠 $CC 的名字：CI 里 PATH 前面放的是一个同名 'clang' 转发器，
+    # basename 就是 "clang"，但它底层指向 NDK target 包装器（自带 sysroot）。
+    # 所以用【能力探测】：能否不带 -I 直接编进 <jni.h> 与 <stdlib.h>。
+    if echo '#include <jni.h>
+#include <stdlib.h>' | "$CC" -x c -fsyntax-only - >/dev/null 2>&1; then
+      :                                   # 自带 sysroot，不传 -I
+    else
+      [ -n "$_JNI_INC" ] && _JNI_FLAG=(-I"$_JNI_INC")
+    fi
     if "$CC" -c -O2 -std=c99 -Wall -Wextra -Werror -fPIC \
-         -I"$W/jnic" -I"$CSRC" -I"$_JNI_INC" "$CSRC/nc_strdec_jni.c" \
+         -I"$W/jnic" -I"$CSRC" "${_JNI_FLAG[@]+"${_JNI_FLAG[@]}"}" "$CSRC/nc_strdec_jni.c" \
          -o "$W/jnic/$_mode.o" 2>"$W/jnic/$_mode.log"; then
       ok; echo "   ✅ nc_strdec_jni.c 真实编译（$_mode 形态，jni.h=$_JNI_INC）"
     else
