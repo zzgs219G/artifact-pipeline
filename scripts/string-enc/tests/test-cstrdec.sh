@@ -419,12 +419,17 @@ fi
 #      被测代码无关，纯属环境缺失造成的噪音。红 CI 会让人逐渐无视红色，
 #      所以这里按「有没有 jni.h」明确分流：找到就编，找不到就打印
 #      skip 原因（不是静默通过 —— 输出里有 ⚠ 行，日志可查）。
+# ⚠️ 探测顺序要覆盖任意宿主架构（2026-11-22）：
+#   原实现只写死 linux-x86_64，在 Termux(aarch64) 上必然落到最后的
+#   ${PREFIX}/include —— 那里有 jni.h，但配的是【宿主 stdlib.h】，
+#   于是编译报 /data/data/com.termux/files/usr/include/stdlib.h 里的错，
+#   看起来像"被测代码有问题"，实际是头文件混用。
+#   正确做法：优先用 NDK 的 sysroot（与 target 配套），兜底才用 PREFIX。
 _JNI_INC=""
 for _cand in \
-    "${ANDROID_NDK_HOME:-}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
-    "${ANDROID_NDK_HOME:-}/sysroot/usr/include" \
-    "${ANDROID_NDK_ROOT:-}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
-    "$HOME/android-ndk-r29-aarch64/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
+    "${ANDROID_NDK_HOME:-}"/toolchains/llvm/prebuilt/*/sysroot/usr/include \
+    "${ANDROID_NDK_ROOT:-}"/toolchains/llvm/prebuilt/*/sysroot/usr/include \
+    "$HOME"/android-ndk-r*/toolchains/llvm/prebuilt/*/sysroot/usr/include \
     "${PREFIX:-}/include" \
     /usr/include ; do
   if [ -n "$_cand" ] && [ -f "$_cand/jni.h" ]; then _JNI_INC="$_cand"; break; fi
