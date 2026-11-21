@@ -52,6 +52,71 @@ runs:
       with:
         ndk-version: ${{ inputs.ndk-version }}
 
+    # ── 把 NDK clang 加进 PATH（2026-11-22）──────────────────────────
+    # 为什么需要：test-so-lock.sh / test-sig-guard2.sh 等宿主端测试直接调用
+    # 裸 `clang` 编译 so，要靠 NDK 的 sysroot 才能找到 jni.h / android/log.h /
+    # 并启用 arm_acle.h 的 ACLE intrinsics。
+    #
+    # ⚠️ 不加这一步的后果（2026-11-22 实测）：CI 会拿到系统 LLVM 18，报
+    #     nc_guard_jni.c:18: fatal error: 'jni.h' file not found
+    #     /usr/lib/llvm-18/.../arm_acle.h:21: "ACLE intrinsics support not enabled."
+    #   而本地 Termux 有 NDK 的 include 路径，所以本地绿、CI 红。
+    #
+    # ⚠️ 这个 bug 潜伏了很久没被发现：test job 的这批 step 都有
+    #    `if: steps.scope.outputs.code == 'true'`，只在改代码时跑。
+    #    历史上多次推送只改文档（code=false）→ 整批被跳过 → 显示 success，
+    #    但那是"跳过"不是"通过"。直到 2026-11-22 一次真改代码才暴露。
+    #
+    # prebuilt 目录名依宿主架构而异（linux-x86_64 / linux-aarch64），动态探测。
+    - name: 让裸 clang 指向 NDK 的工具链（宿主测试用）
+      shell: bash
+      run: |
+        set -o pipefail
+        NDK="${{ steps.ndk.outputs.ndk-path }}"
+        test -d "$NDK" || { echo "❌ NDK 目录不存在: $NDK"; exit 1; }
+
+        # 找 prebuilt 目录（宿主架构决定名字：linux-x86_64 / linux-aarch64）
+        BIN=""
+        for cand in "$NDK"/toolchains/llvm/prebuilt/*/bin; do
+          if [[ -x "${cand}/clang" ]]; then BIN="$cand"; break; fi
+        done
+        [[ -n "$BIN" ]] || { echo "❌ NDK 里找不到 clang"; ls "$NDK/toolchains/llvm/prebuilt/" 2>/dev/null; exit 1; }
+
+        # ⚠️ 关键：NDK 的裸 clang【默认不带 Android sysroot】——
+        #    实测 `echo '#include <jni.h>' | clang -x c -fsyntax-only -` 会失败，
+        #    因为 jni.h/android/log.h 只在 sysroot 里，且 arm_acle.h 需要
+        #    target 才启用 ACLE intrinsics。必须走【带 target 前缀的包装器】：
+        #      aarch64-linux-android26-clang  ✅
+        #      clang（裸）                     ❌ jni.h not found
+        #    所以这里不放 BIN 进 PATH（那只会拿到裸 clang），而是造一个
+        #    名为 clang 的转发脚本放到 PATH 最前面，把所有调用转给包装器。
+        WRAP="$RUNNER_TEMP/ndk-clang"
+        mkdir -p "$WRAP"
+        ANDROID_CLANG="$(ls "$BIN"/aarch64-linux-android[0-9]*-clang 2>/dev/null | sort -V | head -1)"
+        [[ -n "$ANDROID_CLANG" ]] || { echo "❌ 找不到 aarch64-linux-android*-clang: $BIN"; ls "$BIN" | grep -i clang | head; exit 1; }
+
+        # 宿主测试产物是跑在本机跑不起来的（测试只用 ELF 解析/符号检查），
+        # 所以固定 arm64 target 与生产一致即可。
+        for name in clang clang++; do
+          cat > "$WRAP/$name" <<WRAPEOF
+        #!/usr/bin/env bash
+        # 自动生成：把裸 $name 转发给 NDK 的 target 包装器。
+        # 目的：test-so-lock.sh 等宿主测试写的是裸 clang，需要 Android sysroot。
+        exec "$ANDROID_CLANG" "\$@"
+        WRAPEOF
+          chmod +x "$WRAP/$name"
+        done
+        echo "$WRAP" >> "$GITHUB_PATH"
+        echo "clang → $ANDROID_CLANG"
+
+        # 立即验证（否则要等具体测试失败才发现，排查成本高）
+        export PATH="$WRAP:$PATH"
+        for h in jni.h android/log.h; do
+          echo "#include <$h>" | clang -x c -fsyntax-only - \
+            || { echo "❌ 转发后的 clang 找不到 $h"; exit 1; }
+        done
+        echo "✔ 裸 clang 已可编 Android 头（jni.h / android/log.h 验证通过）"
+
     - name: 解压 dex2c 分发包
       shell: bash
       run: |

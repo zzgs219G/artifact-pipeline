@@ -144,12 +144,17 @@ cp "$GUARD_SRC"/nc_guard_boot.c "$GUARD_SRC"/nc_guard_probe.c \
    "$GUARD_SRC"/nc_guard_key.h "$GUARD_SRC"/nc_guard_layout.h \
    "$GUARD_SRC"/nc_guard_paths.c "$GUARD_SRC"/nc_guard_paths.h \
    "$GUARD_SRC"/nc_guard_internal.h \
-   "$GUARD_SRC"/nc_guard_xor.c "$GUARD_SRC"/nc_guard_crypto.c "$WORK/"
+   "$GUARD_SRC"/nc_guard_xor.c "$GUARD_SRC"/nc_guard_crypto.c \
+   "$GUARD_SRC"/nc_guard_report.c "$WORK/"
 # ⚠️ 2026-11-08：补 nc_guard_internal.h + nc_guard_xor.c + nc_guard_crypto.c。
 #    nox 在 2026-11-06 拆文件时本清单没同步，导致 T1 编译报
 #    "'nc_guard_internal.h' file not found"（ncg_boot_key / ncguard_stub_recover
 #    迁到 crypto.c 后新增的跨 TU 声明头）。这正是 AGENTS.md §1.1 记的
 #    "拆分/新增 .c 文件必须同步四处清单" 的老坑 —— 第五处是本文件。
+# 2026-11-22：第六次复发 —— nox 在 2026-11-13 新增 nc_guard_report.c
+#    （提供 ncg_trace / ncg_report_*），本文件的【拷贝清单】与两处【编译清单】
+#    都没同步 → dlopen 报 "cannot locate symbol ncg_trace" → T4 恒 -999。
+#    判据以 nox 的 LIB_SRCS 为准（make-zip-lib.sh:91，当前 8 个 .c）。
 cp "$SRC"/nc_link.c "$SRC"/env_check.c "$SRC"/env_probes.c \
    "$SRC"/env_internal.h "$SRC"/sig_check.c "$WORK/"
 
@@ -180,8 +185,14 @@ LDFLAGS="-Wl,--gc-sections -Wl,--build-id=none -Wl,--version-script=hide.map"
 # sig_log_data.h 依赖 sig_check.c + env_check.c 的 LSG 标记，必须先跑生成器
 python3 "$ROOT/scripts/guard/log/make-sig-log.py" \
      sig_check.c env_check.c env_probes.c sig_log_data.h >siglog.log 2>&1 || true
+# ⚠️ 清单必须与 nox 的 LIB_SRCS 一致（2026-11-22）：
+#   nc_guard_boot probe key paths jni xor crypto **report**
+#   漏了 report 会导致 ncg_trace / ncg_report_* 未定义 → dlopen 报
+#   "cannot locate symbol ncg_trace" → T4 恒返回 -999（真机上是 SIGILL 级问题）。
+#   历史上这里是 7 个文件，nox 在 2026-11-13 加 nc_guard_report.c 后没同步。
 if clang $CFLAGS -I. nc_guard_boot.c nc_guard_probe.c nc_guard_jni.c \
         nc_guard_key.c nc_guard_paths.c nc_guard_xor.c nc_guard_crypto.c \
+        nc_guard_report.c \
         nc_link.c env_check.c env_probes.c sig_check.c \
         $LDFLAGS -o libnc.so 2>build.log; then
     ok "T1 编译通过（$(stat -c%s libnc.so) B）"
@@ -876,7 +887,11 @@ fi
 # 防的是"手打错一个字母"：编译链接全过，直到锁箱期才报"段不存在"，
 # 且那条报错不告诉你是拼错了。
 if [ -f "$LAYOUT_H" ]; then
-    registered=$(sed -n 's/^#define NC_SEC_[A-Z_]*[[:space:]]*"\([^"]*\)".*/\1/p' "$LAYOUT_H" | sort -u)
+    # ⚠️ 字符类必须含 0-9（2026-11-22）：nox 加了第二套 VMP 后，
+    #    段名宏变成 NC_SEC_VMP2 / NC_SEC_VMPBC2 / NC_SEC_VMPTBL2 ——
+    #    只用 [A-Z_]* 会把这三行整条漏读，于是 .nct/.ncv/.ncw 被判"未登记"，
+    #    T21 恒红。同一类教训在 ARG_RE 上也踩过（--dex2c 含数字 2）。
+    registered=$(sed -n 's/^#define NC_SEC_[A-Z_0-9]*[[:space:]]*"\([^"]*\)".*/\1/p' "$LAYOUT_H" | sort -u)
     if [ -n "$registered" ]; then
         bad_found=0
         # 收集源码里出现的所有 .nc 开头段名（含 section("...") 与裸字符串）
@@ -950,7 +965,8 @@ if [ -f libnc.so ] && [ -n "${APK:-}" ] && [ -f "$APK" ]; then
     CF="-fPIC -shared -fvisibility=hidden -fno-ident -Oz \
         -ffunction-sections -fdata-sections -DNC_GUARD_SECTIONED"
     if clang $CF -I. nc_guard_boot.c nc_guard_probe.c nc_guard_jni.c \
-            nc_guard_key.c nc_link.c env_check.c env_probes.c sig_check.c \
+            nc_guard_key.c nc_guard_report.c \
+            nc_link.c env_check.c env_probes.c sig_check.c \
             -Wl,--gc-sections -Wl,--build-id=none -Wl,--strip-all \
             -o libnc_stripped.so 2>strip.log; then
         # ① strip 后 .symtab/.strtab 应归零
@@ -1118,15 +1134,18 @@ if printf '%s\n' "$BOOT_CODE2" | grep -q 'ncg_pkg_matches'; then
 else
     ok "T28 包名校验已改为数据依赖（ncg_pkg_fault，无 if 可 patch）"
 fi
+# ⚠️ 不写死目标变量名（2026-11-22）：nox 把接收方从 k_cert 改名为 k_out，
+#    而断言里写的是 `k_cert[i] ^= fault[i & 7]` → 匹配不到 → 假红。
+#    要验的语义只有一条：**fault 确实被异或进某个密钥数组**，不是仅算出来。
 if grep -q 'ncg_pkg_fault' "$BOOT_C2" 2>/dev/null \
-   && grep -q 'k_cert\[i\] \^= fault\[i & 7\]' "$BOOT_C2" 2>/dev/null; then
+   && grep -qE '[A-Za-z_][A-Za-z_0-9]*\[i\] \^= fault\[i & 7\]' "$BOOT_C2" 2>/dev/null; then
     ok "T28 包名偏差确实异或进 k_so（不是仅计算不生效）"
 else
     bad "T28 ncg_pkg_fault 存在但未混入密钥 —— 校验变成纯装饰"
 fi
 # 负向：不能被误写成"偏差算出来后丢弃"
 if grep -qE 'ncg_pkg_fault\([^)]*\);?[[:space:]]*$' "$BOOT_C2" 2>/dev/null \
-   && ! grep -q 'k_cert\[i\] \^= fault' "$BOOT_C2" 2>/dev/null; then
+   && ! grep -qE '[A-Za-z_][A-Za-z_0-9]*\[i\] \^= fault' "$BOOT_C2" 2>/dev/null; then
     bad "T28 偏差算了但没用于密钥（静默失效）"
 fi
 
@@ -1382,14 +1401,29 @@ PYT33
         skip "T33 无 libnc.so，跳过段归属检查"
     fi
 
-    # 33c 基线必须在 ncg_head_unlock 内采集（源码结构检查）
-    # 判据：ncg_baseline_init 的调用点必须出现在 ncg_head_unlock 函数体内，
-    # 且不能只在 watchdog 里出现。
-    _BODY=$(awk '/^int ncg_head_unlock\(void\)/{f=1} f{print} f&&/^}$/{exit}' "$BOOT_C33")
-    if printf '%s\n' "$_BODY" | grep -q 'ncg_baseline_init'; then
-        ok "T33 基线在 ncg_head_unlock 内采集（紧贴解密完成时刻）"
+    # 33c 基线必须在【解密完成的那一刻】采集（源码结构检查）
+    #
+    # 要验的语义：采集点紧贴解密，不能被延到 watchdog 首轮轮询 ——
+    # 否则攻击者在 unlock 后、首轮轮询前挂的 hook 会被当成正确基线，
+    # 完整性检测永久失效。
+    #
+    # 实现位置随 nox 重构变过（2026-11-22 校正）：
+    #   · 旧版：直接在 ncg_head_unlock 体内
+    #   · 现版：nox 把解密循环拆成独立函数 ncg_decrypt_segments，
+    #          采集点跟着挪进去了 —— 语义不变（仍是解密完立刻采），
+    #          但如果还只查 ncg_head_unlock 就会假红。
+    # 所以判据放宽为「二者之一」：只要在解密路径上且不是 watchdog 就行。
+    # watchdog 里的那一处是【比对】不是【采集】，所以下面还要求
+    # 采集点在 watchdog 函数体之外。
+    _HIT=""
+    for _fn in ncg_head_unlock ncg_decrypt_segments ncg_decrypt_one_seg; do
+        _BODY=$(awk "/^(static )?(int|void) ${_fn}\\(/{f=1} f{print} f&&/^}\$/{exit}" "$BOOT_C33")
+        if printf '%s\n' "$_BODY" | grep -q 'ncg_baseline_init'; then _HIT="$_fn"; break; fi
+    done
+    if [ -n "$_HIT" ]; then
+        ok "T33 基线在 $_HIT 内采集（紧贴解密完成时刻）"
     else
-        bad "T33 基线未在 ncg_head_unlock 内采集 —— 若延到首轮轮询，\
+        bad "T33 基线未在解密路径（ncg_head_unlock / ncg_decrypt_segments）内采集 —— 若延到首轮轮询，\
 攻击者在 unlock 后挂的 hook 会被当成正确基线，检测永久失效"
     fi
 
