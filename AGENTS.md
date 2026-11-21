@@ -268,11 +268,36 @@ git diff                          # 自查: 只含预期改动
 >
 > | 层 | 内容（与 workflow 的 step 一一对应） | 触发 |
 > |---|---|---|
-> | `test` job 第一批（<10s） | 文档路径校验 / schema 结构 / resolve-config 40 用例 / workflow yml / smali 参数槽 / dex 版本头 / **inject-loadlib 73 断言** / **mark-native 42 断言** | 按改动范围过滤，与构建**并行** |
-> | `test` job 第二批（~4min） | anti-diff 冒烟 / **dex 容量 33 断言** / packer 26 项 / **stringenc 五套**（含 apktool 真汇编、密钥流 468 例、联动端到端） | 仅改代码时跑 |
+> | `test` job 第一批（<10s） | 文档路径校验 / schema 结构 / resolve-config（用例数跑一遍看，勿抄） / workflow yml / smali 参数槽 / dex 版本头 / **inject-loadlib 73 断言** / **mark-native 42 断言** | 按改动范围过滤，与构建**并行** |
+> | `test` job 第二批（~4min） | anti-diff 冒烟 / **dex 容量 33 断言** / packer 冒烟 / **stringenc 五套**（含 apktool 真汇编、密钥流 468 例、联动端到端） | 仅改代码时跑 |
 > | `test` job 第三批（~5min） | **so-lock 52 项** / sig-guard2 / mem-readable / lsgs-strings（需 `../nox` 源码；CI 用 `setup-toolchain` 的 `nox-source: true`，**ref 为 `main` 而非 tag**） | 仅改代码时跑 |
 > | 本地手工 | `javacheck`（需 `ndk-build`）/ `packer-wiring`（需 `zipalign`）/ **`sig-verify`（需真实已签名 APK 夹具）** | **CI 不跑**，改动后必须本地跑 |
 >
+> ### 🔴 被 `if` 跳过的测试 = 没有测试（2026-11-22 血的教训）
+>
+> 第三批 step 都带 `if: steps.scope.outputs.code == 'true'`，只在**改代码**时跑。
+> 历史上多次推送只改文档（`code=false`）→ 整批被跳过 → GitHub 显示 **success**。
+> 于是这批测试**从来没真正执行过**，而"success"让它看起来是健康的。
+>
+> 直到 2026-11-22 一次真改代码才第一次触发，一次性炸出一串：
+> CI 从未把 NDK 加进 PATH（`jni.h not found`）、测试与 nox 演进脱节 6 处、
+> NDK clang 编 ARM 在 x86_64 runner 上跑不了（波及 8 个文件）、
+> 以及一个断言永远查错流的 `run()`。
+>
+> **判别方法**：看 step 是 `success` 还是 `skipped`。GitHub UI 上两者都显示绿色，
+> 但 `gh api .../jobs -q '.steps[]|.name+" "+.conclusion'` 能看出区别。
+> 改了第三批相关代码后，**必须确认那些 step 真的 `success` 而不是 `skipped`**。
+>
+> **连带纪律**：
+> - 测试要跑产物（执行 ELF / 反汇编 / dlopen）时，必须用
+>   [`scripts/lib/host-cc.sh`](scripts/lib/host-cc.sh) 的 `nc_pick_host_cc` 选编译器。
+>   CI 的裸 `clang` 被转发到 NDK aarch64 包装器（为了让 `jni.h` 可达），
+>   `command -v clang` 找得到但它编出的是 **ARM**，在 x86_64 runner 上
+>   "cannot execute binary file"。症状是"期望 X 实得 （空）"，极易误判成被测代码有 bug。
+> - 判据用**可执行性**，不是编译器名字（CI 的转发器就叫 `clang`）。
+> - 确实无法在本机执行的项目（如 T4 跑 ARM so）要**明确 skip 并打印原因**，
+>   不能让它假红 —— 假红会让人逐渐无视红色。
+
 > **两条容易搞错的**（2026-11-05 核对）：
 > - **`sig-verify` 不在 CI**。workflow 里有显式注释：该脚本没有 APK 时是
 >   "skip + exit 0"，接进来等于"0 通过 0 失败"的**假绿**，比不接更糟。
