@@ -94,7 +94,13 @@ fi
 #      （2026-11-01 第九次 CI 红，就是上一版把 CC 全局换成 NDK 引起的）。
 #   ② 【只检查产物的】目标（$NDK_CC）：sig_check.c/env_check.c 要编成 so 后
 #      用 grep 扫明文，不需要运行，用 NDK 编更贴近生产（且能拿到 android/log.h）。
-HOST_CC="$(command -v clang || command -v gcc)"
+# ⚠️ 不能只 `command -v clang`（2026-11-22）：
+#    CI 的裸 clang 被 setup-toolchain 转发到 NDK aarch64 包装器，
+#    command -v 找得到、但编出的是 ARM 产物 → "Exec format error"。
+#    用可执行性探测选真正的宿主编译器。见 scripts/lib/host-cc.sh。
+source "$(cd "$(dirname "$0")/../.." && pwd)/lib/host-cc.sh"
+HOST_CC="$(nc_pick_host_cc || command -v clang || command -v gcc)"
+# NDK_CC 已在上面按 NDK_ROOT 定义（没有 NDK 时为空 → 后面会走 skip）
 
 # ── ④ 解码正确性(lsgs_decode_test.c，逐条 LSGS 与明文期望对拍) ──
 # ⚠️ 不写死条数：条目数随探针增删变化（2026-11-08 移除 gmain/gdbus 时
