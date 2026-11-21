@@ -92,7 +92,12 @@ int main(void) {
 }
 C
 
-CC="$(command -v clang || command -v gcc)"
+# ⚠️ 必须选【能在本机执行产物】的编译器（2026-11-22）：
+#    本测试要跑 $T/t（宿主端对拍），而 CI 的 setup-toolchain 会把裸 clang
+#    转发到 NDK aarch64 包装器（为了让 jni.h 可达）—— 编出 ARM 产物在
+#    x86_64 runner 上跑不了。判据与说明见 scripts/lib/host-cc.sh。
+source "$ROOT/scripts/lib/host-cc.sh"
+CC="$(nc_pick_host_cc || command -v clang || command -v gcc)"
 # ⚠️ -ldl 必须显式给：sig_guard2.c 用 dladdr/Dl_info 定位本 so 路径，
 #    在 Linux（CI 的 ubuntu runner）上 dladdr 在 libdl 里，不链接就报
 #    "use of undeclared identifier 'Dl_info'" + "call to undeclared function 'dladdr'"。

@@ -43,7 +43,10 @@ if [ -z "${TEST_APK:-}" ] || [ ! -f "${TEST_APK:-}" ]; then
 fi
 echo "  APK: $TEST_APK"
 
-command -v clang >/dev/null || { skip "无 clang"; exit 0; }
+# ⚠️ 宿主 clang（2026-11-22）：见 scripts/lib/host-cc.sh。
+source "$(cd "$(dirname "$0")/../.." && pwd)/lib/host-cc.sh"
+HOST_CC="$(nc_pick_host_cc || echo clang)"
+command -v "$HOST_CC" >/dev/null || { skip "无可用宿主编译器"; exit 0; }
 
 SRC="$ROOT/scripts/guard/src"
 cp "$SRC/sig_check.c" "$SRC/env_check.c" "$SRC/env_probes.c" \
@@ -96,7 +99,7 @@ int main(int argc, char **argv) {
     return 0;
 }
 EOF
-if clang -O1 -DSIGCHECK_HOST_TEST -I. \
+if "$HOST_CC" -O1 -DSIGCHECK_HOST_TEST -I. \
         driver.c sig_check.c -o verify 2>build.log; then
     ok "T1 编译通过（含真实 sig_hash.h）"
 else
@@ -143,7 +146,7 @@ s2=re.sub(r'SIG_HASH_STORED\[SIG_HASH_LEN\] = \{([^}]*)', bump, s, count=1)
 assert s2 != s, "篡改正则未命中 SIG_HASH_STORED"
 open('sig_hash.h','w').write(s2)
 PY
-if clang -O1 -DSIGCHECK_HOST_TEST -I. \
+if "$HOST_CC" -O1 -DSIGCHECK_HOST_TEST -I. \
         driver.c sig_check.c -o verify_bad 2>/dev/null; then
     # ⚠️ 失败路径是【异步杀】：sig_verify 判定失败 → 起杀线程（sleep 1~3s
     #    后 abort）→ 主线程照常返回 → main 退出码 0。所以不能只看退出码，

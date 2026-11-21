@@ -92,7 +92,12 @@ if ! command -v clang >/dev/null 2>&1; then
     echo "  ⚠ 无 clang，跳过"; exit 0
 fi
 
-if clang -O2 -o "$WORK/t" "$WORK/t.c" 2>"$WORK/build.log"; then
+# ⚠️ 宿主 clang（2026-11-22）：本项要【执行】$WORK/t，而 CI 的裸 clang
+#    被转发到 NDK aarch64 包装器 → 编出 ARM 产物在 x86_64 上跑不了。
+#    见 scripts/lib/host-cc.sh。
+source "$(cd "$(dirname "$0")/../.." && pwd)/lib/host-cc.sh"
+HOST_CC="$(nc_pick_host_cc || echo clang)"
+if "$HOST_CC" -O2 -o "$WORK/t" "$WORK/t.c" 2>"$WORK/build.log"; then
     if "$WORK/t"; then
         ok "env_mem_readable 跨映射判定（6 场景 + 负向用例）"
     else
