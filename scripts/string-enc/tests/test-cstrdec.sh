@@ -578,8 +578,26 @@ int main(void){
     return 0;
 }
 VEOF
-  if "$CC" -shared -fPIC -o "$W/link/libxixin.so" "$W/link/fakeshell.c" 2>/dev/null && \
-     "$CC" -O2 -o "$W/link/verify" "$W/link/verify.c" -ldl 2>/dev/null; then
+  # ⚠️ 这段必须用【能在本机执行的编译器】（2026-11-22）：
+  #    $CC 在 CI 上被转发到 NDK 的 aarch64 target 包装器（为了让 jni.h 可用），
+  #    编出的是 Android ARM 产物，而 CI runner 是 x86_64 —— 根本跑不起来，
+  #    输出为空 → 两条 chk 全红（实测 329 项失败）。
+  #    判据用【可执行性探测】：编个最小程序跑一下，跑得通才是宿主编译器。
+  #    用名字/路径判断不可靠：CI 的转发器就叫 clang，路径里没有 android 字样。
+  HOST_CC=""
+  _tmpd="$(mktemp -d)"
+  printf 'int main(void){return 0;}\n' > "$_tmpd/t.c"
+  for c in clang gcc cc; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    if "$c" "$_tmpd/t.c" -o "$_tmpd/t" >/dev/null 2>&1 && "$_tmpd/t" >/dev/null 2>&1; then
+      HOST_CC="$c"; break
+    fi
+  done
+  rm -rf "$_tmpd"
+  if [[ -z "$HOST_CC" ]]; then
+    echo "   ⚠ 跳过 7e：本机无可执行的宿主编译器（\$CC 是交叉工具链）"
+  elif "$HOST_CC" -shared -fPIC -o "$W/link/libxixin.so" "$W/link/fakeshell.c" 2>/dev/null && \
+     "$HOST_CC" -O2 -o "$W/link/verify" "$W/link/verify.c" -ldl 2>/dev/null; then
     # ⚠️ 用 $( ) 而不是 $(( ))：后者是【算术展开】，会把输出当表达式求值
     #    （首版写成 $(( )) → 输出 "0011223344556677" 被当十进制数算，
     #      "NOSHELL" 直接报错 → 两条断言静默消失，测试却显示全绿）。
