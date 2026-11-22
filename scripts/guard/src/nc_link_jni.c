@@ -197,8 +197,15 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     if (vm == NULL || (*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
         return JNI_ERR;
     }
-    if (nc_link_register_natives(env) != 0) {
-        return JNI_ERR;
+    {
+        /* 临时诊断：JNI_OnLoad 到底有没有被调用、注册函数返回什么。
+           用 __android_log_print 而不是 LSGI —— 这是临时探针，不进 LSGS 表。 */
+        extern int __android_log_print(int prio, const char *tag, const char *fmt, ...);
+        int _rc = nc_link_register_natives(env);
+        __android_log_print(4, "ncjni", "JNI_OnLoad: register rc=%d", _rc);
+        if (_rc != 0) {
+            return JNI_ERR;
+        }
     }
     return JNI_VERSION_1_6;
 }
