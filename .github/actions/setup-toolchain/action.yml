@@ -14,9 +14,9 @@ description: |
 
 inputs:
   ndk-version:
-    description: 'NDK 版本号（r27d / r26d）'
+    description: 'NDK 版本号（r29 / r27d / r26d）'
     required: false
-    default: 'r27d'
+    default: 'r29'
   nox-source:
     description: |
       是否额外准备 nox【源码】形态（../nox）。so 层测试需要源码（grep 契约

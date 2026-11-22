@@ -2,9 +2,9 @@ name: 'Setup NDK (prefers preinstalled)'
 description: '优先使用 runner 预装的 Android NDK（零下载零耗时），预装版本不匹配时回退下载指定版本'
 inputs:
   ndk-version:
-    description: 'NDK 版本号（r27d / r26d，runner 预装目录以版本号命名）'
+    description: 'NDK 版本号（r29 / r27d / r26d，runner 预装目录以版本号命名）'
     required: false
-    default: 'r27d'
+    default: 'r29'
 outputs:
   ndk-path:
     description: 'NDK 根目录绝对路径'
@@ -23,14 +23,21 @@ runs:
       run: |
         set -euo pipefail
         # 版本号 → runner 预装目录名（形如 27.3.13750724）的映射表，单一真相源。
-        # r27d 是当前 ubuntu-24.04 runner 的预装版本（2026-10 实测 27.3.13750724），
-        # 选它即可零下载命中预装；r26d 保留作回退。
+        # ⚠️ 2026-11-22 更正：runner 预装了【三个】NDK，不是只有一个。
+        #    官方镜像清单（Ubuntu2404-Readme.md 实测）：
+        #      27.3.13750724 (default) / 29.0.14206865 / 30.0.16248370
+        #    此前注释写"r29 要下 783MB、+40s"是错的——r29 本来就是预装，
+        #    零下载。那段注释让人以为换版有成本，实际没有。
+        #
+        #    现默认 r29：与 tools/nox.zip 的 libnox.a（Amice bundle 自带 r29 编）
+        #    同版本，消除跨版本混链。r27d / r26d 保留作回退。
         declare -A NDK_VER_MAP=(
           [r27d]="27.3.13750724"
           [r26d]="26.3.11579264"
-          # r29 仅用于【兼容性实验】：nox 的 -obf 版 libnox.a 是用 Amice bundle
-          # 自带的 r29 编的，而本流水线默认 r27d 链接它。两者混链是否可行
-          # 需要实测（2026-11-09 加，实验完可删）。
+          # r29 已是默认（2026-11-22）。它同时是 Amice bundle 的 NDK，
+          # 与 libnox.a 同版本 → 不再混链。
+          # r27d 保留：它是 runner 的 ANDROID_NDK_HOME 默认值，
+          # 回退时改 ndk-version 即可，无需改代码。
           [r29]="29.0.14206865"
         )
         VER="${NDK_VER_MAP[$NDK_R]:-}"

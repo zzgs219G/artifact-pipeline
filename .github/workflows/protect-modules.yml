@@ -136,7 +136,7 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         uses: ./.github/actions/setup-toolchain
         with:
-          ndk-version: r27d
+          ndk-version: r29
           nox-source: 'true'   # so 层测试要 nox 源码形态
           nox-ref: main
 
@@ -794,18 +794,28 @@ jobs:
         id: toolchain
         uses: ./.github/actions/setup-toolchain
         with:
-          # r27d 是默认值。2026-11-09 做过一次 r29 兼容性实验，结论：
-          #   云端 r29 产物同样能跑（真机验证，业务页全对，进程稳定 32 分钟）。
-          #   所以 r29 不是问题 —— 问题只在本地 Termux 环境（见下）。
-          # 为什么仍用 r27d：
-          #   · runner 预装 27.3.13750724，零下载（r29 要下 783MB，+约 40s）
-          #   · tools/nox.zip 的 libnox.a 虽然是 r29(Amice bundle) 编的，
-          #     但与 r27d 链接实测可用（跨版本混链未出问题）
-          # 若要复现 r29：把下面改成 r29 即可（setup-ndk 映射表已支持）。
+          # 2026-11-22：默认已由 r27d 改为 r29，理由与更正：
+          #
+          # ① 此前注释写「r29 要下 783MB，+约 40s」——【错的】。
+          #    runner 预装三个 NDK（官方 Ubuntu2404-Readme 实测）：
+          #      27.3.13750724 (default) / 29.0.14206865 / 30.0.16248370
+          #    r29 本来就在预装里，零下载。那条注释让"换版有成本"这个
+          #    错误前提流传了很久。
+          #
+          # ② tools/nox.zip 的 libnox.a 是 Amice bundle 自带 r29 编的。
+          #    用 r27d 链接它 = 跨版本混链。混链实测能用（跑了两个多月），
+          #    但"能用"不等于"应该"。同版本编+链才是可推理的。
+          #
+          # ③ 2026-11-09 已做过 r29 兼容性实验：云端 r29 产物真机通过
+          #    （业务页全对，进程稳定 32 分钟）。所以切 r29 不是未知领域。
+          #
+          # 回滚方式：把 ndk-version 改回 r27d（setup-ndk 映射表仍保留它）。
           #
           # ⚠️ 本地 Termux 用 r29 编出的 so 装机必 SIGILL（连纯 sigcheck 都崩），
           #    原因未查明。**本地装机测试的结论不可采信**，验证一律走云端。
-          ndk-version: r27d
+          #    注意这条与"云端 r29 正常"并不矛盾：是本地 Termux 的
+          #    工具链链有额外问题，不是 r29 本身。
+          ndk-version: r29
           nox-source: 'false'
 
       # ── Amice bundle（obfuscate 或 vmp 任一勾选时）───────────────────
@@ -894,6 +904,11 @@ jobs:
       # 实测（run 42055440429）：用 NDK r27d 的 clang 18 加载 r29 插件
       # → exit code 139（clang frontend crashed）。
       # 插件按 LLVM 主版本编译，与 NDK clang 严格绑定，错配是未定义行为。
+      #
+      # ⚠️ 2026-11-22：默认 NDK 已改 r29，与 bundle 的 r29 插件【同版本】。
+      #    这条校验仍然保留 —— 它防的是"有人把默认值改回 r27d 却没意识到
+      #    Amice 插件会崩"。判据（bundle 自带 NDK 且可执行）与默认版本无关，
+      #    所以切 r29 后这条不会误报。
       - name: 校验 Amice bundle 的 NDK 与插件配套
         if: steps.obf.outputs.enabled == 'true'
         run: |
