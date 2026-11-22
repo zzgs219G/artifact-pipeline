@@ -647,8 +647,6 @@ static int find_apk_path(char *out, size_t outlen) {
              * 指向诱饵 APK 的环境变量）。读不到就当没有，继续走 maps。 */
             if (access(ev, R_OK) == 0 && strlen(ev) + 1 <= outlen) {
                 snprintf(out, outlen, "%s", ev);
-                /*LSG:ENVAPK_OK|【成功】环境变量直接给出 APK 路径(不经文件系统)*/
-                LSGI(LSG_ENVAPK_OK, "%s", out);
                 return 0;
             }
         }
