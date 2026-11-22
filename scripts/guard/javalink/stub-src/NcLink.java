@@ -10,7 +10,14 @@ package com.nc.link;
  */
 public final class NcLink {
 
-    private NcLink() {
+    /* ⚠️ 必须是 public，不能 private（2026-11-22 真机实证）：
+     * 原先手写 smali 用的是 `.method public constructor <init>()V`，
+     * 改成 Java 编译后自然变成 private（源码写的是 private NcLink()），
+     * 真机随即在 RegisterNatives 路径上出现
+     *   No implementation found for ...ncVerify(byte[])
+     * → UnsatisfiedLinkError → Guard 的 catch 分支 kill() → 闪退。
+     * 改为 public 与手写形态逐字节对齐。 */
+    public NcLink() {
     }
 
     /** 幂等加载 libnc.so(重复调用为 no-op);so 缺失时抛 UnsatisfiedLinkError。 */

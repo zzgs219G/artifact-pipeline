@@ -30,7 +30,14 @@ public final class Guard {
      *  与 dpt 的 DPT_APK_PATH 区分开，避免两个壳互相覆盖。 */
     public static final String NC_APK_ENV = "NC_APK_PATH";
 
-    private Guard() {
+    /* ⚠️ 必须是 public，不能 private（2026-11-22 真机实证）：
+     * 原先手写 smali 用的是 `.method public constructor <init>()V`，
+     * 改成 Java 编译后自然变成 private（源码写的是 private Guard()），
+     * 真机随即在 RegisterNatives 路径上出现
+     *   No implementation found for ...ncVerify(byte[])
+     * → UnsatisfiedLinkError → Guard 的 catch 分支 kill() → 闪退。
+     * 改为 public 与手写形态逐字节对齐。 */
+    public Guard() {
     }
 
     public static void c(Context ctx) {
