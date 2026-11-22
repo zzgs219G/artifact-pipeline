@@ -228,203 +228,50 @@ def _render_asserts(text, so_name):
             raise AssertionError(f'类体顶层出现裸指令(报错二十五防线): {s!r}')
 
 
+def _load_smali(name):
+    """读 stub-src/<name>.smali —— 由 build-guard.sh 从同名 .java 编译生成。
+
+    ⚠️ 为什么不在这里手写 smali（2026-11-22 真机血的教训）：
+      手写 smali 时给 Os.setenv(String,String,Z)V 只写了两个寄存器，
+      SmaliBuilder 照样汇编通过、本地测试全绿，真机却在类校验阶段被拒：
+        VerifyError: expected 2 argument registers, signature has 3 or more
+      → 整个 NativeGuard 类加载失败 → onCreate 直接 FATAL。
+
+      汇编器只管语法，**不校验实参个数**；只有 dalvik verifier 会，而真机
+      是唯一的 verifier 环境。所以 smali 一律由 Java 编译产出，不手写。
+      规矩与 scripts/string-enc/README.md:60 对 StrDec.smali 的要求一致。
+    """
+    path = os.path.join(_HERE, 'stub-src', name + '.smali')
+    if not os.path.isfile(path):
+        raise SystemExit(
+            f'❌ 缺少 {path}\n'
+            f'   它由 stub-src/{name}.java 编译生成。先跑：\n'
+            f'     bash scripts/guard/javalink/build-guard.sh')
+    with open(path, encoding='utf-8') as fp:
+        return fp.read()
+
+
 def render_bridge(so_name):
-    """NcLink 桥接类:类名/方法名参与 JNI 短名绑定,改名字必须同步 nc_link.c。"""
-    text = f"""# {MARKER}
-# Java 层判决式签名校验 · 固定桥接类(JNI 名绑定依赖此名,勿改包名/类名/方法名)
-# 语义真相: stub-src/NcLink.java
-.class public final {BRIDGE_DESC}
-.super Ljava/lang/Object;
-
-.method public constructor <init>()V
-    .locals 0
-    invoke-direct {{p0}}, Ljava/lang/Object;-><init>()V
-    return-void
-.end method
-
-# 幂等加载 so(重复调用 no-op);缺失时抛 UnsatisfiedLinkError → 调用方 fail-closed
-.method public static ensureLoaded()V
-    .locals 1
-    const-string v0, "{so_name}"
-    invoke-static {{v0}}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V
-    return-void
-.end method
-
-# 判决入口:入参 t1 = SHA256(SHA256(实测证书DER));标准答案常驻 so,从不出境
-.method public static native ncVerify([B)Z
-.end method
-
-# 心跳喂食入口:Guard 的 daemon 线程每 5s 调一次;native 侧校验调用者身份
-# (IsSameObject 锁死本类)后记录时间戳;env_watchdog 超时未喂 → 杀。
-# 语义真相: stub-src/NcLink.java
-.method public static native heartbeat()V
-.end method
-
-# .ncx 段自解密自检(2026-12):59=完整链路通过,-100=已自检过重入,
-# 负数=解锁失败(码表见 nc_guard_boot.c 的 ncg_head_unlock)。纯观测,不参与防御判定。
-# ⚠️ 挂靠 NcLink(与 ncVerify/heartbeat 同源),不要另造类——
-# 2026-10-17 曾独立造 Lcom/nc/guard/NcGuard; 却只加调用不生成类,
-# selftest() 抛 UnsatisfiedLinkError 被主 catch 吞掉并跳过 heartbeat,
-# 复现报错四十九(真机日志连打"Java 心跳丢失")。
-.method public static native selftest()I
-.end method
-"""
-    _render_asserts(text, so_name)
-    return text
+    """NcLink 桥接类。类名/方法名参与 JNI 短名绑定，改名必须同步 nc_link.c。"""
+    text = _load_smali('NcLink')
+    # 占位：编译产物的包路径固定为 com/nc/link；注入时按需改描述符。
+    text = text.replace('Lcom/nc/link/NcLink;', BRIDGE_DESC)
+    text = text.replace('"nc"', f'"{so_name}"')
+    return MARKER + '\n' + text
 
 
 def render_guard(wrapper_desc):
-    """Guard 逻辑类:测量(PackageManager) + 执行(杀);标准值永不出 so。
-    寄存器账本:.locals 7(v0-v6) + p0 = v7,全部 ≤ v15(35c 上限)。"""
-    text = f"""# {MARKER}
-# Java 层判决式签名校验 · 测量与执行(自适应命名;逻辑真相: stub-src/Guard.java)
-.class public final {wrapper_desc}
-.super Ljava/lang/Object;
+    """Guard 逻辑类（测量 PackageManager + 执行 kill）。
 
-.method public constructor <init>()V
-    .locals 0
-    invoke-direct {{p0}}, Ljava/lang/Object;-><init>()V
-    return-void
-.end method
-
-# 单发守卫字段(daemon 线程只开一次)
-.field private static hbStarted:Z
-
-# 心跳喂食线程(daemon,5s 一次):语义真相 stub-src/Guard.java#startHeartbeat
-# 单发守卫由 Guard$hbStarted 标志位承担;喂失败吞 Throwable(native 超时自会兜底)
-.method public static startHeartbeat()V
-    .locals 4
-    sget-boolean v0, {wrapper_desc}->hbStarted:Z
-    if-eqz v0, :cond_hb_go
-    return-void
-    :cond_hb_go
-    const/4 v0, 0x1
-    sput-boolean v0, {wrapper_desc}->hbStarted:Z
-    new-instance v1, {wrapper_desc[:-1]}$Hb;
-    invoke-direct {{v1}}, {wrapper_desc[:-1]}$Hb;-><init>()V
-    const/4 v0, 0x1
-    invoke-virtual {{v1, v0}}, Ljava/lang/Thread;->setDaemon(Z)V
-    invoke-virtual {{v1}}, Ljava/lang/Thread;->start()V
-    return-void
-.end method
-
-.method public static c(Landroid/content/Context;)V
-    .locals 7
-
-    .catch Ljava/lang/UnsatisfiedLinkError; {{:try_start_0 .. :try_end_0}} :catch_link
-    .catch Ljava/lang/Throwable; {{:try_start_0 .. :try_end_0}} :catch_skip
-
-    :try_start_0
-    invoke-static {{}}, {BRIDGE_DESC}->ensureLoaded()V
-    # ── 把本 APK 路径写进环境变量（2026-11-22）─────────────────────────
-    # 为什么需要：native 侧 find_apk_path 原来只有「/proc/self/maps」和
-    # 「so 路径反推」两路可用（/data/app 扫描在 Android 11+ 被 SELinux 拒，
-    # errno=13）。而 so 路径本身又是从 maps 拿的 → 实际是【单点】：
-    # 攻击者只要让 maps 读到假内容，两路一起失效。
-    #
-    # 环境变量这一路【完全不经文件系统】—— 只是读进程内存里的字符串，
-    # 没有 open/read 可供 Hook。这是 dpt 壳已有的做法（DPT_APK_PATH），
-    # 这里借用同一思路，变量名用 NC_APK_PATH 避免与其冲突。
-    #
-    # 取路径用 getPackageCodePath()：Context 上直接可调，返回 base.apk
-    # 的绝对路径，不需要额外权限。p0 就是本方法的 Context 入参。
-    #
-    # ⚠️ 整段包在独立 try/catch 里：任何一步失败都不能影响下面的
-    #    ensureLoaded（否则「路径拿不到」会变成「so 加载不了」→ 整个 App
-    #    起不来）。失败就让 native 侧回退到 maps 那两路。
-    .catch Ljava/lang/Throwable; {{:try_env_start .. :try_env_end}} :catch_env
-    :try_env_start
-    invoke-virtual {{p0}}, Landroid/content/Context;->getPackageCodePath()Ljava/lang/String;
-    move-result-object v0
-    invoke-static {{v0}}, Ljava/lang/String;->valueOf(Ljava/lang/Object;)Ljava/lang/String;
-    move-result-object v0
-    const-string v1, "NC_APK_PATH"
-    invoke-static {{v1, v0}}, Landroid/system/Os;->setenv(Ljava/lang/String;Ljava/lang/String;Z)V
-    :try_env_end
-    goto :env_ok
-    :catch_env
-    # 静默失败：native 侧有 maps 兜底，不因为这里挂了就影响加载
-    :env_ok
-
-    # .ncx 段自解密自检(2026-12):so 已加载即触发一次性解锁。
-    # 59 = 完整链路通过;-100 = 已自检过;负数 = 解锁失败(码表见 nc_guard_boot.c)。
-    # ⚠️ 必须用【独立的 try/catch】包住:2026-10-17 曾把 selftest 直接放在
-    # 主 try 里,而当它抛 UnsatisfiedLinkError 时会被主 catch(Throwable)
-    # 吞掉并【连带跳过后面的 heartbeat()/startHeartbeat()】→ 心跳停喂 →
-    # watchdog 误杀(报错四十九复现,真机日志连打"Java 心跳丢失")。
-    # 现在自检的任何失败都只影响自己,绝不能波及心跳。
-    # selftest 与 ncVerify/heartbeat 同挂 NcLink —— native 方法在库里是
-    # 同一批注册的,只要 ensureLoaded() 成功它就必然存在,不会抛
-    # UnsatisfiedLinkError(报错四十九的根因就是"类不存在")。
-    # .ncx 未解锁时 native 侧返回负数而非抛异常,所以主 catch 不会因它触发。
-    invoke-static {{}}, {BRIDGE_DESC}->selftest()I
-    move-result v0
-    const/16 v1, 0x3b
-    if-eq v0, v1, :after_selftest
-    const-string v0, "ncguard"
-    const-string v1, "selftest rc!=59"
-    invoke-static {{v0, v1}}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
-    :after_selftest
-    # 心跳前置(2026-10-16 修复):喂食必须与"测量是否成功"解耦。
-    # 旧形态放在 ncVerify 通过之后 —— 测量链抛任何非 ULE Throwable 就跳
-    # :catch_skip 静默返回 → 一次都不喂 → env_watchdog 把"没喂"误判成
-    # "Java 壳被删" → 正常包冷启动 ~6s 必杀(真机证据存档于 docs/变更历史.md 报错四十九)。
-    # so 已加载(ensureLoaded 成功)即开始喂;判决不过走 :cond_kill,测量异常
-    # 走 :catch_skip —— 两者的处置各归各路,不再由心跳把"测量失败"升级成死刑。
-    invoke-static {{}}, {BRIDGE_DESC}->heartbeat()V
-    invoke-static {{}}, {wrapper_desc}->startHeartbeat()V
-    const-string v0, "SHA-256"
-    invoke-static {{v0}}, Ljava/security/MessageDigest;->getInstance(Ljava/lang/String;)Ljava/security/MessageDigest;
-    move-result-object v1
-    invoke-virtual {{p0}}, Landroid/content/Context;->getPackageManager()Landroid/content/PackageManager;
-    move-result-object v2
-    invoke-virtual {{p0}}, Landroid/content/Context;->getPackageName()Ljava/lang/String;
-    move-result-object v3
-    sget v4, Landroid/os/Build$VERSION;->SDK_INT:I
-    const/16 v5, 0x1c
-    if-lt v4, v5, :cond_legacy
-    const v6, 0x8000000
-    invoke-virtual {{v2, v3, v6}}, Landroid/content/PackageManager;->getPackageInfo(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;
-    move-result-object v4
-    iget-object v4, v4, Landroid/content/pm/PackageInfo;->signingInfo:Landroid/content/pm/SigningInfo;
-    invoke-virtual {{v4}}, Landroid/content/pm/SigningInfo;->getApkContentsSigners()[Landroid/content/pm/Signature;
-    move-result-object v4
-    goto :goto_have_sig
-    :cond_legacy
-    const/16 v6, 0x40
-    invoke-virtual {{v2, v3, v6}}, Landroid/content/PackageManager;->getPackageInfo(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;
-    move-result-object v4
-    iget-object v4, v4, Landroid/content/pm/PackageInfo;->signatures:[Landroid/content/pm/Signature;
-    :goto_have_sig
-    const/4 v5, 0x0
-    aget-object v4, v4, v5
-    invoke-virtual {{v4}}, Landroid/content/pm/Signature;->toByteArray()[B
-    move-result-object v4
-    invoke-virtual {{v1, v4}}, Ljava/security/MessageDigest;->digest([B)[B
-    move-result-object v4
-    invoke-virtual {{v1, v4}}, Ljava/security/MessageDigest;->digest([B)[B
-    move-result-object v4
-    invoke-static {{v4}}, {BRIDGE_DESC}->ncVerify([B)Z
-    move-result v4
-    if-eqz v4, :cond_kill
-    return-void
-    :try_end_0
-    :cond_kill
-    invoke-static {{}}, Landroid/os/Process;->myPid()I
-    move-result v0
-    invoke-static {{v0}}, Landroid/os/Process;->killProcess(I)V
-    return-void
-    :catch_link
-    invoke-static {{}}, Landroid/os/Process;->myPid()I
-    move-result v0
-    invoke-static {{v0}}, Landroid/os/Process;->killProcess(I)V
-    return-void
-    :catch_skip
-    return-void
-.end method
-"""
-    _render_asserts(text, 'nc')
-    return text
+    smali 由 stub-src/Guard.java 经 build-guard.sh 编译产出。
+    寄存器分配、try/catch 范围、invoke 实参个数全部由 javac+d8 负责 ——
+    这正是「不手写 smali」的价值（见 _load_smali 的说明）。
+    """
+    text = _load_smali('Guard')
+    # Java 编译产物的类名是 Lcom/test/placeholder/Guard;（源码 package），
+    # 注入时换成自适应命名算出来的随机描述符，自引用一并替换。
+    text = text.replace('Lcom/test/placeholder/Guard;', wrapper_desc)
+    return MARKER + '\n' + text
 
 
 def render_hb(wrapper_desc):

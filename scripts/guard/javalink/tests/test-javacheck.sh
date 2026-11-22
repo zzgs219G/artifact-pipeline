@@ -24,12 +24,32 @@ ok() { echo "  ✅ $1"; PASS=$((PASS + 1)); }
 echo "[1/9] py_compile + javac 语义真相源(对 android API 桩编译,校验 API 形态)"
 python3 -m py_compile "$JL/inject-javacheck.py"
 python3 -m py_compile "$JL/tests/mk_manifest.py"
-mkdir -p "$T/stubs/android/content/pm" "$T/stubs/android/os" "$T/stubs/android/util" "$T/classes"
+mkdir -p "$T/stubs/android/content/pm" "$T/stubs/android/os" "$T/stubs/android/util" \
+         "$T/stubs/android/system" "$T/classes"
 cat > "$T/stubs/android/content/Context.java" <<'EOF'
 package android.content;
 public class Context {
     public android.content.pm.PackageManager getPackageManager() { return null; }
     public String getPackageName() { return null; }
+    /* 2026-11-22：Guard.java 用它拿 base.apk 绝对路径 -> 写 NC_APK_PATH 环境变量，
+       给 sig_check.c 的 find_apk_path 提供一条不经文件系统的定位路径。 */
+    public String getPackageCodePath() { return null; }
+}
+EOF
+cat > "$T/stubs/android/system/Os.java" <<'EOF'
+package android.system;
+/* 2026-11-22：Guard.java 用 Os.setenv 把 APK 路径写进环境变量。
+   注意签名是 (String, String, boolean) 三参数 —— 少一个真机就会
+   VerifyError: expected 2 argument registers, signature has 3 or more。
+   本桩必须与真 API 完全一致，否则编译期就能过、真机才炸。 */
+public class Os {
+    public static void setenv(String name, String value, boolean overwrite) throws ErrnoException { }
+}
+EOF
+cat > "$T/stubs/android/system/ErrnoException.java" <<'EOF'
+package android.system;
+public class ErrnoException extends Exception {
+    public int errno;
 }
 EOF
 cat > "$T/stubs/android/content/pm/PackageManager.java" <<'EOF'
@@ -82,6 +102,7 @@ javac -nowarn -d "$T/classes" \
   "$T/stubs/android/content/Context.java" \
   "$T/stubs/android/content/pm/"*.java \
   "$T/stubs/android/os/"*.java \
+  "$T/stubs/android/system/"*.java \
   "$T/stubs/android/util/"*.java \
   "$JL/stub-src/NcLink.java" \
   "$JL/stub-src/Guard.java"
@@ -147,6 +168,66 @@ java -cp "$T/probe:$APKTOOL" AsmProbe "$T/out.dex" \
   "$T/app/smali/com/nc/link/NcLink.smali" \
   "$T/app/smali/com/test/jc/NativeGuard.smali" > /dev/null
 ok "6 个 smali 全部汇编通过(无 Invalid register / no viable alternative)"
+
+# ── 4b: invoke 实参寄存器数 vs 方法签名（2026-11-22 真机 VerifyError 教训）──
+# SmaliBuilder 只做语法汇编，【不校验实参个数】。曾写错：
+#   invoke-static {v1, v0}, Landroid/system/Os;->setenv(String,String,Z)V
+# 汇编通过、本地全绿，真机却：
+#   VerifyError: expected 2 argument registers, signature has 3 or more
+#   → 整个 NativeGuard 类加载失败 → onCreate 直接 FATAL。
+# 改成直接扫 smali 源文本（不经 androguard 解析，更直接也更可靠）。
+python3 - "$T/app/smali" <<'PYCHECK'
+import os, re, sys
+root = sys.argv[1]
+bad = []
+
+def need_regs(desc):
+    """方法描述符 → 需要多少个寄存器实参（不含返回值）。"""
+    inner = desc[desc.index('(') + 1: desc.index(')')]
+    n, i = 0, 0
+    while i < len(inner):
+        c = inner[i]
+        if c == '[':
+            while inner[i] == '[':
+                i += 1
+            i += 1
+            n += 1
+        elif c == 'L':
+            i = inner.index(';', i) + 1
+            n += 1
+        else:
+            n += 2 if c in 'JD' else 1
+            i += 1
+    return n
+
+# invoke-xxx {vA, vB, ...}, Lcls;->meth(desc)ret
+INVOKE = re.compile(
+    r'invoke-(?:static|virtual|direct|super|interface)\s+'
+    r'\{([^}]*)\},\s*(L[^;]*;)->([^(]+)(\([^)]*\)\S*)')
+
+for dirpath, _, files in os.walk(root):
+    for fn in files:
+        if not fn.endswith('.smali'):
+            continue
+        path = os.path.join(dirpath, fn)
+        for lineno, line in enumerate(open(path, encoding='utf-8'), 1):
+            for m in INVOKE.finditer(line):
+                regs = [x for x in m.group(1).split(',') if x.strip()]
+                need = need_regs(m.group(4))
+                if not line.strip().startswith('invoke-static'):
+                    need += 1          # this
+                if len(regs) < need:
+                    bad.append(f'{fn}:{lineno} {m.group(2)}->{m.group(3)}'
+                               f'{m.group(4)} 需要 {need} 个寄存器，实际 {len(regs)}')
+
+if bad:
+    print('❌ invoke 实参寄存器不足(dalvik VerifyError 会拒绝加载):')
+    for b in bad[:5]:
+        print('   ' + b)
+    sys.exit(1)
+print('__OK__')
+PYCHECK
+ok "invoke 实参寄存器数与签名一致(防 dalvik VerifyError)"
 
 echo "[5/9] androguard 读回(dex 层结构断言)"
 python3 - "$T/out.dex" <<'PY'

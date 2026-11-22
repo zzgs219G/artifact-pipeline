@@ -168,6 +168,57 @@ tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
 
 ## 2. 允许的改动方式
 
+### 🔴 0. 禁止手写 smali —— 一律由 Java 编译产出
+
+**这条是硬约束，不是建议。** 2026-11-22 真机实证过代价：
+
+```
+手写 invoke-static {v1, v0}, Landroid/system/Os;->setenv(String,String,Z)V
+             ↑ 少写一个参数
+SmaliBuilder 真汇编 → ✅ 通过
+本地全部测试      → ✅ 全绿
+真机装机启动      → ❌ VerifyError: expected 2 argument registers,
+                     signature has 3 or more
+                   → 整个类加载失败 → App 直接 FATAL
+```
+
+**为什么本地测试拦不住**：汇编器只管语法，**不校验 invoke 实参个数**。
+只有一个地方会校验 —— dalvik verifier，而它**只在真机上跑**。
+
+#### 正确做法
+
+```
+stub-src/Xxx.java   ← 语义真相源（人读，改这里）
+      ↓ build-*.sh（javac → d8 → apk 容器 → baksmali）
+stub-src/Xxx.smali  ← 编译产物，入库，**永不手改**
+      ↓ 注入器读它 + 做类名/占位符替换
+```
+
+现有两条这样的链：
+
+| 模块 | 构建脚本 | 产物 |
+|---|---|---|
+| `scripts/string-enc/` | `build-stub.sh` | `stub-src/StrDec.smali` |
+| `scripts/guard/javalink/` | `build-guard.sh` | `stub-src/{Guard,NcLink}.smali` |
+
+#### 纪律
+
+1. **改 Java，不改 smali**。smali 是产物，手改会在下次重跑构建脚本时被覆盖。
+2. **改完 Java 必须重跑对应 `build-*.sh`**，否则源码与入库产物不一致
+   （注入器读的是 .smali，不读 .java）。
+3. **`render_*` 函数只做替换，不拼字节码**。历史教训：`inject-javacheck.py`
+   曾经把 Guard/NcLink 的 smali 手写在 Python 字符串里（37 处指令），
+   这正是上面那个 VerifyError 的来源。
+4. **新加的注入类一律走编译链**。不要因为"只有几行"就手写 ——
+   上面那个 bug 就是 15 行里的一个参数。
+
+#### 为什么当年手写
+
+`NcLink.java` 头注写的理由是「宿主无 d8」。该前提**已不成立**：
+javac / `scripts/string-enc/tools/d8.jar` / `tools/apktool.jar` / `android.jar` 都在手边，
+`build-guard.sh` 已实测跑通。
+
+
 1. **新增模块**: 新建文件/目录,实现新功能(如 `packer` 模块),不动冻结区。
 2. **改非冻结脚本**: `scripts/pipelines/*.sh`、`scripts/lib/*.sh`、workflow yml。
 3. **修复冻结模块的真实 bug**: 必须满足——
