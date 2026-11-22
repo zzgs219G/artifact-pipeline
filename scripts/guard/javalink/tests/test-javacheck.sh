@@ -3,7 +3,8 @@
 #
 # 覆盖:py_compile / javac 语义真相源(对 android API 桩)/ AXML 夹具生成 /
 #       注入 + SmaliBuilder 真汇编 + androguard 读回 / 调用点寄存器安全 /
-#       幂等 / clean / 自适应命名(普通包+R8 短名包)/ nc_link.c 判决对拍
+#       幂等 / clean / 自适应命名(普通包+R8 短名包)/ nc_link.c 判决对拍 /
+#       nc_jni_selfcheck.c 表项自检(重名/空表/NULL)
 # 完整链路(dex2c 转译、ndk-build、apktool 回编、真机)由 CI workflow 闭环。
 set -euo pipefail
 
@@ -21,7 +22,7 @@ ok() { echo "  ✅ $1"; PASS=$((PASS + 1)); }
 
 [[ -f "$APKTOOL" ]] || { echo "❌ apktool 不在位(应在 tools/apktool.jar，git 跟踪)"; exit 1; }
 
-echo "[1/9] py_compile + javac 语义真相源(对 android API 桩编译,校验 API 形态)"
+echo "[1/10] py_compile + javac 语义真相源(对 android API 桩编译,校验 API 形态)"
 python3 -m py_compile "$JL/inject-javacheck.py"
 python3 -m py_compile "$JL/tests/mk_manifest.py"
 mkdir -p "$T/stubs/android/content/pm" "$T/stubs/android/os" "$T/stubs/android/util" \
@@ -108,7 +109,7 @@ javac -nowarn -d "$T/classes" \
   "$JL/stub-src/Guard.java"
 ok "javac 语义真相源编译通过(Guard/NcLink 与桩 API 形态一致)"
 
-echo "[2/9] 合成解包目录 + AXML 夹具"
+echo "[2/10] 合成解包目录 + AXML 夹具"
 mkdir -p "$T/app/smali/com/test/jc"
 python3 "$JL/tests/mk_manifest.py" "$T/app/AndroidManifest.xml" >/dev/null
 cat > "$T/app/smali/com/test/jc/App.smali" <<'EOF'
@@ -154,7 +155,7 @@ cat > "$T/app/smali/com/test/jc/Big.smali" <<'EOF'
 EOF
 ok "合成目录就绪(App/MainActivity/Secondary/Big + 二进制 manifest)"
 
-echo "[3/9] 注入(确定性 --wrapper-name)"
+echo "[3/10] 注入(确定性 --wrapper-name)"
 python3 "$JL/inject-javacheck.py" "$T/app" --wrapper-name 'Lcom/test/jc/NativeGuard;'
 ok "注入器退出 0"
 
@@ -178,7 +179,7 @@ done
 [ -z "$_missing" ] || { echo "❌ 这些 smali 没被注入:$ _missing" >&2; exit 1; }
 ok "stub-src 全部 smali 都已注入($(ls "$JL"/stub-src/*.smali | wc -l) 个)"
 
-echo "[4/9] SmaliBuilder 真汇编(语法+寄存器合法性裁决)"
+echo "[4/10] SmaliBuilder 真汇编(语法+寄存器合法性裁决)"
 javac -nowarn -cp "$APKTOOL" -d "$T/probe" "$JL/tests/AsmProbe.java"
 java -cp "$T/probe:$APKTOOL" AsmProbe "$T/out.dex" \
   "$T/app/smali/com/test/jc/App.smali" \
@@ -249,7 +250,7 @@ print('__OK__')
 PYCHECK
 ok "invoke 实参寄存器数与签名一致(防 dalvik VerifyError)"
 
-echo "[5/9] androguard 读回(dex 层结构断言)"
+echo "[5/10] androguard 读回(dex 层结构断言)"
 python3 - "$T/out.dex" <<'PY'
 import sys
 sys.path.insert(0, 'tools/Dex2C')
@@ -319,7 +320,7 @@ print('  ✅ 读回断言全部通过')
 PY
 PASS=$((PASS + 1))
 
-echo "[5b/9] 报错三十九回归——native onCreate 壳必须跳过(dex2c 组合场景防回编炸)"
+echo "[5b/10] 报错三十九回归——native onCreate 壳必须跳过(dex2c 组合场景防回编炸)"
 python3 - "$JL/inject-javacheck.py" <<'PY'
 import importlib.util, sys, os, tempfile
 spec = importlib.util.spec_from_file_location('ij', sys.argv[1])
@@ -362,13 +363,13 @@ os.unlink(path)
 PY
 PASS=$((PASS + 1))
 
-echo "[6/9] 幂等(重跑零改动)"
+echo "[6/10] 幂等(重跑零改动)"
 H1=$(find "$T/app" -type f -exec md5sum {} \; | sort | md5sum)
 python3 "$JL/inject-javacheck.py" "$T/app" --wrapper-name 'Lcom/test/jc/NativeGuard;'
 H2=$(find "$T/app" -type f -exec md5sum {} \; | sort | md5sum)
 [[ "$H1" == "$H2" ]] && ok "目录哈希不变" || { echo "❌ 重跑产生了改动"; exit 1; }
 
-echo "[7/9] clean(删生成类 + 摘调用点 + 再汇编仍合法)"
+echo "[7/10] clean(删生成类 + 摘调用点 + 再汇编仍合法)"
 python3 "$JL/inject-javacheck.py" clean "$T/app"
 [[ ! -f "$T/app/javacheck-components.json" ]] || { echo "❌ components json 未删"; exit 1; }
 [[ ! -f "$T/app/smali/com/nc/link/NcLink.smali" ]] || { echo "❌ NcLink 未删"; exit 1; }
@@ -379,7 +380,7 @@ java -cp "$T/probe:$APKTOOL" AsmProbe "$T/out2.dex" \
   "$T/app/smali/com/test/jc/Secondary.smali" > /dev/null
 ok "clean 后调用点归零,残留 smali 仍可汇编"
 
-echo "[8/9] 自适应命名(普通包派生 / R8 短名包风格)"
+echo "[8/10] 自适应命名(普通包派生 / R8 短名包风格)"
 W=$(python3 - "$T/app" <<'PY'
 import importlib.util, sys, os
 spec = importlib.util.spec_from_file_location('ij', 'scripts/guard/javalink/inject-javacheck.py')
@@ -419,7 +420,31 @@ W2=$(python3 -c "import json;print(json.load(open('$T/obf2/javacheck-components.
 [[ "$W1" == "$W2" ]] && ok "R8 短名包 → 短名风格,且命名确定($W1)" \
   || { echo "❌ 命名不确定: $W1 vs $W2"; exit 1; }
 
-echo "[9/9] nc_link.c 判决逻辑(宿主 clang,生成侧同公式对拍)"
+echo "[10/10] nc_jni_selfcheck.c 表项自检(重名/空表/NULL)"
+# 2026-11-22 真机 bug 的教训：RegisterNatives 返回 0 不代表绑定成功
+# （那次 rc=0 但 ncVerify 从未绑上，静默闪退）。所以注册前必须自检，
+# 而自检逻辑本身也要有行为测试 —— 这里链接的是生产源码，不是复制品。
+source "$ROOT/scripts/lib/host-cc.sh"
+SELF_CC="$(nc_pick_host_cc || command -v clang || command -v gcc)"
+SELF_INC=()
+# jni.h 来源：优先 NDK sysroot；没有则用仓库内的最小桩
+_ndk_jni="$(find "${ANDROID_NDK_HOME:-/nonexistent}" -name jni.h -path '*sysroot*' 2>/dev/null | head -1)"
+if [[ -n "$_ndk_jni" ]]; then
+  SELF_INC=(-I"$(dirname "$_ndk_jni")")
+fi
+if $SELF_CC -O2 -Wall -Wextra -Werror ${SELF_INC[@]+"${SELF_INC[@]}"} \
+     -I"$ROOT/scripts/guard/src" \
+     "$JL/tests/test-nclink-selfcheck.c" \
+     "$ROOT/scripts/guard/src/nc_jni_selfcheck.c" \
+     -o "$T/selfcheck" 2>"$T/selfcheck.log"; then
+  "$T/selfcheck"
+  ok "nc_jni_selfcheck 判定(重名/空表/NULL/子集)全过"
+else
+  echo "❌ nc_jni_selfcheck 测试编译失败:"; sed 's/^/    /' "$T/selfcheck.log"
+  exit 1
+fi
+
+echo "[9/10] nc_link.c 判决逻辑(宿主 clang,生成侧同公式对拍)"
 mkdir -p "$T/ncl" "$T/ncl0"
 python3 - "$T/ncl" <<'PY'
 import hashlib, sys, os

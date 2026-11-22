@@ -16,8 +16,10 @@ guard/
 │   ├── sig_guard2.c        APK Sig Block 解析 / 证书提取
 │   ├── sig_hash.h          证书指纹（make-sig-hash.sh 生成）
 │   ├── nc_link.c           Java ↔ so 的 JNI 边界（ncVerify/heartbeat/selftest）
-│   ├── nc_link_jni.c       JNI 注册
+│   ├── nc_link_jni.c       JNI 注册（表驱动：槽位数由条目数派生）
 │   ├── nc_link_jni.h
+│   ├── nc_jni_selfcheck.c  注册前表项自检（拒重名/空表/NULL）
+│   ├── nc_jni_selfcheck.h
 │   ├── env_check.c         环境检测主体（13 探针 + 常驻复查）
 │   ├── env_probes.c        探针实现（特征串在这里，LSGS 密文化）
 │   ├── env_internal.h      探针声明

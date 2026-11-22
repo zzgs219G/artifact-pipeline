@@ -719,6 +719,10 @@ if [[ $WANT_SIGCHECK -eq 1 ]]; then
   cp "$ROOT/scripts/guard/src/nc_link.c"      "$SIG_DST/"
   cp "$ROOT/scripts/guard/src/nc_link_jni.c"  "$SIG_DST/"
   cp "$ROOT/scripts/guard/src/nc_link_jni.h"  "$SIG_DST/"
+  # 注册表项自检（2026-11-22）：nc_link_jni.c 依赖它，
+  # 漏拷的症状是链接期 `undefined symbol: nc_jni_selfcheck`。
+  cp "$ROOT/scripts/guard/src/nc_jni_selfcheck.c" "$SIG_DST/"
+  cp "$ROOT/scripts/guard/src/nc_jni_selfcheck.h" "$SIG_DST/"
   cp "$ROOT/scripts/guard/src/sig_guard2.c"   "$SIG_DST/"
   cp "$GUARD_SRC/nc_guard_layout.h"              "$SIG_DST/"
   cp "$WORK/sig_hash.h"                          "$SIG_DST/"

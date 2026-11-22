@@ -150,39 +150,61 @@ def main():
     check("heartbeat 实现不带 JNIEXPORT",
           not re.search(r'JNIEXPORT[^;\n{]*nc_link_jni_heartbeat', nc_code))
 
-    # ── 槽位不得复用（2026-11-22 真机实证）──────────────────────────
-    # JNINativeMethod 的 name/signature 是 const char*，ART 在
-    # RegisterNatives 返回后仍会读它们。原来 names/sigs 只有 2 个槽，
-    # 却注册 3 个方法（ncVerify/heartbeat/selftest），selftest 的还原
-    # 用了 names[0] → 把 ncVerify 的名字【原地覆盖】成 "selftest"。
-    # ART 拿到的 tab[0] 名字签名都对不上 → 静默跳过 →
+    # ── 槽位与表项必须由同一来源派生（2026-11-22 真机实证）──────────
+    # 历史 bug：names/sigs 声明 2 个槽，却注册 3 个方法
+    # （ncVerify/heartbeat/selftest），selftest 的还原写了 names[0]
+    # → 把 ncVerify 的名字【原地覆盖】成 "selftest"：
+    #     tab[0] = { name:"selftest", sig:"()I", fnPtr:ncVerify }
+    #     tab[2] = { name:"selftest", sig:"()I", fnPtr:selftest }
+    # ART 拿到的表里没有 "ncVerify" → 静默跳过 →
     # RegisterNatives 仍返回 0，但方法没绑上 → 调用即
     #   No implementation found for ...NcLink.ncVerify(byte[])
+    # → Guard 的 catch(UnsatisfiedLinkError) → kill() → 真机闪退。
     #
-    # 这条 bug 能编过、能链接、构建全绿，只有真机调用才炸；而原有的
-    # 断言只查"表内容对不对"，查不到"槽位够不够"。
-    # ⚠️ 必须排除注释行：函数上方那段说明里就写着旧的 `char names[2]`，
-    #    裸正则会把注释当成声明（这个测试自己也踩了一次）。
+    # 第一版修法是把 2 槽改成 3 槽 —— 修了"这一次"，没修"这一类"：
+    # 加第四个方法时同样的错会原样再来。现在改成表驱动：
+    # 维度全部写成 [NC_BIND_MAX]，而 NC_BIND_MAX 由 sizeof 派生。
+    #
+    # 所以这里的断言从"数字够不够"改成"是否无硬编码数字"：
+    # 只要还有裸数字维度，就说明有人退回了手抄槽位，立刻红。
+    # ⚠️ 必须排除注释行：注释里写着历史形态 `char names[2]`，
+    #    裸正则会把注释当声明（这个测试自己踩过一次）。
     _code = '\n'.join(ln for ln in src.splitlines()
                       if not re.match(r'\s*(\*|/\*|//)', ln))
-    _m = re.search(r'char\s+names\[(\d+)\]\[NC_STR_MAX\]', _code)
-    _s = re.search(r'char\s+sigs\[(\d+)\]\[NC_STR_MAX\]', _code)
-    check("names/sigs 槽位声明存在", bool(_m and _s))
-    if _m and _s:
-        _cap = min(int(_m.group(1)), int(_s.group(1)))
-        # 注册了几个方法（tab[n] 赋值次数 + 弱符号分支）
-        _used = len(re.findall(r'tab\[n\]\.name\s*=', src))
-        check(f"槽位够用（声明 {_cap} 个，实际需要 {_used} 个）",
-              _cap >= _used, "槽位复用会覆盖已写入的名字/签名")
-        # 每个注册条目用的槽位下标必须互不相同
-        _idx = re.findall(r'tab\[n\]\.name\s*=\s*names\[(\d+)\]', src)
-        check(f"每个条目用独立槽位（实得 {_idx}）",
-              len(_idx) == len(set(_idx)),
-              "有两个条目共用同一槽 → 后写的会覆盖先写的")
+
+    _dim_names = re.search(r'char\s+names\s*\[\s*(\w+)\s*\]\s*\[\s*NC_STR_MAX\s*\]',
+                           _code)
+    _dim_sigs = re.search(r'char\s+sigs\s*\[\s*(\w+)\s*\]\s*\[\s*NC_STR_MAX\s*\]',
+                          _code)
+    check("names/sigs 槽位声明存在", bool(_dim_names and _dim_sigs))
+    if _dim_names and _dim_sigs:
+        check("槽位维度不是裸数字（必须由条目数派生）",
+              _dim_names.group(1) == 'NC_BIND_MAX'
+              and _dim_sigs.group(1) == 'NC_BIND_MAX',
+              f"实得 names[{_dim_names.group(1)}] / sigs[{_dim_sigs.group(1)}]，"
+              f"硬编码数字会让'加方法'与'加槽位'重新变成两件要人肉对齐的事")
+        check("JNINativeMethod tab 维度同样派生",
+              re.search(r'JNINativeMethod\s+tab\s*\[\s*NC_BIND_MAX\s*\]', _code)
+              is not None,
+              "tab 写裸数字 = 表项数与槽位数可能再次脱节")
+
+    # NC_BIND_MAX 必须由 sizeof 派生，不能手写常量
+    _bindmax = re.search(r'#define\s+NC_BIND_MAX\s+(.+)', _code)
+    check("NC_BIND_MAX 由 sizeof(kBinds) 派生",
+          _bindmax is not None and 'sizeof' in _bindmax.group(1),
+          f"实得 {_bindmax.group(1).strip() if _bindmax else '未定义'}")
+
+    # 注册循环必须用同一个下标索引表和槽位 —— 这是"结构上不可能错位"的核心
+    check("循环用同一变量索引 kBinds[i] 与 names[i]",
+          re.search(r'NC_BIND_MAX;\s*\w+\+\+', _code) is not None
+          and re.search(r'nc_restore\(names\[i\]', _code) is not None
+          and re.search(r'kBinds\[i\]\.name', _code) is not None,
+          "分开索引就重新引入了'槽位与条目错位'的可能")
+
     # names/sigs 必须是 static：ART 可能在 RegisterNatives 返回后才读
     check("names/sigs 是 static（ART 返回后仍要能读到）",
-          re.search(r'static\s+char\s+names\[', _code) is not None
-          and re.search(r'static\s+char\s+sigs\[', _code) is not None)
+          re.search(r'static\s+char\s+names\s*\[', _code) is not None
+          and re.search(r'static\s+char\s+sigs\s*\[', _code) is not None)
 
     print("[4/6] 注册调用点与开关组合互斥")
     check("nc_link_jni.c 定义了 nc_link_register_natives",
@@ -243,11 +265,45 @@ def main():
     print("[5/6] selftest 缺失时不影响主链路（报错四十九纪律）")
     check("selftest 用 weak 引用（未编入时不炸链接）",
           'nc_link_jni_selftest' in src and '__attribute__((weak))' in src)
-    # 注册表容量：3 个方法，数组不能小
-    check("JNINativeMethod 表容量 >= 3",
-          re.search(r'JNINativeMethod\s+tab\s*\[\s*(\d+)\s*\]', src)
-          and int(re.search(r'JNINativeMethod\s+tab\s*\[\s*(\d+)\s*\]',
-                            src).group(1)) >= 3)
+    # 注意：表容量断言已上移到 [3/6] 的槽位段落 —— 那里查的是
+    # "维度是否由 NC_BIND_MAX 派生"，比">= 3"强：后者只挡得住
+    # 数字写小，挡不住"加方法时忘了加槽位"。
+
+    # 注册前自检必须在场：RegisterNatives 返回 0 不代表绑定成功
+    # （2026-11-22 实测就是 rc=0 但 ncVerify 从未绑上）。
+    # 实现在独立 TU（nc_jni_selfcheck.c），因为宿主测试要编译【同一份】
+    # 实现 —— nc_link_jni.c 在 NCLINK_HOST_TEST 下整段被排除。
+    SELF_C = os.path.join(SRC, 'nc_jni_selfcheck.c')
+    SELF_H = os.path.join(SRC, 'nc_jni_selfcheck.h')
+    check("nc_jni_selfcheck.c 存在（宿主可编译的独立实现）",
+          os.path.isfile(SELF_C))
+    if os.path.isfile(SELF_C):
+        selfc = read(SELF_C)
+        selfc_code = '\n'.join(
+            ln for ln in selfc.splitlines()
+            if not re.match(r'\s*(\*|/\*|//)', ln))
+        check("自检会拒绝重名条目", 'nc_eq(' in selfc_code)
+        check("自检拒绝空表 / n<=0",
+              'n <= 0' in selfc_code and 't == NULL' in selfc_code)
+        check("自检拒绝 NULL 字段",
+              't[i].name == NULL' in selfc_code
+              and 't[i].fnPtr == NULL' in selfc_code)
+    check("nc_jni_selfcheck.h 存在且声明了同一签名",
+          os.path.isfile(SELF_H)
+          and 'int nc_jni_selfcheck(const JNINativeMethod *t, int n);'
+              in read(SELF_H))
+    check("nc_link_jni.c include 了自检头文件",
+          '#include "nc_jni_selfcheck.h"' in _code)
+    check("自检在 RegisterNatives 之前调用",
+          _code.find('nc_jni_selfcheck(tab, n)') != -1
+          and _code.find('nc_jni_selfcheck(tab, n)') < _code.find('RegisterNatives'),
+          "自检必须早于注册 —— 注册后才发现表有问题就晚了")
+    # protect.sh 必须把新 TU 拷进 NDK 工程，否则链接期 undefined symbol
+    if os.path.isfile(protect_sh):
+        psh = read(protect_sh)
+        check("protect.sh 拷贝 nc_jni_selfcheck.c/.h",
+              'nc_jni_selfcheck.c' in psh and 'nc_jni_selfcheck.h' in psh,
+              "漏拷 → ld.lld: undefined symbol: nc_jni_selfcheck")
 
     print("[6/6] selftest 定义必须带 retain（否则被 --gc-sections 回收）")
     # 2026-11-04 实测：改动态注册后 selftest 没有任何直接调用者，

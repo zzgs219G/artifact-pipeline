@@ -41,6 +41,7 @@
 #include <jni.h>
 #include <stddef.h>
 
+#include "nc_jni_selfcheck.h"   /* nc_jni_selfcheck()：注册前的表项校验 */
 #include "nc_link_jni.h"
 
 #if !defined(NC_LINK_JNI_NO_ONLOAD)
@@ -102,104 +103,103 @@ extern void nc_link_jni_heartbeat(JNIEnv *, jclass);
 /* selftest 在 nc_guard_jni.c；该文件不参与编译时用弱符号兜底 */
 extern jint nc_link_jni_selftest(JNIEnv *, jobject) __attribute__((weak));
 
+/* ── 注册表：条目数与槽位数从同一个宏派生，结构上不可能错位 ────────────
+ *
+ * 2026-11-22 之前这里是三段手抄代码，配 `names[2][NC_STR_MAX]` 两个槽，
+ * 却要注册三个方法（ncVerify / heartbeat / selftest）。selftest 的还原
+ * 写的是 names[0] —— 把 ncVerify 的名字【原地覆盖】成 "selftest"：
+ *
+ *     tab[0] = { name: "selftest", sig: "()I", fnPtr: nc_link_jni_ncVerify }
+ *     tab[2] = { name: "selftest", sig: "()I", fnPtr: nc_link_jni_selftest }
+ *
+ * ART 拿到的表里没有 "ncVerify" → 方法没绑上 → 调用即
+ *     No implementation found for ...NcLink.ncVerify(byte[])
+ * → Guard 的 catch(UnsatisfiedLinkError) → kill() → 真机闪退。
+ * 而 RegisterNatives 的返回值【没有反映这个错误】，整条链静默。
+ *
+ * 那次的修法是把 2 槽改成 3 槽 —— 修了"这一次"，没修"这一类"：
+ * 加第四个方法时同样的错会原样再来。现在改成表驱动：
+ *
+ *   · 条目数 = NC_BIND_MAX = sizeof kBinds / sizeof kBinds[0]
+ *   · names/sigs 的维度、tab 的维度、循环上界全部用它
+ *   · 循环变量 i 同时索引 kBinds[i] / names[i] / sigs[i]
+ *
+ * 于是"槽位与条目错位"这种错误在结构上无法表达。加方法只需在表里加一行。
+ * 弱符号（selftest）也无需特殊分支 —— fn == NULL 就在循环里跳过，
+ * 且被跳过的方法不会挤占别人的槽位（槽位永远等于 i）。
+ */
+typedef struct {
+    const unsigned char *name;  size_t nlen;   /* XOR 密文（含结尾 NUL） */
+    const unsigned char *sig;   size_t slen;
+    void *fn;                                  /* NULL = 该实现未编入 */
+} nc_bind_t;
+
+static const nc_bind_t kBinds[] = {
+    { kName_ncVerify,  sizeof kName_ncVerify,  kSig_ncVerify, sizeof kSig_ncVerify,
+      (void *)nc_link_jni_ncVerify  },
+    { kName_heartbeat, sizeof kName_heartbeat, kSig_void,     sizeof kSig_void,
+      (void *)nc_link_jni_heartbeat },
+    { kName_selftest,  sizeof kName_selftest,  kSig_int,      sizeof kSig_int,
+      (void *)nc_link_jni_selftest  },          /* weak：未编入时为 NULL */
+};
+
+#define NC_BIND_MAX ((int)(sizeof kBinds / sizeof kBinds[0]))
+
 int nc_link_register_natives(JNIEnv *env) {
-    if (env == NULL) return -1;
-
-    jclass cls = (*env)->FindClass(env, "com/nc/link/NcLink");
-    if (cls == NULL) {
-        /* 清 pending exception：它会传染给调用方，变成难定位的崩溃 */
-        (*env)->ExceptionClear(env);
-        return -1;
-    }
-
     /* ⚠️⚠️ 必须是 static，不能是栈上的局部数组（2026-11-22 真机实证）：
      *
      * JNINativeMethod 的 name / signature 是 const char*，ART 的
      * RegisterNatives 在 Linux/ART 上【不保证立即复制这两个字符串】——
      * 它把 JNINativeMethod 数组登记进方法结构，之后按需读取。
      *
-     * 原来这里写的是栈数组，且在 RegisterNatives 返回后立刻 nc_wipe：
-     *     char names[2][NC_STR_MAX];   ← 栈
-     *     ...
-     *     rc = RegisterNatives(env, cls, tab, n);
-     *     nc_wipe(names, sizeof(names));   ← 立刻清零
-     * 清空后 ART 读到的就是空串 → 按名字找不到方法 → 静默跳过 →
-     * RegisterNatives 仍返回 0，但方法没有绑定 → 调用时
-     *     No implementation found for ...NcLink.ncVerify(byte[])
+     * 原来这里写的是栈数组，且在 RegisterNatives 返回后立刻 nc_wipe 清零
+     * → ART 读到空串 → 按名字找不到方法。为什么以前"能跑"：未定义行为，
+     * 栈在被清空后、被后续调用复用前原字节还残留着。一旦调用链长度变化
+     * （本次是 javalink 注入的 Java 代码改动），栈布局变了，问题立刻显现。
      *
-     * 为什么以前"能跑"：那是未定义行为。栈在被清空后、被后续调用复用前，
-     * 原字节往往还残留着，所以看起来正常。一旦调用链长度变化（本次是
-     * javalink 注入的 Java 代码改动），栈布局变了、清空的区域被覆盖，
-     * 问题立刻显现。这类 bug 的特征就是"改一处无关代码，另一处崩"。
-     *
-     * 改 static 之后：缓冲区常驻 .bss，进程生命周期内有效，ART 何时读都正确。
-     * 保留 nc_wipe 的意义就没有了（清的是 ART 还要用的东西），一并去掉。
-     * 代价：方法名/签名以明文常驻内存 —— 但它们本来就以明文形式存在于
+     * 改 static 之后：缓冲区常驻 .bss，进程生命周期内有效。
+     * 代价：方法名/签名以明文常驻内存 —— 但它们本来就以明文存在于
      * .rodata 的 XOR 密文里、且 RegisterNatives 语义要求 ART 能读到，
      * 加密的目的（strings 扫不到）不受影响。
      */
-    static char names[3][NC_STR_MAX];
-    static char sigs[3][NC_STR_MAX];
-    JNINativeMethod tab[3];
+    static char names[NC_BIND_MAX][NC_STR_MAX];
+    static char sigs [NC_BIND_MAX][NC_STR_MAX];
+
+    JNINativeMethod tab[NC_BIND_MAX];
+    size_t i;
     int n = 0;
     int rc;
+    jclass cls;
 
-    /* ① ncVerify([B)Z */
-    if (nc_restore(names[0], NC_STR_MAX, kName_ncVerify,
-                   sizeof(kName_ncVerify)) != 0
-        || nc_restore(sigs[0], NC_STR_MAX, kSig_ncVerify,
-                      sizeof(kSig_ncVerify)) != 0) {
-        (*env)->DeleteLocalRef(env, cls);
-        return -2;
-    }
-    tab[n].name      = names[0];
-    tab[n].signature = sigs[0];
-    tab[n].fnPtr     = (void *)nc_link_jni_ncVerify;
-    n++;
+    if (env == NULL) return -1;
 
-    /* ② heartbeat()V */
-    if (nc_restore(names[1], NC_STR_MAX, kName_heartbeat,
-                   sizeof(kName_heartbeat)) != 0
-        || nc_restore(sigs[1], NC_STR_MAX, kSig_void,
-                      sizeof(kSig_void)) != 0) {
-        (*env)->DeleteLocalRef(env, cls);
-        return -2;
-    }
-    tab[n].name      = names[1];
-    tab[n].signature = sigs[1];
-    tab[n].fnPtr     = (void *)nc_link_jni_heartbeat;
-    n++;
-
-    /* ③ selftest()I —— 仅当 nc_guard_jni.c 参与编译时注册。
-     * 不编译时 Java 侧调用会抛 UnsatisfiedLinkError，但
-     * inject-javacheck.py 已把 selftest 包在独立 try/catch 里
-     * （报错四十九的教训：自检失败不许影响主流程）。 */
-    /* ⚠️⚠️ 必须用独立的槽位 [2]，不能复用 [0]（2026-11-22 真机实证）：
-     *
-     * 原来的写法是 nc_restore(names[0], ..., kName_selftest, ...)，
-     * 而 tab[0].name 也指向 names[0] —— 于是 selftest 的还原把
-     * ncVerify 的名字【原地覆盖】了。ART 拿到的 tab[0] 是
-     *     { name: "selftest", sig: "()I", fnPtr: nc_link_jni_ncVerify }
-     * 名字和签名都对不上任何方法 → 静默跳过 → RegisterNatives 仍返回 0，
-     * 但 ncVerify / heartbeat 都没绑上 → 调用即
-     *     No implementation found for ...NcLink.ncVerify(byte[])
-     *
-     * 为什么之前"能跑"：nc_link_jni_selftest 是弱符号。当 .a 里没有
-     * nc_guard_jni.o 时它为 NULL，这个分支不执行，覆盖就不会发生。
-     * 而上游 nox 的 libnox.a 一直含 nc_guard_jni.o，所以这个分支
-     * 【总是】被执行 —— 只是过去 names[2][...] 之后的栈/静态布局让
-     * 覆盖后的残留值恰好还能被 ART 认出来，属于未定义行为下的侥幸。
-     */
-    if (nc_link_jni_selftest != NULL) {
-        if (nc_restore(names[2], NC_STR_MAX, kName_selftest,
-                       sizeof(kName_selftest)) == 0
-            && nc_restore(sigs[2], NC_STR_MAX, kSig_int,
-                          sizeof(kSig_int)) == 0) {
-            tab[n].name      = names[2];
-            tab[n].signature = sigs[2];
-            tab[n].fnPtr     = (void *)nc_link_jni_selftest;
-            n++;
+    /* ① 先备表 —— 不碰 JVM，失败早退不会在类上留下半截状态。
+     *    注意槽位用 i 而非 n：某个方法被跳过（弱符号缺失）时，
+     *    后面的方法仍用自己固定的槽位，不会挤到别人的位置上。 */
+    for (i = 0; i < (size_t)NC_BIND_MAX; i++) {
+        if (kBinds[i].fn == NULL) continue;
+        if (nc_restore(names[i], NC_STR_MAX, kBinds[i].name, kBinds[i].nlen) != 0) {
+            return -2;
         }
+        if (nc_restore(sigs[i], NC_STR_MAX, kBinds[i].sig, kBinds[i].slen) != 0) {
+            return -2;
+        }
+        tab[n].name      = names[i];
+        tab[n].signature = sigs[i];
+        tab[n].fnPtr     = kBinds[i].fn;
+        n++;
+    }
+
+    /* ② 注册前自检（见 nc_jni_selfcheck.c 的注释：不能只信 RegisterNatives
+     *    返回值 —— 2026-11-22 实测 rc=0 但方法从未绑上） */
+    if (nc_jni_selfcheck(tab, n) != 0) return -4;
+
+    /* ③ FindClass + 注册 */
+    cls = (*env)->FindClass(env, "com/nc/link/NcLink");
+    if (cls == NULL) {
+        /* 清 pending exception：它会传染给调用方，变成难定位的崩溃 */
+        (*env)->ExceptionClear(env);
+        return -1;
     }
 
     rc = (*env)->RegisterNatives(env, cls, tab, n);
@@ -209,8 +209,7 @@ int nc_link_register_natives(JNIEnv *env) {
     }
 
     /* ⚠️ 这里【不能】清 names/sigs —— 见函数上方 static 的说明：
-     * ART 可能在 RegisterNatives 返回之后才读取这两个字符串。
-     * 清了会导致"注册返回 0 但方法没绑上"的静默失败。 */
+     * ART 可能在 RegisterNatives 返回之后才读取这两个字符串。 */
     (*env)->DeleteLocalRef(env, cls);
     return rc == 0 ? 0 : -3;
 }
