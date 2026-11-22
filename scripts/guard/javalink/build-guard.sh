@@ -33,10 +33,9 @@
 #       android.jar  ← 环境变量 ANDROID_JAR 指定，或自动搜 Gradle 缓存
 #
 # ══ 产物 ═════════════════════════════════════════════════════════════════
-#   stub-src/Guard.smali    ← 由 Guard.java 生成
-#   stub-src/NcLink.smali   ← 由 NcLink.java 生成
+#   stub-src/*.smali  ← 由同目录 .java 编译产出，**数量不固定**
 #
-# ⚠️ 这两个 .smali **入库**，inject-javacheck.py 运行时直接读它们做类名/占位符
+# ⚠️ 这些 .smali **入库**，inject-javacheck.py 运行时直接读它们做类名/占位符
 #    替换。不要在运行时再编译（CI 上没有 android.jar，且每次构建多 3-5 秒）。
 set -euo pipefail
 
@@ -63,7 +62,7 @@ if [[ -z "${ANDROID_JAR:-}" ]]; then
 
     for _c in "${_cands[@]+"${_cands[@]}"}"; do
         [[ -f "$_c" ]] || continue
-        # ⚠️ 不能写 `unzip -l "$c" | grep -qF ...`（2026-11-22 踩过两次）：
+        # ⚠️ 不能写 `unzip -l "$_c" | grep -qF ...`（2026-11-22 踩过两次）：
         #   ① set -o pipefail 下 unzip 对坏 jar 返回非 0 → 整条管道判失败
         #   ② grep -q 提前关闭管道 → unzip 收到 SIGPIPE → 同样非 0
         #   两者都会让"明明匹配上了"的 jar 被判不匹配。
@@ -91,10 +90,9 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/classes" "$WORK/dex" "$WORK/src"
 
 # ── 1) javac ────────────────────────────────────────────────────────────
-# NcLink 是 Guard 的依赖（Guard 里 import com.nc.link.NcLink），一起编。
-cp "$SRC_DIR"/Guard.java "$SRC_DIR"/NcLink.java "$WORK/src/"
-javac -nowarn -cp "$ANDROID_JAR" -d "$WORK/classes" \
-      "$WORK/src/NcLink.java" "$WORK/src/Guard.java"
+# 编 stub-src 下的全部 .java（NcLink 是 Guard 的依赖，必须一起编）。
+cp "$SRC_DIR"/*.java "$WORK/src/"
+javac -nowarn -cp "$ANDROID_JAR" -d "$WORK/classes" "$WORK/src"/*.java
 echo "✔ javac 通过"
 
 # ── 2) d8 → dex ─────────────────────────────────────────────────────────
@@ -114,28 +112,41 @@ PY
 java -jar "$APKTOOL" d -f -r --no-res -o "$WORK/smali_out" "$WORK/guard.apk" >/dev/null 2>&1
 echo "✔ baksmali 通过"
 
-# ── 4) 清理 + 落到 stub-src/ ────────────────────────────────────────────
+# ── 4) 落到 stub-src/ ───────────────────────────────────────────────────
+# ⚠️ 不硬编码类名列表（2026-11-22 真机踩坑）：
+#    原来写 `for cls in Guard Guard$Hb NcLink`，而 Guard.java 一度用匿名
+#    Runnable，javac 编出的是 Guard$1 而不是 Guard$Hb →
+#    dex 里缺类 → startHeartbeat 抛 NoClassDefFoundError → 心跳线程起不来
+#    → env_watchdog 8 秒杀进程 → App 反复重启、进不去主页。
+#
+#    根因是硬编码：**编译出几个 class 由源码决定**（加内部类、加匿名类、
+#    用 lambda 都会多文件），列名字必然漏。改成"编译出什么就产出什么"。
 mkdir -p "$OUT_DIR"
-for cls in Guard NcLink; do
-    # baksmali 的输出布局随 dex 内包路径走，不是固定的 smali/<Cls>.smali。
-    # 直接按文件名找，避免猜目录层级（2026-11-22 踩过）。
-    src="$(find "$WORK/smali_out" -name "${cls}.smali" -type f | head -1)"
-    [[ -n "$src" ]] || { echo "❌ baksmali 未产出 ${cls}.smali" >&2; exit 1; }
+_produced=0
+while IFS= read -r _clsfile; do
+    _cls="$(basename "$_clsfile" .class)"
+    # baksmali 的输出布局随 dex 内包路径走，按文件名找，不猜目录层级。
+    src="$(find "$WORK/smali_out" -name "${_cls}.smali" -type f | head -1)"
+    [[ -n "$src" ]] || { echo "❌ baksmali 未产出 ${_cls}.smali" >&2; exit 1; }
 
-    python3 - "$src" "$OUT_DIR/$cls.smali" <<'PY'
+    python3 - "$src" "$OUT_DIR/$_cls.smali" <<'PY'
 import re, sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src, encoding='utf-8').read()
-# 去掉调试信息：.line 序号 + .source 文件名（保留会泄露原始 Java 文件名，
+# 去掉调试信息：.line 序号 + .source 文件名（会泄露原始 Java 文件名，
 # 且对产物毫无用处 —— 与 build-stub.sh 同一处理）
 text = re.sub(r'^[ \t]*\.line[ \t]+\d+[ \t]*\n', '', text, flags=re.M)
 text = re.sub(r'^[ \t]*\.source[ \t]+.*\n', '', text, flags=re.M)
 open(dst, 'w', encoding='utf-8').write(text)
 PY
-    echo "    → ${OUT_DIR}/${cls}.smali ($(grep -c '' "$OUT_DIR/$cls.smali") 行)"
-done
+    echo "    → ${_cls}.smali ($(grep -c '' "$OUT_DIR/$_cls.smali") 行)"
+    _produced=$((_produced + 1))
+done < <(find "$WORK/classes" -name '*.class' -type f | sort)
+
+[[ "$_produced" -gt 0 ]] || { echo "❌ 没产出任何 smali" >&2; exit 1; }
+echo "    共 ${_produced} 个类"
 
 echo "✅ 注入类编译完成"
 echo
-echo "⚠️ 产物已更新。inject-javacheck.py 读的是这两个 .smali，"
-echo "   改 Guard.java / NcLink.java 后必须重跑本脚本，否则产物与源码不一致。"
+echo "⚠️ inject-javacheck.py 读的是这些 .smali。改 stub-src/*.java 后"
+echo "   必须重跑本脚本，否则源码与入库产物不一致。"

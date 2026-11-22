@@ -128,20 +128,35 @@ public final class Guard {
             return;
         }
         heartbeatStarted = true;
-        Thread t = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                while (true) {
-                    try {
-                        NcLink.heartbeat();
-                        Thread.sleep(5000);
-                    } catch (Throwable ignored) {
-                        /* 喂失败继续循环;native 侧超时自会处置 */
-                    }
-                }
-            }
-        });
+        Thread t = new Hb();
         t.setDaemon(true);
         t.start();
+    }
+
+    /* 心跳喂食循环 —— 【必须是显式内部类，不能用匿名 Runnable】。
+     *
+     * 2026-11-22 真机实证：写成 `new Thread(new Runnable(){...})` 会编成
+     * 匿名内部类 Guard$1。而注入端（inject-javacheck.py 的 render_hb）
+     * 生成的是 Guard$Hb，两边对不上 → dex 里没有 Guard$1 →
+     * startHeartbeat 抛 NoClassDefFoundError → 心跳线程起不来 →
+     * env_watchdog 等 8 秒杀进程 → App 反复重启、永远进不去主页。
+     *
+     * 用显式内部类后，javac 编译出的就是 Guard$Hb，与 render_hb 的产物
+     * 形态完全一致，两边不再有匿名类这个隐性依赖。
+     *
+     * ⚠️ 改这里必须同步 inject-javacheck.py 的 render_hb（它生成同名类）。
+     */
+    public static final class Hb extends Thread {
+        @Override
+        public void run() {
+            while (true) {
+                try {
+                    NcLink.heartbeat();
+                    Thread.sleep(5000);
+                } catch (Throwable ignored) {
+                    /* 喂失败继续循环;native 侧超时自会处置 */
+                }
+            }
+        }
     }
 }

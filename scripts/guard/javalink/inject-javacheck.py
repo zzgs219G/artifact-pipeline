@@ -268,42 +268,29 @@ def render_guard(wrapper_desc):
     这正是「不手写 smali」的价值（见 _load_smali 的说明）。
     """
     text = _load_smali('Guard')
-    # Java 编译产物的类名是 Lcom/test/placeholder/Guard;（源码 package），
-    # 注入时换成自适应命名算出来的随机描述符，自引用一并替换。
+    # ⚠️ 替换顺序不能反（2026-11-22）：
+    #    Guard 内部引用了 Lcom/test/placeholder/Guard$Hb;。若先替换
+    #    'Lcom/test/placeholder/Guard;'，$Hb 那条因为结尾是 'Guard$Hb;'
+    #    不会被命中（还好）；但反过来若先替换了短名，长名就被拆坏。
+    #    这里先把内部类替换掉再替换主类，两边都安全。
+    _base = wrapper_desc[:-1]          # Lcom/xxx/NativeGuard; → Lcom/xxx/NativeGuard
+    text = text.replace('Lcom/test/placeholder/Guard$Hb;', _base + '$Hb;')
     text = text.replace('Lcom/test/placeholder/Guard;', wrapper_desc)
     return MARKER + '\n' + text
 
 
 def render_hb(wrapper_desc):
-    """Hb 内部类:心跳喂食循环(daemon Thread 子类,5s 一次)。
-    喂失败吞 Throwable 继续 —— native 侧超时自会处置(Xop 同款纪律)。"""
-    text = f"""# {MARKER}
-# Java→Native 心跳喂食循环(语义真相: stub-src/Guard.java#startHeartbeat)
-.class public final {wrapper_desc[:-1]}$Hb;
-.super Ljava/lang/Thread;
+    """Guard$Hb —— 心跳喂食循环（daemon Thread，5s 一次）。
 
-.method public constructor <init>()V
-    .locals 0
-    invoke-direct {{p0}}, Ljava/lang/Thread;-><init>()V
-    return-void
-.end method
-
-.method public run()V
-    .locals 2
-
-    :goto_loop
-    :try_start_0
-    invoke-static {{}}, {BRIDGE_DESC}->heartbeat()V
-    const-wide/16 v0, 0x1388
-    invoke-static {{v0, v1}}, Ljava/lang/Thread;->sleep(J)V
-    :try_end_0
-    .catch Ljava/lang/Throwable; {{:try_start_0 .. :try_end_0}} :catch_hb
-    goto :goto_loop
-    :catch_hb
-    goto :goto_loop
-.end method
-"""
-    return text
+    由 stub-src/Guard.java 的内部类 Hb 编译产出（build-guard.sh）。
+    ⚠️ 必须与 Guard.java 的 Hb 完全一致：2026-11-22 真机踩过，
+       Guard.java 写成匿名 Runnable 时编译出 Guard$1，而这里生成
+       Guard$Hb → dex 里缺类 → NoClassDefFoundError → 心跳不起 →
+       watchdog 8 秒杀进程 → App 进不去主页。
+    """
+    text = _load_smali('Guard$Hb')
+    text = text.replace('Lcom/test/placeholder/Guard$Hb;', wrapper_desc[:-1] + '$Hb;')
+    return MARKER + '\n' + text
 
 
 # ───────────────────────── 调用点注入 ─────────────────────────

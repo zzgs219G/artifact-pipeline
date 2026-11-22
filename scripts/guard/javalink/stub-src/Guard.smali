@@ -2,6 +2,14 @@
 .super Ljava/lang/Object;
 
 
+# annotations
+.annotation system Ldalvik/annotation/MemberClasses;
+    value = {
+        Lcom/test/placeholder/Guard$Hb;
+    }
+.end annotation
+
+
 # static fields
 .field public static final NC_APK_ENV:Ljava/lang/String; = "NC_APK_PATH"
 
@@ -166,7 +174,7 @@
 .end method
 
 .method private static startHeartbeat()V
-    .locals 3
+    .locals 2
 
     sget-boolean v0, Lcom/test/placeholder/Guard;->heartbeatStarted:Z
 
@@ -179,13 +187,9 @@
 
     sput-boolean v0, Lcom/test/placeholder/Guard;->heartbeatStarted:Z
 
-    new-instance v1, Ljava/lang/Thread;
+    new-instance v1, Lcom/test/placeholder/Guard$Hb;
 
-    new-instance v2, Lcom/test/placeholder/Guard$1;
-
-    invoke-direct {v2}, Lcom/test/placeholder/Guard$1;-><init>()V
-
-    invoke-direct {v1, v2}, Ljava/lang/Thread;-><init>(Ljava/lang/Runnable;)V
+    invoke-direct {v1}, Lcom/test/placeholder/Guard$Hb;-><init>()V
 
     invoke-virtual {v1, v0}, Ljava/lang/Thread;->setDaemon(Z)V
 

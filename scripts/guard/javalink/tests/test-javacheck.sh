@@ -158,6 +158,26 @@ echo "[3/9] 注入(确定性 --wrapper-name)"
 python3 "$JL/inject-javacheck.py" "$T/app" --wrapper-name 'Lcom/test/jc/NativeGuard;'
 ok "注入器退出 0"
 
+# ── 3b: 注入的类必须与编译产物一一对应（2026-11-22 真机踩坑）──
+# 教训：build-guard.sh 曾硬编码 `for cls in Guard Guard$Hb NcLink`，而
+# Guard.java 一度用匿名 Runnable → javac 编出 Guard$1 而不是 Guard$Hb
+# → dex 里缺类 → startHeartbeat 抛 NoClassDefFoundError → 心跳线程起不来
+# → env_watchdog 8 秒杀进程 → App 反复重启、进不去主页。
+# 「编译出几个 class 由源码决定」，所以这里反过来验：
+#   stub-src 里的每个 .smali 都必须被注入，且注入的类都要能汇编。
+_missing=""
+for _f in "$JL"/stub-src/*.smali; do
+    _c="$(basename "$_f" .smali)"
+    case "$_c" in
+      NcLink) _want="com/nc/link/NcLink.smali" ;;
+      Guard)  _want="com/test/jc/NativeGuard.smali" ;;
+      *)      _want="com/test/jc/NativeGuard\$${_c#Guard\$}.smali" ;;
+    esac
+    [ -f "$T/app/smali/$_want" ] || _missing="$_missing $_c"
+done
+[ -z "$_missing" ] || { echo "❌ 这些 smali 没被注入:$ _missing" >&2; exit 1; }
+ok "stub-src 全部 smali 都已注入($(ls "$JL"/stub-src/*.smali | wc -l) 个)"
+
 echo "[4/9] SmaliBuilder 真汇编(语法+寄存器合法性裁决)"
 javac -nowarn -cp "$APKTOOL" -d "$T/probe" "$JL/tests/AsmProbe.java"
 java -cp "$T/probe:$APKTOOL" AsmProbe "$T/out.dex" \
