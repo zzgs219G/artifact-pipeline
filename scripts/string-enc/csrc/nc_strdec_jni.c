@@ -17,6 +17,7 @@
 #include <string.h>
 #include <dlfcn.h>   /* dlsym/dlopen：从壳 so 取字符串密钥种子（2026-11-10 联动） */
 #include <link.h>    /* dl_iterate_phdr：遍历已加载 so 找壳 so 的 handle */
+#include <android/log.h>  /* __android_log_print：解密失败可见化（2026-11-22） */
 
 /* 构建期生成的配置头（protect.sh 写进 NDK 工程目录，不进 git）。
  * 没有它 = 本次不是 native 桩组合，bootstrap 退化为只记录 JavaVM。
@@ -83,8 +84,18 @@ static uint64_t nc_fnv1a(const char *s, size_t n)
  * 莫名其妙的业务错误（例如 Room 报 "no table with name <密文>"），
  * 而日志里【一点痕迹都没有】—— 2026-11-09 真机排查花了很久才定位到
  * "是解密静默失败"而不是"加密错了"。
- * 这里只计数，不打日志（避免日志本身成为特征串）；需排障时由
- * 调用方通过 nc_strdec_fail_count() 读取。 */
+ *
+ * ⚠️ 2026-11-22 起【同时打 logcat】。原先只计数不打日志，理由是
+ * "避免日志本身成为特征串"。评估后改掉：
+ *   ① 只计数不输出 = 静默劣化。计数器没有消费方（没有 JNI 出口、
+ *      没有落盘），等于不存在。用户实测反馈"完全看不到"。
+ *   ② 特征串风险可控：tag 用不含业务语义的短名，且【只在前几次
+ *      和每 100 次】打一条（见 nc_jni_fail），不会把 logcat 刷满，
+ *      逆向者靠它反推的信息量远小于"解密全错却无声"带来的排查成本。
+ *   ③ 反例更危险：App 起得来但业务全废（SQL 变密文），
+ *      没有任何线索指向"字符串解密"，容易误判成加密写错了。
+ * 计数器保留（nc_strdec_fail_count 仍可读），两者互补：
+ * 日志给"何时出事"，计数给"出了多少"。 */
 static volatile unsigned nc_fail_count = 0;
 
 unsigned nc_strdec_fail_count(void)
@@ -92,9 +103,20 @@ unsigned nc_strdec_fail_count(void)
     return nc_fail_count;
 }
 
+/* logcat tag。刻意短且无业务语义（不含 strdec/stringenc/decrypt 等
+ * 可搜词）—— 与模块内其它标识的纪律一致。 */
+#define NC_SD_TAG "sd"
+
 static jobject nc_jni_fail(JNIEnv *env, jobject fallback)
 {
-    nc_fail_count++;
+    unsigned n = ++nc_fail_count;
+    /* 限流：前 3 次每次都打（启动期看得到），之后每 100 次打一条。
+     * 理由：解密失败常在启动时集中发生（几千条字符串），全打会刷满
+     * logcat 缓冲区、挤掉真正有用的崩溃栈。 */
+    if (n <= 3 || (n % 100) == 0) {
+        __android_log_print(ANDROID_LOG_ERROR, NC_SD_TAG,
+                            "decrypt failed (total=%u)", n);
+    }
     if ((*env)->ExceptionCheck(env)) {
         (*env)->ExceptionClear(env);
     }
