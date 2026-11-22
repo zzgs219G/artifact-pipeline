@@ -198,7 +198,10 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/repack/tests/test_dex_capacity.py
 
-      - name: NcLink 动态注册（23 断言，含 XOR 表与 Java 一致性）
+      # ⚠️ step 名称不写断言数：这个数字历史上写过 20 → 23，实际已是 42。
+      #    凡"断言数/行数/套数"这类可枚举事实抄进名字，就必然随时间失真
+      #    （AGENTS.md §3 同类教训）。看实际断言数以测试输出为准。
+      - name: NcLink 动态注册（XOR 表一致性 + 槽位派生 + 注册前自检）
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/guard/javalink/tests/test_nclink_dynreg.py
 
