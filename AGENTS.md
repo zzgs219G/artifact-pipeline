@@ -303,6 +303,38 @@ test-sig-guard2.sh 里手抄了派生公式，注释写"与 make-sig-hash.sh 完
 > 与 §3「被 `if` 跳过的测试 = 没有测试」是同一条原则的两个面：
 > 那里讲**测试没跑**，这里讲**跑了但测的不是生产**。
 
+### 🔴 2.3 告警没人看 = 没有告警
+
+**判据：如果一个告警存在了几个月、而期间代码一直在演进，那它不是"已知问题"，
+是"从来没人读过"。**
+
+2026-11-22 的发现：CI 里**没有任何 step** 用 `-Werror` 编译
+`scripts/guard/src/*.c` —— 所有跑它们的测试（`test-sig-verify` /
+`test-sig-guard2` / `test-lsgs-strings` / `test-so-lock`）都只传 `-O1`/`-O2`。
+于是这几个文件长期编不过严格模式，而没人知道。
+
+代价是三处真问题：
+
+| 告警 | 实际含义 |
+|---|---|
+| `certs_len` set but not used | **少了一个边界检查**（不只是变量没删） |
+| `off_t` / `unsigned long long` 混比 | **整数回绕**，可被恶意 APK 利用 |
+| `unused function siglog_testapk_env` | 死代码：包装函数没人调用，调用处直接用了底层 |
+
+#### 纪律
+
+1. **新增/修改 `scripts/guard/src/*.c` 后必须跑**
+   `bash scripts/guard/tests/test-guard-strict-compile.sh`（已挂 CI 第 3 批）。
+2. **三种模式都要过**：arm64 / armv7 / host `SIGCHECK_HOST_TEST`。
+   条件编译分支不同，只测一种会漏掉另一半 —— 本门禁加上时就是这样发现
+   `siglog_testapk_env` 只在宿主模式暴露的。
+3. **不要用 `(void)x` 消告警了事**。先问三个问题：
+   - 这个变量本该被用吗？（→ 补上逻辑，如 `certs_len`）
+   - 它只在某个 `#ifdef` 里用吗？（→ 把声明移进 ifdef）
+   - 它真的多余吗？（→ 删掉，但要先确认没有靠它占位的东西，如 LSG 标记）
+
+   前两种是真实缺陷，只有第三种才是清理。`(void)` 会把前两种也一起掩盖掉。
+
 
 
 ## 2.5 混淆 pass 选型：按「改哪一类信息」分类，不按数量堆

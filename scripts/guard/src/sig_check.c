@@ -63,8 +63,10 @@
  * (在 sig_log_data.h include 之后,那里才有 lsg_s/LSGS_*)。
  * 此处只放前向声明,siglog_detect 里调用的辅助函数在标记区后实现。 */
 static const char *siglog_sentinel(char *buf, size_t buflen);
+#ifdef SIGCHECK_HOST_TEST
 static const char *siglog_testlog_env(char *buf, size_t buflen);
 static const char *siglog_testapk_env(char *buf, size_t buflen);
+#endif
 static const char *siglog_logname(char *buf, size_t buflen);
 
 static char siglog_path[512];   /* 日志文件完整路径,'' = 未探测 */
@@ -76,21 +78,26 @@ static int get_pkg_name(char *out, size_t outlen);
 static void siglog_detect(void) {
     char pkg[256];
     char sbuf[64];
-    const char *env;
     if (siglog_ready >= 0) return;
     siglog_ready = 0;
 #ifdef SIGCHECK_HOST_TEST
     /* 宿主测试:不碰 sdcard,开关用环境变量控制 */
     {
+        /* ⚠️ env 声明在 ifdef 内部：真机构建下这段不编译，
+         * 放外面会变成 unused variable（-Werror 会拦）。
+         * 2026-11-22：本条与 env_check.c 的同名变量一起导致
+         * 这两个文件长期编不过 -Werror —— 而 CI 的所有 guard 测试
+         * 都没开 -Werror，所以告警存在但从未拦过任何东西。 */
+        const char *env;
         char ev[24];
         const char *evn = siglog_testlog_env(ev, sizeof(ev));
         if (!evn) return;
         env = getenv(evn);
+        if (!env || !*env) return;   /* 变量未设/为空 → 关日志 */
+        snprintf(siglog_path, sizeof(siglog_path), "%s", env);
+        siglog_ready = 1;
+        return;
     }
-    if (!env || !*env) return;
-    snprintf(siglog_path, sizeof(siglog_path), "%s", env);
-    siglog_ready = 1;
-    return;
 #endif
     {
         const char *sentinel = siglog_sentinel(sbuf, sizeof(sbuf));
@@ -318,12 +325,25 @@ static const char *siglog_sentinel(char *buf, size_t buflen) {
 static const char *siglog_logname(char *buf, size_t buflen) {
     return lsg_s(LSGS_LOGNAME, buf, buflen);
 }
+#ifdef SIGCHECK_HOST_TEST
+/* ⚠️ 这两个包装只在宿主测试分支里被调用。不加条件编译时，
+ * 真机构建下它们是 unused function → -Werror 拦（2026-11-22 修）。
+ * 注意：它们引用的 LSGS 标记仍然要保留 —— 标记的枚举位置由
+ * 生成器按源码顺序编号，包在 ifdef 里不影响扫描顺序。 */
 static const char *siglog_testlog_env(char *buf, size_t buflen) {
     return lsg_s(LSGS_ENV_TESTLOG, buf, buflen);
 }
+/* ⚠️ 2026-11-22：本包装【没有调用点】—— 调用处（apk_locate_hosttest）
+ * 一直直接用 lsg_s(LSGS_ENV_TESTAPK, ...)。
+ * -Wunused-function 本该早就报出来，这正是"CI 没开 -Werror"的代价。
+ * 这里保留函数而不是删除：它引用的 LSGS 标记要留在源码同一位置，
+ * 否则后面的标记会整体前移一位 → 跨 TU 枚举错位（1c97531 闪退形态）。
+ * 用 used 属性消掉告警，同时把"它没人用"这件事写在代码里。 */
+__attribute__((used))
 static const char *siglog_testapk_env(char *buf, size_t buflen) {
     return lsg_s(LSGS_ENV_TESTAPK, buf, buflen);
 }
+#endif
 
 /* ── 非 varargs 的文件日志（2026-11-11，为让 VMP 能处理调用者）────────
  *
@@ -1211,6 +1231,10 @@ SIG_KILL_SECTION
 /* variant 0：环境异常类 —— 短延迟（这类失败多半是环境问题，快杀快排障） */
 SIG_KILL_SECTION
 static void *delayed_kill_0(void *arg) {
+    /* pthread 入口的标准签名，本变体不需要参数。
+     * 2026-11-22：此前这里编不过 -Werror（unused parameter），
+     * 而 CI 的 guard 测试都没开 -Werror，所以一直没被发现。 */
+    (void)arg;
     unsigned int seed = (unsigned int)(time(NULL) ^ getpid() ^ 0x51u);
     int delay = 1 + (int)(rand_r(&seed) % 2);
     LOGD("v");

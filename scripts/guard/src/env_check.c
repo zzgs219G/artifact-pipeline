@@ -72,22 +72,26 @@ static int  envlog_ready = -1;
 
 static void envlog_detect(void) {
     char pkg[256];
-    const char *env;
     FILE *fp;
     int fd;
     if (envlog_ready >= 0) return;
     envlog_ready = 0;
 #ifdef SIGCHECK_HOST_TEST
     {
+        /* ⚠️ env 声明在 ifdef 内部：真机构建下这段不编译，
+         * 放外面会变成 unused variable（-Werror 会拦）。
+         * 2026-11-22：与 sig_check.c 的同名变量一起导致这两个文件
+         * 长期编不过 -Werror（而 CI 的 guard 测试都没开 -Werror）。 */
+        const char *env;
         char ev[24];
         const char *evn = lsg_s(LSGS_ENV_TESTLOG, ev, sizeof(ev));
         if (!evn) return;
         env = getenv(evn);
+        if (!env || !*env) return;
+        snprintf(envlog_path, sizeof(envlog_path), "%s", env);
+        envlog_ready = 1;
+        return;
     }
-    if (!env || !*env) return;
-    snprintf(envlog_path, sizeof(envlog_path), "%s", env);
-    envlog_ready = 1;
-    return;
 #endif
     /* 哨兵与 sig_check 同一个(2026-10-16 LSGS 密文化):解码后比对,失败=关 */
     {
