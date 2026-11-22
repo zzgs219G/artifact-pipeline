@@ -289,7 +289,14 @@ def render_hb(wrapper_desc):
        watchdog 8 秒杀进程 → App 进不去主页。
     """
     text = _load_smali('Guard$Hb')
-    text = text.replace('Lcom/test/placeholder/Guard$Hb;', wrapper_desc[:-1] + '$Hb;')
+    _base = wrapper_desc[:-1]                       # Lcom/xxx/NativeGuard
+    text = text.replace('Lcom/test/placeholder/Guard$Hb;', _base + '$Hb;')
+    # ⚠️ 内部的 EnclosingClass annotation 引用的是【主类】而不是 $Hb
+    #    （javac 生成 .annotation EnclosingClass; value = L.../Guard;）。
+    #    只替换 $Hb 那条会漏掉它 → 产物里 EnclosingClass 指向不存在的
+    #    com.test.placeholder.Guard → ART 加载内部类时找不到宿主类。
+    #    2026-11-22 真机实证：漏替换后 App 启动即闪退。
+    text = text.replace('Lcom/test/placeholder/Guard;', wrapper_desc)
     return MARKER + '\n' + text
 
 
