@@ -595,62 +595,103 @@ static int get_pkg_name(char *out, size_t outlen) {
 }
 
 /*
- * 定位当前 APK：
- *   1. 先扫 /proc/self/maps，若 extractNativeLibs=false，so 直接映射自
- *      base.apk（行内含 "base.apk"），截取路径即可；
- *   2. 报错十四：extractNativeLibs=true 时 so 是从 lib/<abi>/libnc.so
- *      加载的，由 so 自身路径反推同安装目录下的 base.apk
- *      （/proc/<pid>/root 前缀是为了获得 SELinux 可读的真实路径）；
- *   3. 最后兜底遍历 /data/app/（Android 11+ 因 SELinux 大概率 EACCES，
- *      保留兼容旧机型）。
+ * ── APK 定位：四路独立探测 + 一个调度 ────────────────────────────────
+ *
+ * 2026-11-22 重构：原来是【一个 205 行、25 个分支】的函数，四路探测
+ * （环境变量 / maps / so 路径反推 / data-app 遍历）连同各自的报错史
+ * 全糊在一起。改一路要在 200 行里找它，而且四段共享 `line`/`p`/`fp`
+ * 这些可变量，读代码时无法确认"这一段的修改会不会影响下一段"。
+ *
+ * 现在拆成 4 个探测器 + 1 个调度器：
+ *   apk_locate_env      CAM 环境变量（不经文件系统的唯一路径）
+ *   apk_locate_maps     /proc/self/maps 扫 base.apk 行
+ *   apk_locate_so_dir   dladdr 取本 so 路径 → 反推安装根 → base.apk
+ *   apk_locate_scan     遍历 /data/app（旧机型兜底）
+ *   find_apk_path       依次试，第一个成功即返回
+ *
+ * ⚠️ 拆分时【必须】逐条保持的契约（改这里前先读）：
+ *
+ *  ① 每个探测器都要带 SIG_SEC_MARKED_NOVMP —— 它们原本就在 .ncx 段里，
+ *     漏标会让该段代码掉出加密范围（防御静默变弱，编译链接全过）。
+ *  ② 顺序不能变：env → maps → so_dir → scan。maps 与 so_dir 有依赖关系
+ *     （后者的兜底分支要重新读 maps），顺序变了行为就变。
+ *  ③ 每个探测器自己填 out、自己返回 0/-1，不共享可变量。
+ *  ④ 返回语义保持：任一成功→find_apk_path 返回 0；全失败→-1。
+ *  ⑤ ⚠️ 日志标记的【源码出现顺序】决定了 sig_log_data.h 的枚举编号。
+ *     拆分后标记在文件里的先后必须与拆分前一致，否则跨 TU 枚举错位
+ *     → 运行期取到别人的密文（2026-11-22 那次闪退的根因，见报错速查）。
+ *     本文件里四段代码的排列顺序就是按原顺序来的，不要为了"看起来整齐"
+ *     去重排。
+ *
+ *     ⚠️ 本条注释本身也踩过这个坑：初版在这里逐个列出了标记名，
+ *     而生成器扫的是【全文件】的字面形态 —— 注释里写一遍就会被当成
+ *     一条新标记，导致枚举重排（正是本条要防的事）。所以这里只描述
+ *     顺序关系，不写出标记的字面形态。
  */
+
+/* 宿主测试专用入口。
+ *
+ * ⚠️ 必须排在所有探测器之前：它在【重构前】是 find_apk_path 的第一段，
+ * 而这个位置的 log 标记出现顺序决定了枚举编号（见上方 ⑤）。
+ * 移到后面会改变编号 → 跨 TU 密文错位。 */
 SIG_SEC_MARKED_NOVMP
-static int find_apk_path(char *out, size_t outlen) {
-    FILE *fp;
-    char line[512];
-    char *p;
-
+static int apk_locate_hosttest(char *out, size_t outlen) {
 #ifdef SIGCHECK_HOST_TEST
-    /* 宿主测试：直接用环境变量指定的路径 */
-    {
-        char ev[24];
-        const char *evn = lsg_s(LSGS_ENV_TESTAPK, ev, sizeof(ev));
-        const char *t = evn ? getenv(evn) : NULL;
-        if (t && *t) {
-            snprintf(out, outlen, "%s", t);
-            /*LSG:TESTAPK_PATH|【数据】宿主测试用环境变量指定的 APK 路径*/
-            LSGI(LSG_TESTAPK_PATH, "%s", out);
-            return 0;
-        }
+    char ev[24];
+    const char *evn = lsg_s(LSGS_ENV_TESTAPK, ev, sizeof(ev));
+    const char *t = evn ? getenv(evn) : NULL;
+    if (t && *t) {
+        snprintf(out, outlen, "%s", t);
+        /*LSG:TESTAPK_PATH|【数据】宿主测试用环境变量指定的 APK 路径*/
+        LSGI(LSG_TESTAPK_PATH, "%s", out);
+        return 0;
     }
+#else
+    (void)out; (void)outlen;
 #endif
+    return -1;
+}
 
+/* 路 A：环境变量。当前【没有写入方】—— 见函数内注释。 */
+SIG_SEC_MARKED_NOVMP
+static int apk_locate_env(char *out, size_t outlen) {
     /* ── 路径 0：环境变量（2026-11-22，最先试）─────────────────────────
      *
      * 为什么放在 maps 之前：这是唯一【不经文件系统】的路径 —— 只是读进程
      * 内存里的一块字符串，没有 open/read 可供 Hook。dpt 壳一直用这招
-     * （DPT_APK_PATH），我们在 inject-javacheck.py 注入的 c(Context) 里
-     * 用 getPackageCodePath() + Os.setenv 写同一个值。
+     * （DPT_APK_PATH），本来的设想是在 inject-javacheck.py 注入的
+     * c(Context) 里用 getPackageCodePath() + Os.setenv 写同一个值。
      *
-     * 补它的直接原因（实测）：原来只有 maps + so 路径反推两路可用，
-     * 而 so 路径本身又是从 maps 拿的 → 实际是【单点】。攻击者让 maps
-     * 读到假内容，两路一起失效。第三条 /data/app 扫描在 Android 11+ 被
-     * SELinux 拒（errno=13），等于没有。
+     * ⚠️⚠️ 2026-11-22 实测：那个写入方【已被回滚】，本分支当前是
+     * 【没有写入方的只读分支】（commit 3a29df4）。回滚原因不是这条
+     * 探测逻辑有错，而是时序：native constructor 在 System.loadLibrary
+     * 返回【之前】就跑完，而 Java 侧的 setenv 在那之后，对本次启动
+     * 完全无效；且加了 setenv 之后真机进程 ~10s 被杀（根因未查明）。
      *
-     * 失败无副作用：环境变量不存在（未注入、或 setenv 被 ROM 拒）时
-     * 直接落到原来的 maps 逻辑，行为与改动前完全一致。
-     */
-    {
-        const char *ev = getenv("NC_APK_PATH");
-        if (ev && ev[0] == '/') {
-            /* access 确认可读再采用：路径本身也可能被伪造（攻击者塞一个
-             * 指向诱饵 APK 的环境变量）。读不到就当没有，继续走 maps。 */
-            if (access(ev, R_OK) == 0 && strlen(ev) + 1 <= outlen) {
-                snprintf(out, outlen, "%s", ev);
-                return 0;
-            }
+     * 保留而不是删除的理由：这条路径本身没有副作用（变量不存在就返回
+     * -1，调用方继续下一路），且它是唯一不经文件系统的手段。将来若有
+     * 别的写入方（原生层、外部拉起、或找到时序解法），本分支立刻可用。
+     * 删除会让那段知识只存在于 git 历史里。
+     *
+     * ⚠️ 如果决定恢复写入方，必须先解决时序 —— 不要重蹈 3a29df4。 */
+    const char *ev = getenv("NC_APK_PATH");
+    if (ev && ev[0] == '/') {
+        /* access 确认可读再采用：路径本身也可能被伪造（攻击者塞一个
+         * 指向诱饵 APK 的环境变量）。读不到就当没有，继续走 maps。 */
+        if (access(ev, R_OK) == 0 && strlen(ev) + 1 <= outlen) {
+            snprintf(out, outlen, "%s", ev);
+            return 0;
         }
     }
+    return -1;
+}
+
+/* 路 B：/proc/self/maps 扫 base.apk 行（extractNativeLibs=false 时命中）。 */
+SIG_SEC_MARKED_NOVMP
+static int apk_locate_maps(char *out, size_t outlen) {
+    FILE *fp;
+    char line[512];
+    char *p;
 
     {
         char _mb[24];
@@ -705,7 +746,12 @@ static int find_apk_path(char *out, size_t outlen) {
         /*LSG:MAPS_OPEN_ERR|【失败】无法打开 /proc/self/maps*/
         LSGE(LSG_MAPS_OPEN_ERR, "errno=%d", errno);
     }
+    return -1;
+}
 
+/* 路 C：由本 so 的绝对路径反推安装根，再拼 base.apk。 */
+SIG_SEC_MARKED_NOVMP
+static int apk_locate_so_dir(char *out, size_t outlen) {
     /* ── 报错十四修复：由 so 自身路径反推 base.apk ────────────────────
      * 现象(2026-09-08 真机日志, com.xixin.box): extractNativeLibs=true
      * (本流水线强制)时 so 从 lib/<abi>/libnc.so 加载, maps 无 base.apk 行;
@@ -714,100 +760,129 @@ static int find_apk_path(char *out, size_t outlen) {
      * 修法: dladdr 取本 so 真实路径(/proc/<pid>/root 前缀)或直接扫 maps
      * 里本 so 的映射行, 截掉 "/lib/<abi>/libnc.so" 得安装根目录,
      * 拼上 base.apk 后 access(R_OK) 确认。 */
-    {
-        Dl_info info;
-        char root[1024];
-        size_t r;
-        /* 直接对本文件的 static 函数指针做 dladdr 即可(dlsym 查不到 static
-         * 符号;dladdr 按"地址落在哪个 so"反查,static 函数一样有效) */
-        if (dladdr((void *)&find_apk_path, &info) && info.dli_fname) {
-            snprintf(root, sizeof(root), "%s", info.dli_fname);
-        } else {
-            FILE *mfp;
-            char _mb[24];
-            const char *_mp = lsg_s(LSGS_PATH_MAPS2, _mb, sizeof(_mb));
-            mfp = _mp ? fopen(_mp, "r") : NULL;
-            root[0] = '\0';
-            if (mfp) {
-                while (fgets(line, sizeof(line), mfp)) {
-                    char *q = strstr(line, "/libnc.so");
-                    if (q) { *q = '\0'; snprintf(root, sizeof(root), "%s", line); break; }
-                }
-                fclose(mfp);
+    Dl_info info;
+    char root[1024];
+    char line[512];
+    size_t r;
+
+    /* 直接对本文件的 static 函数指针做 dladdr 即可(dlsym 查不到 static
+     * 符号;dladdr 按"地址落在哪个 so"反查,static 函数一样有效) */
+    if (dladdr((void *)&apk_locate_so_dir, &info) && info.dli_fname) {
+        snprintf(root, sizeof(root), "%s", info.dli_fname);
+    } else {
+        FILE *mfp;
+        char _mb[24];
+        const char *_mp = lsg_s(LSGS_PATH_MAPS2, _mb, sizeof(_mb));
+        mfp = _mp ? fopen(_mp, "r") : NULL;
+        root[0] = '\0';
+        if (mfp) {
+            while (fgets(line, sizeof(line), mfp)) {
+                char *q = strstr(line, "/libnc.so");
+                if (q) { *q = '\0'; snprintf(root, sizeof(root), "%s", line); break; }
             }
-        }
-        r = strlen(root);
-        if (r > 0) {
-            const char *sfx = "/lib/";
-            char *cut = NULL;
-            char *s = strstr(root, sfx);
-            /* 只认“安装根目录/lib/”结构，且截点在路径中后段，防止包名含 /lib/ 误截 */
-            if (s && (size_t)(s - root) > 6) cut = s;
-            if (cut) {
-                char candidate[1100];
-                *cut = '\0';
-                snprintf(candidate, sizeof(candidate), "/proc/self/root%s/base.apk", root);
-                if (access(candidate, R_OK) == 0) {
-                    snprintf(out, outlen, "%s", candidate);
-                    /*LSG:SODIR_OK|【成功】由 libnc.so 路径反推出 APK*/
-                    LSGI(LSG_SODIR_OK, "%s", out);
-                    return 0;
-                }
-                /*LSG:SODIR_NG|【流程】so 路径反推的候选不可读*/
-                LSGE(LSG_SODIR_NG, "%s errno=%d", candidate, errno);
-            } else {
-                /*LSG:SODIR_LAYOUT|【流程】so 路径不是预期安装布局,反推失败*/
-                LSGE(LSG_SODIR_LAYOUT, "%s", root);
-            }
-        } else {
-            /*LSG:SODIR_NOSELF|【流程】无法取得本 so 自身路径*/
-            LSGE0(LSG_SODIR_NOSELF);
+            fclose(mfp);
         }
     }
-
-    {
-        char pkg[256];
-        DIR *d1, *d2;
-        struct dirent *e1, *e2;
-        if (get_pkg_name(pkg, sizeof(pkg)) != 0) {
-            /*LSG:CMDLINE_FAIL|【失败】读取 /proc/self/cmdline 失败*/
-            LSGE(LSG_CMDLINE_FAIL, "errno=%d", errno);
-            return -1;
-        }
-        /*LSG:PKG_FROM_CMDLINE|【数据】从 cmdline 取到包名*/
-        LSGI(LSG_PKG_FROM_CMDLINE, "%s", pkg);
-
-        d1 = opendir("/data/app");
-        if (!d1) {
-            /*LSG:DATA_OPENDIR_ERR|【失败】无法打开 /data/app（Android 11+ SELinux 常见）*/
-            LSGE(LSG_DATA_OPENDIR_ERR, "errno=%d", errno);
-            return -1;
-        }
-        while ((e1 = readdir(d1))) {
-            char p1[512];
-            if (e1->d_name[0] == '.') continue;
-            snprintf(p1, sizeof(p1), "/data/app/%s", e1->d_name);
-            d2 = opendir(p1);
-            if (!d2) continue;
-            while ((e2 = readdir(d2))) {
-                char candidate[640];
-                if (strncmp(e2->d_name, pkg, strlen(pkg)) != 0) continue;
-                snprintf(candidate, sizeof(candidate), "%s/%s/base.apk", p1, e2->d_name);
-                if (access(candidate, R_OK) == 0) {
-                    snprintf(out, outlen, "%s", candidate);
-                    closedir(d2);
-                    closedir(d1);
-                    /*LSG:DATA_OK|【成功】遍历 /data/app 定位到 APK*/
-                    LSGI(LSG_DATA_OK, "%s", out);
-                    return 0;
-                }
+    r = strlen(root);
+    if (r > 0) {
+        const char *sfx = "/lib/";
+        char *cut = NULL;
+        char *s = strstr(root, sfx);
+        /* 只认“安装根目录/lib/”结构，且截点在路径中后段，防止包名含 /lib/ 误截 */
+        if (s && (size_t)(s - root) > 6) cut = s;
+        if (cut) {
+            char candidate[1100];
+            *cut = '\0';
+            snprintf(candidate, sizeof(candidate), "/proc/self/root%s/base.apk", root);
+            if (access(candidate, R_OK) == 0) {
+                snprintf(out, outlen, "%s", candidate);
+                /*LSG:SODIR_OK|【成功】由 libnc.so 路径反推出 APK*/
+                LSGI(LSG_SODIR_OK, "%s", out);
+                return 0;
             }
-            closedir(d2);
+            /*LSG:SODIR_NG|【流程】so 路径反推的候选不可读*/
+            LSGE(LSG_SODIR_NG, "%s errno=%d", candidate, errno);
+        } else {
+            /*LSG:SODIR_LAYOUT|【流程】so 路径不是预期安装布局,反推失败*/
+            LSGE(LSG_SODIR_LAYOUT, "%s", root);
         }
-        closedir(d1);
-        /*LSG:DATA_MISS|【失败】/data/app 扫描完毕,无可读 base.apk*/
-        LSGE0(LSG_DATA_MISS);
+    } else {
+        /*LSG:SODIR_NOSELF|【流程】无法取得本 so 自身路径*/
+        LSGE0(LSG_SODIR_NOSELF);
     }
+    return -1;
+}
+
+/* 路 D：遍历 /data/app（旧机型兜底；Android 11+ 通常 EACCES）。 */
+SIG_SEC_MARKED_NOVMP
+static int apk_locate_scan(char *out, size_t outlen) {
+    char pkg[256];
+    DIR *d1, *d2;
+    struct dirent *e1, *e2;
+
+    if (get_pkg_name(pkg, sizeof(pkg)) != 0) {
+        /*LSG:CMDLINE_FAIL|【失败】读取 /proc/self/cmdline 失败*/
+        LSGE(LSG_CMDLINE_FAIL, "errno=%d", errno);
+        return -1;
+    }
+    /*LSG:PKG_FROM_CMDLINE|【数据】从 cmdline 取到包名*/
+    LSGI(LSG_PKG_FROM_CMDLINE, "%s", pkg);
+
+    d1 = opendir("/data/app");
+    if (!d1) {
+        /*LSG:DATA_OPENDIR_ERR|【失败】无法打开 /data/app（Android 11+ SELinux 常见）*/
+        LSGE(LSG_DATA_OPENDIR_ERR, "errno=%d", errno);
+        return -1;
+    }
+    while ((e1 = readdir(d1))) {
+        char p1[512];
+        if (e1->d_name[0] == '.') continue;
+        snprintf(p1, sizeof(p1), "/data/app/%s", e1->d_name);
+        d2 = opendir(p1);
+        if (!d2) continue;
+        while ((e2 = readdir(d2))) {
+            char candidate[640];
+            if (strncmp(e2->d_name, pkg, strlen(pkg)) != 0) continue;
+            snprintf(candidate, sizeof(candidate), "%s/%s/base.apk", p1, e2->d_name);
+            if (access(candidate, R_OK) == 0) {
+                snprintf(out, outlen, "%s", candidate);
+                closedir(d2);
+                closedir(d1);
+                /*LSG:DATA_OK|【成功】遍历 /data/app 定位到 APK*/
+                LSGI(LSG_DATA_OK, "%s", out);
+                return 0;
+            }
+        }
+        closedir(d2);
+    }
+    closedir(d1);
+    /*LSG:DATA_MISS|【失败】/data/app 扫描完毕,无可读 base.apk*/
+    LSGE0(LSG_DATA_MISS);
+    return -1;
+}
+
+/*
+ * 定位当前 APK：按 env → maps → so_dir → scan 依次试，第一个成功即返回。
+ *
+ * 为什么是这个顺序（改动前务必先读）：
+ *   · env 最先：唯一不经文件系统，攻击面最小。当前无写入方，等于跳过。
+ *   · maps 第二：extractNativeLibs=false 时直接命中，最快。
+ *   · so_dir 第三：extractNativeLibs=true（本流水线强制）时的主力路径。
+ *     它的兜底分支会重新读 maps（dladdr 失败时），所以必须排在 maps 之后
+ *     —— 顺序反了不会出错，但会让"maps 已确认无 base.apk 行"这个信息
+ *     白读一遍。
+ *   · scan 最后：Android 11+ 基本用不上，纯旧机型兜底。
+ *
+ * 每一步失败都静默落到下一步（各自打自己的 LSG 日志）；
+ * 四步全失败才返回 -1，由调用方决定处置（本函数不杀进程）。
+ */
+SIG_SEC_MARKED_NOVMP
+static int find_apk_path(char *out, size_t outlen) {
+    if (apk_locate_hosttest(out, outlen) == 0) return 0;
+    if (apk_locate_env(out, outlen) == 0) return 0;
+    if (apk_locate_maps(out, outlen) == 0) return 0;
+    if (apk_locate_so_dir(out, outlen) == 0) return 0;
+    if (apk_locate_scan(out, outlen) == 0) return 0;
     return -1;
 }
 
@@ -1311,7 +1386,7 @@ static int sig_collect_fp(unsigned char actual[32]) {
         char m[64];
         const char *mm = lsg_s(LSGS_ERR_APK_NOT_FOUND, m, sizeof(m));
         if (mm) LOGE_V1("%s", mm);
-        /*LSG:NOT_FOUND|【失败】三条定位路径(maps/so反推/data/app)全部失败*/
+        /*LSG:NOT_FOUND|【失败】四条定位路径(env/maps/so反推/data/app)全部失败*/
         LSGE0(LSG_NOT_FOUND);
         return -1;            /* 环境异常类 → variant 0 */
     }

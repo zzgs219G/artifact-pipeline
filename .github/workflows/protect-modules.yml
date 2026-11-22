@@ -307,6 +307,13 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/guard/tests/test-sigblock-bounds.py
 
+      # find_apk_path 从 205 行拆成 4 个探测器 + 1 个调度器（8 行）。
+      # 钉住四件事：调度顺序、每段带段标记（漏标=掉出加密段）、
+      # 不共享缓冲、返回语义。反向验证过：改乱顺序/去掉段标记都会红。
+      - name: APK 定位拆分契约（4 探测器 + 调度器，顺序/段标记/缓冲）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/guard/tests/test-apk-locate-split.py
+
       # 抽取器自身的回归：它是"生成侧↔校验侧"唯一的接缝，
       # 抽错段/静默降级都会让上面那条对拍重新变假。
       - name: 派生公式抽取器（两条线不互相顶替 + 跟随生产 + 破坏即报错）
