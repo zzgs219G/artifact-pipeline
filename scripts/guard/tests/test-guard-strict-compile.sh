@@ -104,62 +104,47 @@ else
   done
 fi
 
-# ── ③ 宿主模式 ────────────────────────────────────────────────────
+# ── ③ 宿主测试档（SIGCHECK_HOST_TEST 宏）─────────────────────────────
 #
-# ⚠️⚠️ 这一档在 CI 上踩过一次（run 45006692729 全红）：
-#     本地 Termux 的 clang 能找到 android/log.h / jni.h / arm_acle.h
-#     （它们就在 /data/data/com.termux/files/usr/include 附近），
-#     而 CI 的宿主编译器是纯 x86_64 clang，【找不到任何 Android 头】——
-#     于是 8 个文件 7 个 fatal error: android/log.h No such file。
+# ⚠️⚠️ 这一档【必须用 NDK 交叉编译器】，不能用宿主编译器。
+#     走了两轮弯路的记录（CI run 45006692729 / 45006964724）：
 #
-#     这不是被测代码的问题，是本脚本漏给了 include 路径。
-#     修法：宿主档也要把 NDK 的 sysroot include 加进来（只要头，不交叉编译）。
-#     注意不能直接用 nc_pick_ndk_cc —— 那是 ARM 交叉编译器，
-#     而本档要的是【在本机能跑的宿主 clang + Android 头】。
-echo "[host SIGCHECK_HOST_TEST]"
-# shellcheck source=../../lib/host-cc.sh
-source "$ROOT/scripts/lib/host-cc.sh"
-HOST_CC="$(nc_pick_host_cc || command -v clang || command -v gcc)"
-if [[ -z "$HOST_CC" ]]; then
-  skp "找不到宿主编译器"
+#   第一版：用 nc_pick_host_cc（纯 x86_64 clang）
+#     → 本地 Termux 绿，CI 红：android/log.h / jni.h 全找不到。
+#       宿主 clang 根本没有 Android 头。
+#
+#   第二版：加 -idirafter 指向 NDK sysroot（只补头）
+#     → 头找到了，但暴露出更深的问题：
+#       · arm_acle.h 不存在（它是 aarch64 专有头，x86_64 不可能有）
+#       · gettid / Dl_info / dladdr 缺失（glibc 与 bionic 的差异）
+#     这些不是代码 bug，是"用错误的编译器编"。想靠补 include 绕过，
+#     只会一路撞到下一个不兼容点。
+#
+#   第三版（本版）：用 NDK 的 aarch64-clang 编，只加 SIGCHECK_HOST_TEST 宏。
+#     产物是 ARM ELF、跑不了 —— 但【本档只做编译期检查，不运行】，
+#     所以没关系。这是既有的正确做法：test-lsgs-strings.sh 的 SO_CC
+#     也是走 NDK 编 sig_check.c/env_check.c（那边注释写过同样的理由）。
+#
+# 换句话说：这一档验的是"开宿主宏时还能不能编过"，不是"能不能在宿主跑"。
+echo "[host 宏档 SIGCHECK_HOST_TEST（NDK 交叉编译，只编不跑）]"
+if [[ -z "$NDKBIN" ]]; then
+  skp "无 NDK，宿主宏档未检查"
 else
-  # 找一个可用的 NDK sysroot include（arm64 优先，退回 armv7）
-  SYSINC=""
-  if [[ -n "$NDKBIN" ]]; then
-    for t in aarch64-linux-android armv7a-linux-androideabi; do
-      d="$NDKBIN/../sysroot/usr/include"
-      [[ -d "$d" ]] && { SYSINC="$d"; break; }
+  HCC="$NDKBIN/aarch64-linux-android24-clang"
+  if [[ ! -x "$HCC" ]]; then
+    skp "缺 $HCC"
+  else
+    for f in "${FILES[@]}"; do
+      base="$(basename "$f")"
+      if out=$("$HCC" -c -O2 -Wall -Wextra -Werror \
+                 -DSIGCHECK_HOST_TEST "${INC[@]}" -o /dev/null "$f" 2>&1); then
+        ok "$base (host 宏)"
+      else
+        bad "$base (host 宏)"
+        echo "$out" | grep -E "error:|warning:" | head -4 | sed 's/^/      /'
+      fi
     done
   fi
-  # ⚠️⚠️ 必须用 -idirafter，不能用 -I。
-  #
-  #   -I 把 NDK 的 include 插到【系统头之前】→ 宿主的 stdlib.h 解析时
-  #   会先看到 bionic 的 bits/*，两者混用 → 一堆 "unused parameter __l"
-  #   之类的库内告警（实测 4 个文件因此红）。host-cc.sh 的
-  #   nc_has_sysroot 注释里记过同一个坑：「自带 sysroot 时传 -I 反而
-  #   打乱头文件解析顺序」。
-  #
-  #   -idirafter 把 NDK include 放到【所有系统路径之后】：
-  #   宿主头优先（stdlib.h 用宿主那份），只有宿主找不到的
-  #   android/log.h / jni.h / arm_acle.h 才落到 NDK 那份。这才是
-  #   "宿主 clang + 少量 Android 头"想要的语义。
-  HINC=("${INC[@]}")
-  if [[ -n "$SYSINC" ]]; then
-    HINC+=(-idirafter "$SYSINC")
-    echo "  （宿主档 -idirafter NDK 头：$SYSINC）"
-  else
-    echo "  ⚠️ 没找到 NDK sysroot，宿主档可能因缺 android/log.h 而失败"
-  fi
-  for f in "${FILES[@]}"; do
-    base="$(basename "$f")"
-    if out=$("$HOST_CC" -c -O2 -Wall -Wextra -Werror \
-               -DSIGCHECK_HOST_TEST "${HINC[@]}" -o /dev/null "$f" 2>&1); then
-      ok "$base (host)"
-    else
-      bad "$base (host)"
-      echo "$out" | grep -E "error:|warning:" | head -4 | sed 's/^/      /'
-    fi
-  done
 fi
 
 echo
