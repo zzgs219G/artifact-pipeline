@@ -291,6 +291,14 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/guard/tests/test-sig-guard2.sh
 
+      # 双线"互备"是 AGENTS.md 的核心设计承诺，但此前没有任何测试证明它成立：
+      # test-sig-verify 只测第一线、test-sig-guard2 只测第二线，两条各自绿
+      # ≠ 互备成立。这条断言常量/派生/处置/入口都不共享，并如实标注
+      # APK 定位这个已知单点（防止文档宣称"完全独立"）。
+      - name: 双签名校验线独立性（常量/派生/处置/入口不共享）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/guard/tests/test-dual-line.py
+
       # 抽取器自身的回归：它是"生成侧↔校验侧"唯一的接缝，
       # 抽错段/静默降级都会让上面那条对拍重新变假。
       - name: 派生公式抽取器（两条线不互相顶替 + 跟随生产 + 破坏即报错）
