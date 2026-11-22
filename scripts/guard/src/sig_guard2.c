@@ -295,27 +295,35 @@ static unsigned long long g2_rd64le(const unsigned char *p) {
 }
 
 /* ═══════════════════════ APK 定位(精简版) ═══════════════════════
- * 与第一线的 179 行实现相比,本版只保留两条足够可靠的路径:
- *   ① /proc/self/maps 里出现 "base.apk" 的行 → 截尾部空格后的纯路径
- *   ② 由本 so 自身路径反推安装目录(/proc/<pid>/root 前缀,绕 SELinux)
- * 取舍理由:兜底扫 /data/app 在 Android 11+ 必失败(SELinux),留着只是噪声。
- * 任一路径 access(R_OK) 通过即采用;全失败 → 未检出(不误伤)。 */
-G2_SEC_MARKED_NOVMP
-static int g2_find_apk(char *out, size_t outlen) {
-    FILE *fp;
-    char line[1024];
+ *
+ * 与第一线的 find_apk_path 是【同一目的、不同实现】—— 两条线刻意零代码
+ * 共享（AGENTS.md §1：共享 = 单点，改一处两线同废）。所以这里不做"抽公共
+ * 模块"，只在本文件内按探测方式拆开，理由与第一线那次重构相同：
+ *
+ *   2026-11-22：108 行、三层嵌套（maps 扫描 / dladdr 反推 / 逐级回退）
+ *   全在一个函数里，且共享 line[]/fp/out 这些可变量。改一路要通读全部。
+ *
+ * 拆成：
+ *   g2_locate_hosttest  宿主测试环境变量
+ *   g2_locate_maps      maps 里 base.apk 行
+ *   g2_locate_so_dir    由 so 路径反推安装根（含逐级回退）
+ *   g2_find_apk         调度：依次试
+ *
+ * ⚠️ 守恒契约（改前必读）：
+ *  ① 每个定位器带 G2_SEC_MARKED_NOVMP —— 它们原本在 .ncx 段里，
+ *     漏标 → 掉出加密范围，编译链接全过、防御静默变弱。
+ *  ② 顺序不能变：hosttest → maps → so_dir。
+ *     看似比第一线少一路（没有 /data/app 遍历）—— 这是刻意的，
+ *     见下方注释：那条路在 Android 11+ 必失败，留着只是噪声。
+ *  ③ 各自声明缓冲，不共享 line[]/fp。
+ *  ④ 返回语义：定位器成功 0 / 失败 -1；调度器任一成功即 0，全失败 -1。
+ */
 
-#ifdef SIGGUARD2_HOST_TEST
-    {
-        const char *t = getenv("SIGGUARD2_TEST_APK");
-        if (t && *t) { snprintf(out, outlen, "%s", t); return 0; }
-    }
-#endif
-
-/* ── 路径字面量：生产走 LSGS 密文，宿主测试用明文本地宏 ──────────────
+/* 路径字面量：生产走 LSGS 密文，宿主测试用明文本地宏。
+ *
  * 为什么要回落：本文件在 SIGGUARD2_HOST_TEST 下【不包含】sig_log_data.h
- *   （那是流水线产物），因此 lsg_s / LSGS_G2_* 在该模式下不存在。
- *   宿主测试只验证派生公式，不需要密文 —— 与 g2_block_magic() 同款处理。
+ * （那是流水线产物），因此 lsg_s / LSGS_G2_* 在该模式下不存在。
+ * 宿主测试只验证派生公式，不需要密文 —— 与 g2_block_magic() 同款处理。
  * 生产路径：这 5 条全部走 LSGS 解码，so 里零明文（实测确认）。 */
 #ifdef G2_HAVE_LSGS
 #  define G2_APK_SUFFIX()  (lsg_s(LSGS_G2_SUFFIX_APK, g2_kbuf1, sizeof(g2_kbuf1)))
@@ -330,7 +338,33 @@ static char g2_kbuf1[16], g2_kbuf2[16], g2_kbuf3[16], g2_kbuf4[8];
 #  define G2_PATH_ROOT()   ("root")
 #endif
 
-    /* 路径 ①:maps 里的 base.apk */
+/* 定位器 0：宿主测试环境变量（只在该宏下有效）。 */
+G2_SEC_MARKED_NOVMP
+static int g2_locate_hosttest(char *out, size_t outlen) {
+#ifdef SIGGUARD2_HOST_TEST
+    const char *t = getenv("SIGGUARD2_TEST_APK");
+    if (t && *t) {
+        snprintf(out, outlen, "%s", t);
+        return 0;
+    }
+#else
+    (void)out; (void)outlen;
+#endif
+    return -1;
+}
+
+/* 定位器 ①：maps 里出现 "base.apk" 的行 → 截尾部空格后的纯路径。
+ *
+ * ⚠️ 与第一线的 apk_locate_maps 是两份独立实现（零共享约束）。
+ *    第一线那边有一段很长的报错十二/十七历史注释（".so" 子串误命中、
+ *    行首元数据没截掉）。本线只取最后一格空格后的路径，天然不受
+ *    ".so" 误命中影响 —— 但【不要】因为"看起来更简洁"就把第一线也
+ *    改成这个写法：第一线的写法是两轮真机闪退换来的，改动需重新验证。 */
+G2_SEC_MARKED_NOVMP
+static int g2_locate_maps(char *out, size_t outlen) {
+    FILE *fp;
+    char line[1024];
+
 #ifdef G2_HAVE_LSGS
     char _mb[24];
     const char *_mp = lsg_s(LSGS_PATH_MAPS2, _mb, sizeof(_mb));
@@ -338,73 +372,98 @@ static char g2_kbuf1[16], g2_kbuf2[16], g2_kbuf3[16], g2_kbuf4[8];
 #else
     fp = fopen("/proc/self/maps", "r");
 #endif
-    if (fp) {
-        while (fgets(line, sizeof(line), fp)) {
-            /* "base.apk" 走 LSGS（报告 §6.3 点名的明文串之一） */
-            const char *_apk = G2_APK_SUFFIX();
-            char *p = _apk ? strstr(line, _apk) : NULL;
-            if (p) {
-                char *sp;
-                p += 8;
-                *p = '\0';
-                sp = strrchr(line, ' ');
-                if (sp) {
-                    snprintf(out, outlen, "%s", sp + 1);
-                    if (access(out, R_OK) == 0) { fclose(fp); return 0; }
-                }
-            }
-        }
-        fclose(fp);
-    }
+    if (!fp) return -1;
 
-    /* 路径 ②:由本 so 路径反推(extractNativeLibs=true 场景) */
+    while (fgets(line, sizeof(line), fp)) {
+        /* "base.apk" 走 LSGS（报告 §6.3 点名的明文串之一） */
+        const char *_apk = G2_APK_SUFFIX();
+        char *p = _apk ? strstr(line, _apk) : NULL;
+        if (p) {
+            char *sp;
+            p += 8;
+            *p = '\0';
+            sp = strrchr(line, ' ');
+            if (sp) {
+                snprintf(out, outlen, "%s", sp + 1);
+                if (access(out, R_OK) == 0) { fclose(fp); return 0; }
+            }
+        }
+    }
+    fclose(fp);
+    return -1;
+}
+
+/* 定位器 ②：由本 so 路径反推安装根（extractNativeLibs=true 场景）。
+ *
+ * 三步尝试：/proc/<pid>/root 前缀版 → 原路径 → 逐级回退找根目录。
+ * 三级回退是因为 so 可能在 lib/<abi>/ 之外的层级（某些厂商 ROM）。 */
+G2_SEC_MARKED_NOVMP
+static int g2_locate_so_dir(char *out, size_t outlen) {
+    Dl_info info;
+
+    if (dladdr((const void *)&g2_locate_so_dir, &info) == 0 || !info.dli_fname) {
+        return -1;
+    }
     {
-        Dl_info info;
-        if (dladdr((const void *)&g2_find_apk, &info) != 0 && info.dli_fname) {
-            const char *_libp = G2_DIR_LIB();
-            const char *p = _libp ? strstr(info.dli_fname, _libp) : NULL;
-            if (p) {
-                size_t n = (size_t)(p - info.dli_fname);
-                if (n + 64 < outlen) {
-                    int i;
-                    const char *_apk2 = G2_APK_SUFFIX();
-                    memcpy(out, info.dli_fname, n);
-                    /* /proc/<pid>/root 前缀,获得 SELinux 可读的真实路径。
-                     * 格式串本身也是泄露项 → 由两段密文拼装，见 g2_root_prefix()。 */
-                    snprintf(out + n, outlen - n, "/%s", _apk2 ? _apk2 : "base.apk");
-                    if (out[0] == '/') {
-                        char real[1024];
-                        const char *_proc = G2_PATH_PROC();
-                        const char *_root = G2_PATH_ROOT();
-                        if (_proc && _root) {
-                            snprintf(real, sizeof(real), "%s%d/%s%s",
-                                     _proc, (int)getpid(), _root, out);
-                            if (access(real, R_OK) == 0) {
-                                snprintf(out, outlen, "%s", real);
-                                return 0;
-                            }
+        const char *_libp = G2_DIR_LIB();
+        const char *p = _libp ? strstr(info.dli_fname, _libp) : NULL;
+        if (p) {
+            size_t n = (size_t)(p - info.dli_fname);
+            if (n + 64 < outlen) {
+                int i;
+                const char *_apk2 = G2_APK_SUFFIX();
+                memcpy(out, info.dli_fname, n);
+                /* /proc/<pid>/root 前缀,获得 SELinux 可读的真实路径。
+                 * 格式串本身也是泄露项 → 由两段密文拼装。 */
+                snprintf(out + n, outlen - n, "/%s", _apk2 ? _apk2 : "base.apk");
+                if (out[0] == '/') {
+                    char real[1024];
+                    const char *_proc = G2_PATH_PROC();
+                    const char *_root = G2_PATH_ROOT();
+                    if (_proc && _root) {
+                        snprintf(real, sizeof(real), "%s%d/%s%s",
+                                 _proc, (int)getpid(), _root, out);
+                        if (access(real, R_OK) == 0) {
+                            snprintf(out, outlen, "%s", real);
+                            return 0;
                         }
                     }
-                    /* 直接试原路径 */
-                    if (access(out, R_OK) == 0) return 0;
-                    /* 逐级回退找根目录 */
-                    for (i = (int)n - 1; i > 0; i--) {
-                        if (out[i] == '/') {
-                            char cand[1024];
-                            out[i] = '\0';
-                            snprintf(cand, sizeof(cand), "%s/%s", out,
-                                     _apk2 ? _apk2 : "base.apk");
-                            if (access(cand, R_OK) == 0) {
-                                snprintf(out, outlen, "%s", cand);
-                                return 0;
-                            }
-                            out[i] = '/';
+                }
+                /* 直接试原路径 */
+                if (access(out, R_OK) == 0) return 0;
+                /* 逐级回退找根目录 */
+                for (i = (int)n - 1; i > 0; i--) {
+                    if (out[i] == '/') {
+                        char cand[1024];
+                        out[i] = '\0';
+                        snprintf(cand, sizeof(cand), "%s/%s", out,
+                                 _apk2 ? _apk2 : "base.apk");
+                        if (access(cand, R_OK) == 0) {
+                            snprintf(out, outlen, "%s", cand);
+                            return 0;
                         }
+                        out[i] = '/';
                     }
                 }
             }
         }
     }
+    return -1;
+}
+
+/* 调度：依次试，第一个成功即返回。
+ *
+ * ⚠️ 为什么没有第三路「扫 /data/app」：
+ *    那条路在 Android 11+ 必失败（SELinux EACCES，第一线的日志实测
+ *    errno=13），留着只是噪声。第一线保留它是因为要兼容旧机型；
+ *    本线是 2026-10 之后写的"精简版"，有意不复制这个已知无效分支。
+ *    如果将来真的要支持 Android 10 以下，在这里加 g2_locate_scan 即可
+ *    （需要同时加 G2_SEC_MARKED_NOVMP 与自己的缓冲）。 */
+G2_SEC_MARKED_NOVMP
+static int g2_find_apk(char *out, size_t outlen) {
+    if (g2_locate_hosttest(out, outlen) == 0) return 0;
+    if (g2_locate_maps(out, outlen) == 0) return 0;
+    if (g2_locate_so_dir(out, outlen) == 0) return 0;
     return -1;
 }
 

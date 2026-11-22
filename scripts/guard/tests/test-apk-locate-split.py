@@ -164,6 +164,79 @@ def main():
         check(f"{p} 体量 {n} 行（应 < 90）", n < 90,
               "单个探测器过大 = 该再拆（但也不宜过碎，见 AGENTS.md 的拆分纪律）")
 
+    # ── 第二线（sig_guard2.c）的同类拆分 ──────────────────────────
+    print("[G] 第二线 g2_find_apk 也必须是「探测器 + 调度」（零共享约束下各自拆）")
+    L2 = os.path.join(ROOT, 'scripts', 'guard', 'src', 'sig_guard2.c')
+    check("sig_guard2.c 存在", os.path.isfile(L2))
+    if os.path.isfile(L2):
+        s2 = open(L2, encoding='utf-8').read()
+
+        def func2(name):
+            m = re.search(r'static int %s\s*\([^)]*\)\s*\{' % re.escape(name), s2)
+            if not m:
+                return None
+            i, depth = m.end(), 1
+            while i < len(s2) and depth:
+                if s2[i] == '{':
+                    depth += 1
+                elif s2[i] == '}':
+                    depth -= 1
+                i += 1
+            return s2[m.start():i]
+
+        g2probes = ['g2_locate_hosttest', 'g2_locate_maps', 'g2_locate_so_dir']
+        g2bodies = {}
+        for p2 in g2probes:
+            g2bodies[p2] = func2(p2)
+            check(f"{p2} 存在", g2bodies[p2] is not None)
+
+        g2disp = func2('g2_find_apk')
+        check("g2_find_apk 存在", g2disp is not None)
+        if g2disp:
+            order2 = re.findall(r'(g2_locate_\w+)\s*\(\s*out', g2disp)
+            check(f"第二线调度顺序 = {order2}",
+                  order2 == ['g2_locate_hosttest', 'g2_locate_maps',
+                             'g2_locate_so_dir'],
+                  "顺序改变会改变行为：maps 是主路，so_dir 是 extractNativeLibs=true 时的兜底")
+            n2 = len(g2disp.splitlines())
+            check(f"g2_find_apk 只有 {n2} 行（调度器，应 < 30）", n2 < 30,
+                  "超过 30 行说明又把探测逻辑塞回来了")
+            # 第二线刻意没有 /data/app 扫描（Android 11+ 必失败）。
+            # ⚠️ 只查【代码行】：注释里解释"为什么不做"是允许的（本轮
+            #    拆分的注释就写着原因），拿全文件搜会把它自己算成违规。
+            s2_code = '\n'.join(ln for ln in s2.splitlines()
+                                 if not ln.lstrip().startswith(('*', '/*', '//')))
+            check("第二线【代码里】没有 /data/app 扫描（刻意的精简）",
+                  '/data/app' not in s2_code,
+                  "那是第一线的旧机型兜底；第二线是精简版，不复制已知无效分支")
+
+        for p2 in g2probes:
+            if g2bodies[p2] is None:
+                continue
+            idx = s2.index(g2bodies[p2])
+            head = s2[max(0, idx - 200):idx]
+            check(f"{p2} 前有 G2_SEC_MARKED_NOVMP",
+                  'G2_SEC_MARKED_NOVMP' in head.split('static int')[-1]
+                  or re.search(r'G2_SEC_MARKED_NOVMP\s*$', head.rstrip()),
+                  "不带标记 = 掉出 .ncx 加密段")
+            n = len(g2bodies[p2].splitlines())
+            check(f"{p2} 体量 {n} 行（应 < 90）", n < 90)
+
+        # 两条线必须仍是两份独立实现（AGENTS.md §1 零共享约束）。
+        # ⚠️ 判据是"各自文件里不出现【对方】的函数名"，不是"不出现自己的"。
+        #    第一版写成 g2_locate_maps not in src —— 方向反了，
+        #    永远为真（第一线当然不含 g2_*），是条什么都没测的断言。
+        # ⚠️ 只查代码行。注释里互相提名字是【好事】（说明写清了为什么
+        #    两条线各写一份），拿全文件搜会把解释本身判成违规。
+        src_code = '\n'.join(ln for ln in src.splitlines()
+                             if not ln.lstrip().startswith(('*', '/*', '//')))
+        check("第一线代码里不调用第二线的定位器",
+              'g2_locate_' not in src_code,
+              "共享 = 单点，改一处两线同废")
+        check("第二线代码里不调用第一线的定位器",
+              'apk_locate_' not in s2_code,
+              "共享 = 单点，改一处两线同废")
+
     print()
     print(f"通过 {PASS}，失败 {FAIL}")
     return 0 if FAIL == 0 else 1
