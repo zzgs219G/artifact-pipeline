@@ -212,20 +212,19 @@ def main():
         # 只看 rc 的话回退修复也测不出来。
         #
         # ⚠️ 声明必须放在【所有被插桩的函数之前】。
-        #    2026-11-22：g2_extract_cert 拆成三段后，边界检查搬进了
-        #    g2_read_v2block（在文件里更靠前），原来"插在 g2_extract_cert
-        #    前面"的写法就变成了"在使用点之后声明"→ 编译报
-        #    undeclared identifier。改成插在第一个 #include 之后。
+        #    2026-11-22 两次踩坑：
+        #      ① 原写法插在 g2_extract_cert 前 —— 拆分后边界检查搬进
+        #         g2_read_v2block（位置更靠前）→ 变成"使用点之后声明"。
+        #      ② 改成"插在最后一个 #include 之后"——本地过、CI 红：
+        #         条件编译下 #include 的位置不同，最后一个 #include 可能
+        #         出现在函数之后。
+        #    最稳的做法：插在文件【最开头】（第一条 #include 之前）。
+        #    这样无论条件编译怎么走，声明都在所有使用点之前。
         probe = 'const char *g2_last_reject = "other";\n'
-        _inc_end = patched.find('\n', patched.find('#include'))
-        # 找到最后一个连续的 #include 行之后
-        last_inc = 0
-        for m in re.finditer(r'^#include\s.*$', patched, flags=re.M):
-            last_inc = m.end()
-        if last_inc == 0:
-            bad("探针注入失败：找不到 #include 锚点")
+        if not patched.startswith(('#', '/*', '//')):
+            bad("探针注入失败：文件头形态异常")
             return 1
-        patched = patched[:last_inc] + '\n' + probe + patched[last_inc:]
+        patched = probe + patched
         # 边界检查打 "bounds" 标记
         marked = patched.replace(
             'if (block_size > (uint64_t)cd_off) return -1;',
