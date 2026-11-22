@@ -237,63 +237,58 @@ def main():
               'apk_locate_' not in s2_code,
               "共享 = 单点，改一处两线同废")
 
-        # ── g2_extract_cert 的三段拆分（2026-11-22）──────────────────
-        print("[C] g2_extract_cert 拆成 EOCD → Signing Block → 证书 三段")
-        cs = {}
-        for nm in ('g2_find_eocd', 'g2_read_v2block', 'g2_parse_cert',
-                   'g2_extract_cert'):
-            m = re.search(r'static (?:int|unsigned long long) %s\s*\('
-                          % re.escape(nm), s2)
-            check(f"{nm} 存在", m is not None)
-            if m:
-                # ⚠️ 从 '{' 的【下一个字符】开始扫描。
-                #    2026-11-22：第一版用 s.index('{', m.end()) 定位后
-                #    又从该位置开始计 depth++，等于把这个 '{' 数了两次
-                #    → 永远差一层 → 提取范围一路吃到文件末尾（症状是
-                #    "g2_extract_cert 有 183 行"）。这类"提取器自己算错"
-                #    会让断言测到错的东西，必须自己先验证提取正确。
-                brace = s2.index('{', m.end())
-                i, depth = brace + 1, 1
-                while i < len(s2) and depth:
-                    if s2[i] == '{':
-                        depth += 1
-                    elif s2[i] == '}':
-                        depth -= 1
-                    i += 1
-                cs[nm] = s2[m.start():i]
+        # ── g2_extract_cert 的两处漏洞修复点必须还在（2026-11-22）──────
+        #
+        # ⚠️ 这里只钉【漏洞修复点】，不再钉"函数拆没拆"。
+        #    2026-11-22 我曾把 g2_extract_cert（117 行）拆成三段，
+        #    理由是"太长"。用户指出这是错的：
+        #      · 它三段各用各的局部变量，不是共享可变状态 → 本来就干净
+        #      · 原来的 goto fail 是【单点收口】：所有错误路径在一处 free，
+        #        结构上不可能漏。拆成跨函数后，free 的责任散到调度器，
+        #        变成"靠人记得"
+        #    也就是说拆分【制造】了原本不存在的风险。已回退。
+        #
+        #    保留这两条断言的理由与"拆不拆"无关：它们防的是真漏洞
+        #    （整数回绕 / 少一层长度检查），是这套测试存在的初衷。
+        print("[C] g2_extract_cert 的两处边界检查仍在（漏洞修复点）")
+        m_cert = re.search(r'static int g2_extract_cert\s*\(', s2)
+        check("g2_extract_cert 存在", m_cert is not None)
+        cert_body = ''
+        if m_cert:
+            brace = s2.index('{', m_cert.end())
+            i, depth = brace + 1, 1
+            while i < len(s2) and depth:
+                if s2[i] == '{':
+                    depth += 1
+                elif s2[i] == '}':
+                    depth -= 1
+                i += 1
+            cert_body = s2[m_cert.start():i]
 
-        if 'g2_extract_cert' in cs:
-            body = cs['g2_extract_cert']
-            order = re.findall(
-                r'(g2_find_eocd|g2_read_v2block|g2_parse_cert)\s*\(', body)
-            check(f"调度顺序 = {order}",
-                  order == ['g2_find_eocd', 'g2_read_v2block', 'g2_parse_cert'],
-                  "EOCD → Block → 证书，顺序变了行为就变")
-            n = len(body.splitlines())
-            check(f"g2_extract_cert 只有 {n} 行（调度器，应 < 40）", n < 40,
-                  "超过 40 行说明又把解析逻辑塞回来了")
-            check("调度器负责释放 value（无泄漏）",
-                  'free(value)' in body,
-                  "value 由 g2_read_v2block malloc，必须由调度器释放")
-
-        for nm in ('g2_find_eocd', 'g2_read_v2block', 'g2_parse_cert'):
-            if nm not in cs:
-                continue
-            idx = s2.index(cs[nm])
-            head = s2[max(0, idx - 200):idx]
-            check(f"{nm} 前有 G2_SEC_MARKED_NOVMP",
-                  re.search(r'G2_SEC_MARKED_NOVMP\s*$', head.rstrip()) is not None,
-                  "不带标记 = 掉出 .ncx 加密段")
-
-        # 最关键：两处真漏洞的修复点必须还在
-        check("g2_parse_cert 里仍有 certs_len 边界检查",
-              'certs_len == 0 || sd + certs_len > end'
-              in (cs.get('g2_parse_cert') or ''),
+        check("g2_extract_cert 里仍有 certs_len 边界检查",
+              'certs_len == 0 || sd + certs_len > end' in cert_body,
               "这是 2026-11-22 修的真漏洞（少查一层长度 = 允许指针越界）")
-        check("g2_read_v2block 里仍有 block_size 回绕检查",
-              'block_size + 8 > (uint64_t)cd_off'
-              in (cs.get('g2_read_v2block') or ''),
+        check("g2_extract_cert 里仍有 block_size 回绕检查",
+              'block_size + 8 > (uint64_t)cd_off' in cert_body,
               "这是 2026-11-22 修的整数回绕（UINT64_MAX + 8 回绕成 7）")
+        # 单点收口：解析段的 13 条错误路径全部 goto fail，
+        # 只在 fail: 标签处 free 一次。这比"每个 return 前都 free"安全得多
+        # —— 后者漏一个就是泄漏，且新增错误分支时容易忘记。
+        #
+        # ⚠️ free(value) 全文有 3 处，都是必要的：
+        #   ① malloc 失败后（此时 value 为 NULL，但代码里是提前 return）
+        #   ② 读 pair 内容失败（value 已分配，必须立刻释放）
+        #   ③ fail: 标签（解析段所有 goto 的汇聚点）
+        #   判据不是"次数少"，而是"解析段的错误路径走 goto 而非各自 return"。
+        _parse_seg = cert_body[cert_body.find('const unsigned char *p = value'):
+                               cert_body.find('fail:')]
+        _goto_n = _parse_seg.count('goto fail')
+        _ret_n = _parse_seg.count('return -1')
+        check("g2_extract_cert 解析段用 goto fail 单点收口",
+              _goto_n >= 10 and _ret_n == 0 and 'goto fail' in cert_body,
+              f"解析段实得 goto={_goto_n} / return -1={_ret_n}。"
+              "free 散到多个 return 出口 = 迟早漏一个；"
+              "goto fail 让所有错误路径汇聚一处（拆分时被我破坏、现已恢复的结构）")
 
     print()
     print(f"通过 {PASS}，失败 {FAIL}")

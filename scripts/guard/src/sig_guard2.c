@@ -486,65 +486,27 @@ static const char *g2_block_magic(void) {
 #define G2_V2_ID 0x7109871aULL
 #define G2_V3_ID 0xf05368c0ULL
 
-/* ── 拆成三段（2026-11-22）─────────────────────────────────────────
- *
- * 原来 g2_extract_cert 是 117 行、一个函数里做三件事：
- *   ① 从文件尾找 EOCD（ZIP 中央目录末尾记录）
- *   ② 定位 APK Signing Block（magic + 两条 size 字段 + 边界校验）
- *   ③ 在 v2/v3 value 里逐层剥 signer → certs → cert DER
- * 三段共享 eocd[]/magic[]/sz8[]/value 等缓冲，且中间夹着两条
- * 真机踩出来的边界修复记录（整数回绕、certs_len 缺检查）。
- * 改任何一段都要通读全部才能确认没影响别段。
- *
- * ⚠️ 拆分守恒（与 g2_find_apk 那次同清单）：
- *  ① 每段都带 G2_SEC_MARKED_NOVMP —— 它们原本在 .ncx 段里
- *  ② 顺序不能变：eocd → block → cert
- *  ③ 各自声明缓冲
- *  ④ 返回语义 0/-1
- *  ⑤ ⚠️ 本文件在 SIGGUARD2_HOST_TEST 下不含 sig_log_data.h，
- *     所以这三段【不能加任何日志】—— 与拆分前一致。
- */
-
-/* ① 从文件尾往前扫 EOCD 签名，返回中央目录偏移（失败返回 0）。
- *
- * ZIP EOCD 形如 'PK\5\6' + 18 字节，其中偏移 16 处是 cd_off(4 字节)。
- * 扫描窗口 65557 = EOCD(22) + 最大注释(65535)，规范允许的最大范围。 */
 G2_SEC_MARKED_NOVMP
-static unsigned long long g2_find_eocd(int fd) {
-    unsigned char eocd[22];
+static int g2_extract_cert(int fd, unsigned char **out_der, size_t *out_len) {
     off_t fsize, pos, search_start;
+    unsigned char eocd[22], magic[16], sz8[8], header[12];
+    unsigned long long cd_off, block_size, pair_len, block_id;
+    off_t block_start, pair_pos;
+    unsigned char *value = NULL;
+    int found = -1;
 
     fsize = lseek(fd, 0, SEEK_END);
-    if (fsize < 22) return 0;
+    if (fsize < 22) return -1;
 
     search_start = (fsize > 65557) ? (fsize - 65557) : 0;
     for (pos = fsize - 22; pos >= search_start; pos--) {
-        if (g2_read_at(fd, eocd, 22, pos) != 0) return 0;
-        if (eocd[0]==0x50 && eocd[1]==0x4b && eocd[2]==0x05 && eocd[3]==0x06) {
-            unsigned long long cd_off = g2_rd32le(eocd + 16);
-            /* 两个哨兵值都不是合法偏移：0 = 空中央目录，0xffffffff = ZIP64 标记 */
-            if (cd_off == 0 || cd_off == 0xffffffffULL) return 0;
-            return cd_off;
-        }
+        if (g2_read_at(fd, eocd, 22, pos) != 0) return -1;
+        if (eocd[0]==0x50 && eocd[1]==0x4b && eocd[2]==0x05 && eocd[3]==0x06) break;
     }
-    return 0;
-}
+    if (pos < search_start) return -1;
 
-/* ② 定位 Signing Block，返回 (value, vlen) 由 out 返回；0 = 成功。
- *
- * Signing Block 布局：[size:8][pairs...][size:8][magic:16]，紧邻 EOCD 之前。
- * 两条 size 字段【值相同】，解析器读【尾部】那条（cd_off-24 处）。
- * pair 形如 [len:8][id:4][value:len-4]，按 id 匹配 v2(0x7109871a)/v3(0xf05368c0)。 */
-G2_SEC_MARKED_NOVMP
-static int g2_read_v2block(int fd, unsigned long long cd_off,
-                           unsigned char **out, int *out_len) {
-    unsigned char magic[16], sz8[8], header[12];
-    unsigned long long block_size, pair_len, block_id;
-    off_t block_start, pair_pos;
-
-    *out = NULL;
-    *out_len = 0;
-
+    cd_off = g2_rd32le(eocd + 16);
+    if (cd_off == 0 || cd_off == 0xffffffffULL) return -1;
     if ((off_t)cd_off < 32) return -1;
     if (g2_read_at(fd, magic, 16, (off_t)cd_off - 16) != 0) return -1;
     {
@@ -579,98 +541,69 @@ static int g2_read_v2block(int fd, unsigned long long cd_off,
         if (pair_len < 4 || pair_len > block_size) break;
         if (block_id == G2_V2_ID || block_id == G2_V3_ID) {
             unsigned long long vlen = pair_len - 4;
-            unsigned char *v = (unsigned char *)malloc(vlen);
-            if (!v) return -1;
-            if (g2_read_at(fd, v, vlen, pair_pos + 12) != 0) { free(v); return -1; }
-            *out = v;
-            *out_len = (int)vlen;
-            return 0;
+            value = (unsigned char *)malloc(vlen);
+            if (!value) return -1;
+            if (g2_read_at(fd, value, vlen, pair_pos + 12) != 0) { free(value); return -1; }
+            found = (int)vlen;
+            break;
         }
         pair_pos += 8 + (off_t)pair_len;
     }
+    if (found < 0) return -1;
+
+    {
+        const unsigned char *p = value, *end = value + found;
+        unsigned int signer_len, sd_len, digests_len, certs_len, cert_len;
+        const unsigned char *signer, *sd, *certs;
+
+        if (p + 4 > end) goto fail;
+        p += 4;
+        if (p + 4 > end) goto fail;
+        signer_len = g2_rd32le(p); p += 4;
+        if (p + signer_len > end) goto fail;
+        signer = p;
+
+        if (signer + 4 > end) goto fail;
+        sd_len = g2_rd32le(signer); signer += 4;
+        sd = signer;
+        if (sd + sd_len > end) goto fail;
+
+        if (sd + 4 > sd + sd_len) goto fail;
+        digests_len = g2_rd32le(sd); sd += 4;
+        if (sd + digests_len + 4 > sd + sd_len) goto fail;
+        sd += digests_len;
+        /* ⚠️ 2026-11-22 审核修：certs_len 读出来后【从未被使用】——
+         * -Wunused-but-set-variable 一直在报，但此前没人处理。
+         * 这不是"删个变量"就能消掉的告警：certs_len 是 certs 区的长度，
+         * 不校验就等于允许 sd 随后续读取越出 signer 区。
+         * 越界读的后果是"指纹算错 → 签名不过"，排查者会往证书方向找，
+         * 与真实原因相距很远。
+         * 补上边界检查，与上面 signer_len / sd_len 的做法保持一致
+         * （用指针比较 + goto fail，与本函数既有风格对齐）。 */
+        /* 边界一律用 end（= value + found，即整个 v2/v3 value 的末尾）。
+         * 不用 signer+sd_len 之类的复合表达式：signer 在读完 sd_len 后
+         * 已经 +=4，再拼 "+4" 极易多算/少算（本次审核就踩了一次，
+         * 合法包被误拒）。上面的 signer_len / sd_len 检查用 end 是既有风格，
+         * 这里保持一致。 */
+        if (sd + 4 > end) goto fail;
+        certs_len = g2_rd32le(sd); sd += 4;
+        if (certs_len == 0 || sd + certs_len > end) goto fail;
+        certs = sd;
+
+        if (certs + 4 > end) goto fail;
+        cert_len = g2_rd32le(certs); certs += 4;
+        if (cert_len == 0 || certs + cert_len > end) goto fail;
+
+        *out_der = (unsigned char *)malloc(cert_len);
+        if (!*out_der) goto fail;
+        memcpy(*out_der, certs, cert_len);
+        *out_len = cert_len;
+        free(value);
+        return 0;
+    }
+fail:
+    free(value);
     return -1;
-}
-
-/* ③ 在 v2/v3 value 里逐层剥出第一张证书 DER。
- *
- * 层级（AOSP v2 规范）：
- *   value  = [signer_len:4][signer]
- *   signer = [sd_len:4][signer_data]
- *   signer_data = [digests_len:4][digests][certs_len:4][certs]
- *   certs  = [cert_len:4][cert_der]
- *
- * ⚠️ 这里每一层都必须查边界。少查一层 = 允许指针越出 value，
- *    后果是"指纹算错 → 签名不过"，排查者会往证书方向找，离真实原因很远。 */
-G2_SEC_MARKED_NOVMP
-static int g2_parse_cert(const unsigned char *value, int found,
-                         unsigned char **out_der, size_t *out_len) {
-    const unsigned char *p, *end, *signer, *sd, *certs;
-    unsigned int signer_len, sd_len, digests_len, certs_len, cert_len;
-
-    if (value == NULL || found <= 0) return -1;
-    p = value;
-    end = value + found;
-
-    if (p + 4 > end) return -1;
-    p += 4;
-    if (p + 4 > end) return -1;
-    signer_len = g2_rd32le(p); p += 4;
-    if (p + signer_len > end) return -1;
-    signer = p;
-
-    if (signer + 4 > end) return -1;
-    sd_len = g2_rd32le(signer); signer += 4;
-    sd = signer;
-    if (sd + sd_len > end) return -1;
-
-    if (sd + 4 > sd + sd_len) return -1;
-    digests_len = g2_rd32le(sd); sd += 4;
-    if (sd + digests_len + 4 > sd + sd_len) return -1;
-    sd += digests_len;
-
-    /* ⚠️ 2026-11-22 审核修：certs_len 读出后【从未被使用】——
-     * -Wunused-but-set-variable 一直在报，但此前没人处理。
-     * 这不是"删个变量"能消掉的告警：certs_len 是 certs 区长度，
-     * 不校验就等于允许 sd 随后续读取越出 signer 区。
-     *
-     * 边界一律用 end（= value + found），不用 signer+sd_len 之类的
-     * 复合表达式：signer 在读完 sd_len 后已 +=4，再拼 "+4" 极易多算
-     * （本次审核就因此误拒过合法包，被 B6 用例抓到）。 */
-    if (sd + 4 > end) return -1;
-    certs_len = g2_rd32le(sd); sd += 4;
-    if (certs_len == 0 || sd + certs_len > end) return -1;
-    certs = sd;
-
-    if (certs + 4 > end) return -1;
-    cert_len = g2_rd32le(certs); certs += 4;
-    if (cert_len == 0 || certs + cert_len > end) return -1;
-
-    *out_der = (unsigned char *)malloc(cert_len);
-    if (!*out_der) return -1;
-    memcpy(*out_der, certs, cert_len);
-    *out_len = cert_len;
-    return 0;
-}
-
-/* 调度：EOCD → Signing Block → 证书。任一失败即 -1（不误伤，调用方静默跳过）。 */
-G2_SEC_MARKED_NOVMP
-static int g2_extract_cert(int fd, unsigned char **out_der, size_t *out_len) {
-    unsigned long long cd_off;
-    unsigned char *value = NULL;
-    int found = 0;
-    int rc;
-
-    *out_der = NULL;
-    *out_len = 0;
-
-    cd_off = g2_find_eocd(fd);
-    if (cd_off == 0) return -1;
-
-    if (g2_read_v2block(fd, cd_off, &value, &found) != 0) return -1;
-
-    rc = g2_parse_cert(value, found, out_der, out_len);
-    free(value);      /* value 无论成败都必须释放 */
-    return rc;
 }
 
 /* ═══════════════════════ 处置 ═══════════════════════ */
