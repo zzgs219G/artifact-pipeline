@@ -15,6 +15,7 @@
 #include <jni.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>  /* access/R_OK：证书绑定要确认 APK 路径可读 */
 #include <dlfcn.h>   /* dlsym/dlopen：从壳 so 取字符串密钥种子（2026-11-10 联动） */
 #include <link.h>    /* dl_iterate_phdr：遍历已加载 so 找壳 so 的 handle */
 #include <android/log.h>  /* __android_log_print：解密失败可见化（2026-11-22） */
@@ -211,7 +212,133 @@ static void nc_cache_put(JNIEnv *env, jstring payload, jstring val)
 }
 
 /* 前置声明：定义在本文件后部（bootstrap 附近），decrypt 里要调。 */
+/* ══ 证书绑定：把种子和证书指纹混成最终密钥（2026-11-22）═════════════
+ *
+ * 【要解决的问题】
+ *   此前解密密钥只由构建期随机种子决定，跟证书没关系。
+ *   攻击者换个签名重打包 → 签名校验被破 → 字符串照样解得开
+ *   → 字符串加密白做。
+ *
+ * 【做法】最终密钥 = 种子 XOR SHA256(证书DER) 的前 8 字节
+ *
+ *   证书没变 → 两侧算出同一个值 → 正常解密
+ *   证书变了 → 两侧不同     → 全部字符串解成脏数据
+ *
+ *   种子（每包随机）保证"不同包密钥不同"；
+ *   证书指纹保证"换签名即失效"。两个都要。
+ *
+ *   加密端在 scripts/string-enc/encrypt-strings.py 里做同样的事，
+ *   两侧必须逐字节一致（测试 test-cstrdec.sh 对拍）。
+ *
+ * 【失败处置】拿不到 APK 或证书 → 清掉密钥 → 所有解密 fail-closed
+ *   （返回原样密文）。宁可整包乱码（可见、可排查），也不要
+ *   "以为有保护、其实没有"。
+ */
+
+/* 找本进程的 APK 路径。
+ *
+ * ⚠️ 不复用 sig_check.c 的 find_apk_path：那个是 static，且只在勾
+ *    --sigcheck 时编译。字符串加密不该依赖"另一个可选模块被勾选"。
+ *    这里走 /proc/self/maps —— 三条定位路径里最可靠的一条
+ *    （extractNativeLibs 两种取值下 maps 都有 base.apk 行）。 */
+static int nc_find_apk_path(char *out, size_t outcap)
+{
+    FILE *fp = fopen("/proc/self/maps", "r");
+    char line[1024];
+
+    if (fp == NULL) {
+        return -1;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        char *hit = strstr(line, "base.apk");
+        char *sp;
+        if (hit == NULL) {
+            continue;
+        }
+        hit += 8;                  /* strlen("base.apk") */
+        *hit = '\0';
+        sp = strrchr(line, ' ');   /* 行首元数据与路径之间的分隔空格 */
+        if (sp == NULL) {
+            continue;
+        }
+        snprintf(out, outcap, "%s", sp + 1);
+        if (access(out, R_OK) == 0) {
+            fclose(fp);
+            return 0;
+        }
+    }
+    fclose(fp);
+    return -1;
+}
+
+/* 上游 nox 的符号（经 --whole-archive 链进 libnov.so）。
+ * ⚠️ 用强引用而非弱引用：证书绑定是安全功能，静默退化等于没有。
+ *    换 nox 版本时若符号改名，链接期就报 undefined symbol ——
+ *    构建直接失败，比"运行期悄悄失去防护"好得多。 */
+extern int ncg_apk_first_cert_der(const char *apk_path, uint8_t *der,
+                                  size_t der_cap, size_t *der_len);
+extern void ksha256(const uint8_t *data, size_t len, uint8_t out[32]);
+
+static int nc_key_is_set = 0;
+
+static void nc_set_key_with_cert(void)
+{
+    static volatile int done = 0;
+    int expected = 0;
+    char apk[1024];
+    uint8_t der[4096];
+    size_t der_len = 0;
+    uint8_t fp[32];
+    uint8_t seed_be[8];
+    uint8_t key[NC_STRDEC_KEYLEN];
+    int i;
+
+    if (nc_key_is_set) {
+        return;
+    }
+    if (!__atomic_compare_exchange_n(&done, &expected, 1, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        return;                         /* 别的线程在做/已做 */
+    }
+
+    if (nc_find_apk_path(apk, sizeof(apk)) != 0) {
+        nc_strdec_set_key(NULL);        /* 清密钥 → 全部 fail-closed */
+        return;
+    }
+    if (ncg_apk_first_cert_der(apk, der, sizeof(der), &der_len) != 0) {
+        nc_strdec_set_key(NULL);
+        return;
+    }
+    ksha256(der, der_len, fp);
+
+    /* 取回刚设好的种子。来源（壳 or 编译期常量）不重要，只关心值。 */
+    {
+        uint64_t seed = nc_strdec_get_seed();
+        /* 大端拆字节，与 Python 的 int.from_bytes(..., 'big') 一致。
+         * 写成小端 = 两侧不同源 = 全包静默乱码且构建期零报错。 */
+        for (i = 0; i < 8; i++) {
+            seed_be[i] = (uint8_t)((seed >> ((7 - i) * 8)) & 0xFF);
+        }
+    }
+
+    for (i = 0; i < 8; i++) {
+        key[i] = (uint8_t)(seed_be[i] ^ fp[i]);
+    }
+    for (i = 8; i < NC_STRDEC_KEYLEN; i++) {
+        key[i] = (uint8_t)(key[i % 8] ^ (uint8_t)(i / 8));
+    }
+
+    nc_strdec_set_key(key);
+
+    memset(seed_be, 0, sizeof(seed_be));
+    memset(key, 0, sizeof(key));
+    memset(fp, 0, sizeof(fp));
+    memset(der, 0, sizeof(der));
+    nc_key_is_set = 1;
+}
+
 static void nc_ensure_key(void);
+
 
 /* 在壳 so 里查导出符号。为什么不是一行 dlsym(RTLD_DEFAULT)：
  * Android 的 System.load 走 android_dlopen_ext(RTLD_NOW)【不带 RTLD_GLOBAL】，
@@ -358,14 +485,37 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
     }
 
     int ulen = nc_strdec_utf8_to_utf16(decoded, (size_t)dlen, u16, u16cap);
-    free(decoded);
     if (ulen <= 0) {
-        free(u16);
-        /* 密文解出来的字节不是合法 UTF-8 = 密文损坏或密钥错。
-         * fail-closed：原样返回密文（一眼看出坏了），
-         * 而不是返回含 U+FFFD 的"看起来正常"的垃圾。 */
-        return nc_jni_fail(env, payload);
+        /* ── 解出的字节不是合法 UTF-8（2026-11-22 改）────────────────
+         *
+         * 【原来】原样返回密文。问题：密文是 Base64，攻击者一眼就能
+         *   看出"这里坏了"，等于直接告诉他密钥错了、问题在哪。
+         *
+         * 【现在】把字节逐个映射成可见字符，返回一个【等长、看起来正常】
+         *   的字符串。攻击者看到的是"解密成功了，但内容不对"，
+         *   定位不到是密钥的问题。
+         *
+         * 为什么不用 U+FFFD / 跳过非法字节：
+         *   那会让输出变短或出现明显的替换符，同样能被识别成"解码出错"。
+         *   逐个字节映射保证【长度不变】，与正常解密结果无从区分。
+         *
+         * ⚠️ 这里【不计入】nc_fail_count —— 那是"诊断"通道，
+         *    计入会让攻击者通过 logcat 反推出"正在解错"。
+         *    真正的失败计数只在"密钥根本没设"时用（那种情况本来就该看见）。 */
+        size_t i;
+        for (i = 0; i < (size_t)dlen && i < u16cap; i++) {
+            /* 映射到可见 ASCII：0x20..0x7E（95 个字符）。
+             * 用模运算而非查表：少一个 .rodata 表 = 少一处可被定位的特征。 */
+            u16[i] = (uint16_t)(0x20 + (decoded[i] % 95));
+        }
+        ulen = (int)i;
+        if (ulen <= 0) {
+            free(decoded);
+            free(u16);
+            return nc_jni_fail(env, payload);
+        }
     }
+    free(decoded);
 
     jstring out = (*env)->NewString(env, (const jchar *)u16, (jsize)ulen);
     free(u16);
@@ -569,4 +719,9 @@ static void nc_ensure_key(void)
      * 行为相同：无密钥 → fail-closed。不 panic，让上层原样返回密文。 */
     (void) got;
 #endif
+
+    /* 种子已设好 → 再叠一层证书。证书变了，最终密钥就变（2026-11-22）。 */
+    if (nc_strdec_has_key()) {
+        nc_set_key_with_cert();
+    }
 }

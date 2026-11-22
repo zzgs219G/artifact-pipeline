@@ -304,6 +304,18 @@ int nc_strdec_has_key(void)
     return nc_key_ready ? 1 : 0;
 }
 
+uint64_t nc_strdec_get_seed(void)
+{
+    /* 只对 NKEYS==1 有意义（一个 uint64 种子）。NKEYS>1 时返回 0，
+     * 调用方（证书混合）会算出可预测的密钥 —— 但那条路当前被
+     * nc_strdec_jni.c 顶部的 `#if NC_STRDEC_NKEYS != 1 → #error` 挡死，
+     * 编译期就到不了这里。 */
+    if (NC_STRDEC_NKEYS != 1) {
+        return 0;
+    }
+    return nc_key_ready ? nc_key[0] : 0;
+}
+
 /* ── Base64 ────────────────────────────────────────────────────────── */
 
 /* 单字符 → 6 位值。非法返回 -1。

@@ -127,6 +127,13 @@ void nc_strdec_set_key(const uint8_t *key);
  * 未设置时 decrypt 一律返回 -1（fail-closed，绝不返回"假明文"）。 */
 int nc_strdec_has_key(void);
 
+/* 取当前种子（NKEYS==1 时的那个 uint64）。未设密钥返回 0。
+ *
+ * 用途只有一个：证书绑定 —— 把种子和证书指纹混成最终密钥。
+ * 见 nc_strdec_jni.c 的 nc_set_key_with_cert()。
+ * ⚠️ 不要在别处用它做别的事：种子是秘密，能少暴露一个入口就少一个。 */
+uint64_t nc_strdec_get_seed(void);
+
 /* Base64 解码，4 字符一组（一次吃 4 字符出 3 字节，无分支、无中间状态）。
  *
  * 为什么不用逐字符版：实测逐字符实现在真实负载下比 4-way 慢约 20 倍

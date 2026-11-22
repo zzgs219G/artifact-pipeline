@@ -9,11 +9,13 @@
 
 import argparse
 import base64
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import secrets
+import struct
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -610,6 +612,39 @@ MASK64 = (1 << 64) - 1
 GAMMA = 0x9E3779B97F4A7C15
 _M1 = 0xBF58476D1CE4E5B9
 _M2 = 0x94D049BB133111EB
+
+def cert_fp_of_apk(apk_path: str):
+    """从 APK 提取 v2/v3 签名证书的 SHA-256 指纹（32 字节）。
+
+    复用 scripts/guard/hash/extract-cert-fp.py —— 那个实现经过真机验证
+    （报错五十八就是它差 1 字节引发的全量闪退，此后有回归钉住）。
+    不在这里重写一遍：解析 APK Signing Block 的边界处理很容易出错，
+    多一份实现就是多一处会漂移的真相源。
+
+    ⚠️ 用 importlib 加载而不是 subprocess：CI 上反复起 python 进程
+    有额外开销，且 subprocess 的输出解析会多一层失败面。
+
+    返回 None = APK 里没有 v2/v3 签名块。异常向上抛，由调用方决定处置。
+    """
+    fp_py = os.path.normpath(
+        os.path.join(_HERE, '..', 'guard', 'hash', 'extract-cert-fp.py'))
+    if not os.path.isfile(fp_py):
+        raise RuntimeError(f'找不到 {fp_py}')
+    spec = importlib.util.spec_from_file_location('_cert_fp', fp_py)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # extract-cert-fp.py 暴露的具体函数名以文件为准，这里用它的公开入口。
+    for fn_name in ('extract_first_cert_der', 'first_cert_der',
+                    'extract_cert_der'):
+        fn = getattr(mod, fn_name, None)
+        if fn is not None:
+            der = fn(apk_path)
+            return None if der is None else hashlib.sha256(der).digest()
+    raise RuntimeError(
+        'extract-cert-fp.py 里找不到提取函数（已试 extract_first_cert_der / '
+        'first_cert_der / extract_cert_der）—— 改名了？本函数必须同步')
+
+
 
 def _mix64(z: int) -> int:
     z = (z ^ (z >> 30)) & MASK64
@@ -2356,6 +2391,49 @@ def main():
     existing_seed, need_write_stub = read_existing_salt(args.decompiled)
     if existing_seed is not None:
         seed = existing_seed
+
+    # ── 证书绑定（2026-11-22）─────────────────────────────────────────
+    #
+    # 【要解决的问题】签名被换掉重打包时，字符串加密此前【毫无作用】——
+    # 因为密钥只由本轮的随机 seed 决定，跟证书一点关系没有。
+    # 攻击者破了签名校验后，字符串照样解得开。
+    #
+    # 【做法】把 seed 与证书指纹混在一起再拿去加密：
+    #     eff_seed = seed XOR SHA256(证书DER)[:8]
+    #
+    # 运行期（nc_strdec_jni.c 的 nc_bind_key_to_cert）做同一件事。
+    # 证书没变 → 两侧算出的 eff_seed 相同 → 正常解密
+    # 证书变了 → 两侧不同 → 全部字符串解成脏数据
+    #
+    # ⚠️ 为什么是 XOR 而不是"直接用证书派生"：
+    #   只用证书派生会让【同一证书签的所有包共用一把密钥】——
+    #   拿一个正版包就能解全部。seed 保证"每包不同"，证书保证
+    #   "换签名即失效"，两者都要。
+    #
+    # ⚠️ 与 --seed-hex / 幂等复用 seed 的交互：
+    #   上面两处算出的 seed 都是【原始 seed】，混合在最后做。
+    #   所以幂等重跑仍能复用旧 seed（混合同一个证书指纹 → 同一 eff_seed）。
+    if args.apk:
+        try:
+            _fp = cert_fp_of_apk(args.apk)
+        except Exception as e:
+            # ⚠️ 不降级。拿不到证书就不加混合，等于"以为有保护其实没有"。
+            print(f'❌ 证书指纹提取失败（--apk 给了但解析不出来）: {e}',
+                  file=sys.stderr)
+            print('   证书绑定是安全功能，不允许静默降级为"不绑定"。',
+                  file=sys.stderr)
+            return 1
+        if _fp is None:
+            print('❌ --apk 里没有 v2/v3 签名块，无法绑定证书', file=sys.stderr)
+            return 1
+        seed = bytes(a ^ b for a, b in zip(seed, _fp[:8]))
+        if not args.quiet:
+            print(f'  🔐 密钥已绑定证书（证书指纹 {_fp.hex()[:16]}…）')
+    else:
+        # 没给 --apk 时无法绑定。这不是错误（测试/复现场景不会给），
+        # 但必须在日志里说明，否则"忘了传 --apk"会让保护静默失效。
+        if not args.quiet:
+            print('  ⚠️ 未提供 --apk：本次不绑定证书（换签名仍可解密）')
 
     # S2:密钥流是 O(1) 现算的,不存在"表"也就没有表长/扩容概念;
     # 全局 offset 只是"已分配区段"的水位线(每条密文按需消耗 len 字节)。
