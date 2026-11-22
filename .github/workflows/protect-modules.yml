@@ -287,9 +287,15 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/lib/tests/test-so-lock.sh
 
-      - name: sig_guard2 派生对拍
+      - name: sig_guard2 派生对拍（生成侧公式从 make-sig-hash.sh 抽取）
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/guard/tests/test-sig-guard2.sh
+
+      # 抽取器自身的回归：它是"生成侧↔校验侧"唯一的接缝，
+      # 抽错段/静默降级都会让上面那条对拍重新变假。
+      - name: 派生公式抽取器（两条线不互相顶替 + 跟随生产 + 破坏即报错）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/guard/hash/tests/test-derive-extract.py
 
       - name: env_mem_readable 跨映射判定
         if: steps.scope.outputs.code == 'true'

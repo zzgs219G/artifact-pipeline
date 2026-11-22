@@ -25,6 +25,7 @@ guard/
 │   ├── env_internal.h      探针声明
 │   └── nc_demangle_stub.c  __cxa_demangle 的最小替代
 ├── hash/                 make-sig-hash.sh（提证书指纹 → sig_hash.h）
+│                         extract-derive.py（从生成侧抽取派生公式，供测试用）
 ├── javalink/             Java 层判决式校验注入（inject-javacheck.py + 测试）
 ├── log/                  make-sig-log.py（LSGS 中文日志文案密文化）
 ├── docs/                 ★ 模块文档（不在 docs/ 下）

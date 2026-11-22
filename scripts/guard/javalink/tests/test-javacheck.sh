@@ -446,20 +446,35 @@ fi
 
 echo "[9/10] nc_link.c 判决逻辑(宿主 clang,生成侧同公式对拍)"
 mkdir -p "$T/ncl" "$T/ncl0"
-python3 - "$T/ncl" <<'PY'
-import hashlib, sys, os
-out = sys.argv[1]
-fp = hashlib.sha256(b'fp-seed').digest()
-salt = hashlib.sha256(b'salt-seed').digest()[:16]
+# ⚠️⚠️ 生成侧公式【从 make-sig-hash.sh 抽取】，不在这里手抄。
+#   2026-11-22 实测过的坑：test-sig-guard2.sh 曾把公式手抄一份并注释
+#   "与 make-sig-hash.sh 内嵌的完全一致"，结果生成侧系数被改后它依旧全绿
+#   —— 生成侧漂移时测试替它保密。这里用同一个抽取器避免复现该问题。
+#   指纹/盐仍由本测试自定（要可控），但【公式】来自生产文件。
+#
+# 指纹 = SHA256(b'fp-seed')（与 nc_link.c 的输入语义一致）
+_GEN="$ROOT/scripts/guard/hash/make-sig-hash.sh"
+_EXT="$ROOT/scripts/guard/hash/extract-derive.py"
+_FP=$(python3 -c "import hashlib;print(hashlib.sha256(b'fp-seed').hexdigest())")
+python3 "$_EXT" "$_GEN" 1 --fp "$_FP" --out "$T/ncl/derive1.json" >/dev/null \
+  || { echo "❌ 从 make-sig-hash.sh 抽取线1公式失败"; exit 1; }
+
+python3 - "$T/ncl" "$_FP" <<'PY'
+import hashlib, sys, os, json
+out, fp_hex = sys.argv[1], sys.argv[2]
+fp = bytes.fromhex(fp_hex)
+d = json.load(open(os.path.join(out, 'derive1.json')))
+# 盐/摘要长度也来自生成侧（随抽取结果），不写死 16/32
+salt = bytes.fromhex(d['salt'])
 t1 = hashlib.sha256(fp).digest()
-stored = bytes(t1[i] ^ salt[i % 16] ^ ((i * 0x9E) & 0xFF) for i in range(32))
+stored = bytes.fromhex(d['stored'])
 def emit(path, stored):
     def arr(b): return ',\n    '.join(', '.join(f'0x{x:02x}' for x in b[i:i+8]) for i in range(0, len(b), 8))
     with open(os.path.join(path, 'sig_hash.h'), 'w') as f:
         f.write(f"""#ifndef _SIG_HASH_H_
 #define _SIG_HASH_H_
-#define SIG_HASH_LEN 32
-#define SIG_SALT_LEN 16
+#define SIG_HASH_LEN {len(stored)}
+#define SIG_SALT_LEN {len(salt)}
 static const unsigned char SIG_SALT[SIG_SALT_LEN] = {{
     {arr(salt)}
 }};
@@ -472,7 +487,7 @@ emit(out, stored)
 open(os.path.join(out, 'good.bin'), 'wb').write(t1)
 bad = bytearray(t1); bad[0] ^= 1
 open(os.path.join(out, 'bad.bin'), 'wb').write(bytes(bad))
-emit(out + '0', bytes(32))
+emit(out + '0', bytes(len(stored)))
 PY
 cp "$ROOT/scripts/guard/src/nc_link.c" "$T/ncl/"   # 引号包含优先搜源文件目录,须就位编译
 # 2026-10-20：nc_link.c 现在 include nc_guard_layout.h（契约真相源），必须一并拷

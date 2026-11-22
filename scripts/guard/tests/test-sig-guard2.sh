@@ -37,20 +37,37 @@ echo "════════════════════════�
 echo "sig_guard2.c 派生对拍(宿主端)"
 echo "══════════════════════════════════════════════════"
 
-# ── ① 生成侧公式(python,与 make-sig-hash.sh 内嵌的完全一致) ──
-python3 - "$T" <<'PY'
-import hashlib, os, sys
-out = sys.argv[1]
-fp = bytes(range(32))                    # 固定测试指纹
-salt = bytes(range(16))                  # 固定盐(可复现)
-t2 = hashlib.sha256(b"G2" + fp).digest()
-stored = bytes(t2[i] ^ salt[(i*7) % 16] ^ ((i*0x5B + 0x3D) & 0xFF) for i in range(32))
+# ── ① 生成侧：从 make-sig-hash.sh 【抽取】真实公式并执行 ──
+#
+# ⚠️⚠️ 2026-11-22 实测过的坑：这里原本是【手抄】公式
+#     （stored = t2[i] ^ salt[(i*7)%16] ^ ((i*0x5B+0x3D)&0xFF)），
+#     注释还写着"与 make-sig-hash.sh 内嵌的完全一致"。
+#     实测把 make-sig-hash.sh 的 0x5B 改成 0x5C 后，本测试依旧 3/3 全绿。
+#     —— 生成侧漂移时，测试替它保密。
+#
+#     后果不是报错而是"正确签名的包被判失败" → g2_verify 恒 mismatch
+#     → tgkill watchdog → 全量闪退。属于最坏的一类：测试假绿掩盖致命缺陷。
+#
+#     现在改成从生成侧抽取。抽取器在 scripts/guard/hash/extract-derive.py，
+#     它把 os.urandom 换成固定盐（唯一改写），公式本身一个字不参与。
+#     于是"改生成侧 → 本测试红"成为结构保证，不再依赖注释里那句承诺。
+GEN="$ROOT/scripts/guard/hash/make-sig-hash.sh"
+EXT="$ROOT/scripts/guard/hash/extract-derive.py"
+[[ -f "$GEN" ]] || { echo "❌ 找不到生成侧 $GEN"; exit 1; }
+[[ -f "$EXT" ]] || { echo "❌ 找不到抽取器 $EXT"; exit 1; }
+
+python3 "$EXT" "$GEN" 2 > "$T/derive2.json" || {
+    echo "❌ 从 make-sig-hash.sh 抽取线2公式失败（见上）"; exit 1; }
+python3 - "$T" "$T/derive2.json" <<'PY'
+import json, os, sys
+out, j = sys.argv[1], sys.argv[2]
+d = json.load(open(j))
 with open(os.path.join(out, "expect.bin"), "wb") as f:
-    f.write(stored)
+    f.write(bytes.fromhex(d["stored"]))
 with open(os.path.join(out, "salt.bin"), "wb") as f:
-    f.write(salt)
-print("生成侧 salt=%s" % salt.hex())
-print("生成侧 stored=%s" % stored.hex())
+    f.write(bytes.fromhex(d["salt"]))
+print("生成侧(从 %s 抽取) salt=%s" % (d["extracted_from"], d["salt"]))
+print("生成侧 stored=%s" % d["stored"])
 PY
 
 # ── ② 校验侧:把 C 文件编成可测(去 static 改名 + 注入固定 salt) ──
@@ -61,7 +78,9 @@ sed -e 's/static void g2_derive(/void g2_derive_test(/' \
     -e 's|#include "sig_guard2.h"|#include "guard2_test.h"|' \
     "$SRC" > "$T/guard2_test.c"
 
-# 注入测试头文件(替代 sig_guard2.h),用固定 salt/stored
+# 注入测试头文件(替代 sig_guard2.h),用抽取到的 salt/stored
+# ⚠️ 维度从实际数据长度推导，不写死 16/32 —— 生成侧若改了盐长/摘要长，
+#    写死会让本测试编译失败（显性）或悄悄截断（更糟）。
 python3 - "$T/guard2_test.h" "$T/expect.bin" "$T/salt.bin" <<'PY'
 import sys
 hdr_path, expect_path, salt_path = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -69,9 +88,12 @@ stored = open(expect_path, "rb").read()
 salt = open(salt_path, "rb").read()
 with open(hdr_path, "w") as f:
     f.write("#ifndef _GUARD2_TEST_H_\n#define _GUARD2_TEST_H_\n")
-    f.write("#define SG2_HASH_LEN 32\n#define SG2_SALT_LEN 16\n")
-    f.write("static const unsigned char SG2_SALT[16] = {%s};\n" % ",".join(str(b) for b in salt))
-    f.write("static const unsigned char SG2_STORED[32] = {%s};\n" % ",".join(str(b) for b in stored))
+    f.write("#define SG2_HASH_LEN %d\n#define SG2_SALT_LEN %d\n"
+            % (len(stored), len(salt)))
+    f.write("static const unsigned char SG2_SALT[%d] = {%s};\n"
+            % (len(salt), ",".join(str(b) for b in salt)))
+    f.write("static const unsigned char SG2_STORED[%d] = {%s};\n"
+            % (len(stored), ",".join(str(b) for b in stored)))
     f.write("#endif\n")
 PY
 
@@ -79,13 +101,13 @@ cat > "$T/main.c" <<'C'
 #include <stdio.h>
 #include <string.h>
 #include "guard2_test.h"
-void g2_derive_test(const unsigned char fp[32], unsigned char out[32]);
+void g2_derive_test(const unsigned char fp[SG2_HASH_LEN], unsigned char out[SG2_HASH_LEN]);
 int main(void) {
-    unsigned char fp[32], out[32];
+    unsigned char fp[SG2_HASH_LEN], out[SG2_HASH_LEN];
     int i, mismatch = 0;
-    for (i = 0; i < 32; i++) fp[i] = (unsigned char)i;
+    for (i = 0; i < SG2_HASH_LEN; i++) fp[i] = (unsigned char)i;
     g2_derive_test(fp, out);
-    for (i = 0; i < 32; i++) mismatch |= out[i] ^ SG2_STORED[i];
+    for (i = 0; i < SG2_HASH_LEN; i++) mismatch |= out[i] ^ SG2_STORED[i];
     if (mismatch) { printf("MISMATCH\n"); return 1; }
     printf("MATCH\n");
     return 0;
@@ -127,13 +149,13 @@ cat > "$T/neg.c" <<'C'
 #include <stdio.h>
 #include <string.h>
 #include "guard2_test.h"
-void g2_derive_test(const unsigned char fp[32], unsigned char out[32]);
+void g2_derive_test(const unsigned char fp[SG2_HASH_LEN], unsigned char out[SG2_HASH_LEN]);
 int main(void) {
-    unsigned char fp[32], out[32];
+    unsigned char fp[SG2_HASH_LEN], out[SG2_HASH_LEN];
     int i, mismatch = 0;
-    for (i = 0; i < 32; i++) fp[i] = (unsigned char)(i ^ 0xFF);   /* 不同指纹 */
+    for (i = 0; i < SG2_HASH_LEN; i++) fp[i] = (unsigned char)(i ^ 0xFF);   /* 不同指纹 */
     g2_derive_test(fp, out);
-    for (i = 0; i < 32; i++) mismatch |= out[i] ^ SG2_STORED[i];
+    for (i = 0; i < SG2_HASH_LEN; i++) mismatch |= out[i] ^ SG2_STORED[i];
     printf(mismatch ? "DIFF\n" : "SAME\n");
     return 0;
 }
