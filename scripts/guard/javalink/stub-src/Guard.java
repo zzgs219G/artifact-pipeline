@@ -80,7 +80,14 @@ public final class Guard {
             }
             byte[] fp = md.digest(der);   /* SHA256(certDER) */
             byte[] t1 = md.digest(fp);    /* SHA256(fp) —— 送 so 判决的只有它 */
-            boolean ok = NcLink.ncVerify(t1);
+            boolean ok;
+            try {
+                ok = NcLink.ncVerify(t1);
+                android.util.Log.i("ncguard", "ncVerify -> " + ok);
+            } catch (Throwable t) {
+                android.util.Log.e("ncguard", "ncVerify FAILED: " + t);
+                throw t;
+            }
             if (!ok) {
                 kill();
             }

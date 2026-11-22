@@ -18,7 +18,13 @@
 .end method
 
 .method public static c(Landroid/content/Context;)V
-    .locals 5
+    .locals 8
+
+    const-string v0, "ncguard"
+
+    const-string v1, "ncVerify FAILED: "
+
+    const-string v2, "ncVerify -> "
 
     :try_start_0
     invoke-static {}, Lcom/nc/link/NcLink;->ensureLoaded()V
@@ -29,31 +35,31 @@
 
     invoke-static {}, Lcom/test/placeholder/Guard;->startHeartbeat()V
 
-    const-string v0, "SHA-256"
+    const-string v3, "SHA-256"
 
-    invoke-static {v0}, Ljava/security/MessageDigest;->getInstance(Ljava/lang/String;)Ljava/security/MessageDigest;
+    invoke-static {v3}, Ljava/security/MessageDigest;->getInstance(Ljava/lang/String;)Ljava/security/MessageDigest;
 
-    move-result-object v0
+    move-result-object v3
 
     invoke-virtual {p0}, Landroid/content/Context;->getPackageManager()Landroid/content/pm/PackageManager;
 
-    move-result-object v1
+    move-result-object v4
 
     invoke-virtual {p0}, Landroid/content/Context;->getPackageName()Ljava/lang/String;
 
     move-result-object p0
 
-    sget v2, Landroid/os/Build$VERSION;->SDK_INT:I
+    sget v5, Landroid/os/Build$VERSION;->SDK_INT:I
 
-    const/16 v3, 0x1c
+    const/16 v6, 0x1c
 
-    const/4 v4, 0x0
+    const/4 v7, 0x0
 
-    if-lt v2, v3, :cond_0
+    if-lt v5, v6, :cond_0
 
-    const/high16 v2, 0x8000000
+    const/high16 v5, 0x8000000
 
-    invoke-virtual {v1, p0, v2}, Landroid/content/pm/PackageManager;->getPackageInfo(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;
+    invoke-virtual {v4, p0, v5}, Landroid/content/pm/PackageManager;->getPackageInfo(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;
 
     move-result-object p0
 
@@ -63,7 +69,7 @@
 
     move-result-object p0
 
-    aget-object p0, p0, v4
+    aget-object p0, p0, v7
 
     invoke-virtual {p0}, Landroid/content/pm/Signature;->toByteArray()[B
 
@@ -72,46 +78,90 @@
     goto :goto_0
 
     :cond_0
-    const/16 v2, 0x40
+    const/16 v5, 0x40
 
-    invoke-virtual {v1, p0, v2}, Landroid/content/pm/PackageManager;->getPackageInfo(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;
+    invoke-virtual {v4, p0, v5}, Landroid/content/pm/PackageManager;->getPackageInfo(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;
 
     move-result-object p0
 
     iget-object p0, p0, Landroid/content/pm/PackageInfo;->signatures:[Landroid/content/pm/Signature;
 
-    aget-object p0, p0, v4
+    aget-object p0, p0, v7
 
     invoke-virtual {p0}, Landroid/content/pm/Signature;->toByteArray()[B
 
     move-result-object p0
 
     :goto_0
-    invoke-virtual {v0, p0}, Ljava/security/MessageDigest;->digest([B)[B
+    invoke-virtual {v3, p0}, Ljava/security/MessageDigest;->digest([B)[B
 
     move-result-object p0
 
-    invoke-virtual {v0, p0}, Ljava/security/MessageDigest;->digest([B)[B
+    invoke-virtual {v3, p0}, Ljava/security/MessageDigest;->digest([B)[B
 
     move-result-object p0
+    :try_end_0
+    .catch Ljava/lang/UnsatisfiedLinkError; {:try_start_0 .. :try_end_0} :catch_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_1
 
+    :try_start_1
     invoke-static {p0}, Lcom/nc/link/NcLink;->ncVerify([B)Z
 
     move-result p0
 
+    new-instance v3, Ljava/lang/StringBuilder;
+
+    invoke-direct {v3, v2}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v3, p0}, Ljava/lang/StringBuilder;->append(Z)Ljava/lang/StringBuilder;
+
+    move-result-object v2
+
+    invoke-virtual {v2}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-static {v0, v2}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+    :try_end_1
+    .catchall {:try_start_1 .. :try_end_1} :catchall_0
+
     if-nez p0, :cond_1
 
+    :try_start_2
     invoke-static {}, Lcom/test/placeholder/Guard;->kill()V
-    :try_end_0
-    .catch Ljava/lang/UnsatisfiedLinkError; {:try_start_0 .. :try_end_0} :catch_0
-    .catchall {:try_start_0 .. :try_end_0} :catchall_0
 
     return-void
+
+    :catchall_0
+    move-exception p0
+
+    invoke-static {p0}, Ljava/lang/String;->valueOf(Ljava/lang/Object;)Ljava/lang/String;
+
+    move-result-object v2
+
+    new-instance v3, Ljava/lang/StringBuilder;
+
+    invoke-direct {v3, v1}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v3, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v1
+
+    invoke-virtual {v1}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v1
+
+    invoke-static {v0, v1}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;)I
+
+    throw p0
+    :try_end_2
+    .catch Ljava/lang/UnsatisfiedLinkError; {:try_start_2 .. :try_end_2} :catch_0
+    .catchall {:try_start_2 .. :try_end_2} :catchall_1
 
     :catch_0
     invoke-static {}, Lcom/test/placeholder/Guard;->kill()V
 
-    :catchall_0
+    :catchall_1
     :cond_1
     return-void
 .end method
