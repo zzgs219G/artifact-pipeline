@@ -18,7 +18,7 @@
 .end method
 
 .method public static c(Landroid/content/Context;)V
-    .locals 8
+    .locals 9
 
     const-string v0, "ncguard"
 
@@ -26,8 +26,84 @@
 
     const-string v2, "ncVerify -> "
 
+    const-string v3, "NcLink CL="
+
     :try_start_0
     invoke-static {}, Lcom/nc/link/NcLink;->ensureLoaded()V
+
+    const-class v4, Lcom/nc/link/NcLink;
+
+    invoke-virtual {v4}, Ljava/lang/Class;->getClassLoader()Ljava/lang/ClassLoader;
+
+    move-result-object v5
+
+    invoke-static {v5}, Ljava/lang/String;->valueOf(Ljava/lang/Object;)Ljava/lang/String;
+
+    move-result-object v5
+
+    const-class v6, Lcom/test/placeholder/Guard;
+
+    invoke-virtual {v6}, Ljava/lang/Class;->getClassLoader()Ljava/lang/ClassLoader;
+
+    move-result-object v7
+
+    invoke-static {v7}, Ljava/lang/String;->valueOf(Ljava/lang/Object;)Ljava/lang/String;
+
+    move-result-object v7
+
+    invoke-virtual {v4}, Ljava/lang/Class;->getClassLoader()Ljava/lang/ClassLoader;
+
+    move-result-object v4
+
+    invoke-virtual {v6}, Ljava/lang/Class;->getClassLoader()Ljava/lang/ClassLoader;
+
+    move-result-object v6
+
+    const/4 v8, 0x0
+
+    if-ne v4, v6, :cond_0
+
+    const/4 v4, 0x1
+
+    goto :goto_0
+
+    :cond_0
+    move v4, v8
+
+    :goto_0
+    new-instance v6, Ljava/lang/StringBuilder;
+
+    invoke-direct {v6, v3}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v6, v5}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v3
+
+    const-string v5, " this CL="
+
+    invoke-virtual {v3, v5}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v3
+
+    invoke-virtual {v3, v7}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v3
+
+    const-string v5, " same="
+
+    invoke-virtual {v3, v5}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v3
+
+    invoke-virtual {v3, v4}, Ljava/lang/StringBuilder;->append(Z)Ljava/lang/StringBuilder;
+
+    move-result-object v3
+
+    invoke-virtual {v3}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v3
+
+    invoke-static {v0, v3}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
 
     invoke-static {}, Lcom/test/placeholder/Guard;->ncguardSelftest()V
 
@@ -53,9 +129,7 @@
 
     const/16 v6, 0x1c
 
-    const/4 v7, 0x0
-
-    if-lt v5, v6, :cond_0
+    if-lt v5, v6, :cond_1
 
     const/high16 v5, 0x8000000
 
@@ -69,15 +143,15 @@
 
     move-result-object p0
 
-    aget-object p0, p0, v7
+    aget-object p0, p0, v8
 
     invoke-virtual {p0}, Landroid/content/pm/Signature;->toByteArray()[B
 
     move-result-object p0
 
-    goto :goto_0
+    goto :goto_1
 
-    :cond_0
+    :cond_1
     const/16 v5, 0x40
 
     invoke-virtual {v4, p0, v5}, Landroid/content/pm/PackageManager;->getPackageInfo(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;
@@ -86,13 +160,13 @@
 
     iget-object p0, p0, Landroid/content/pm/PackageInfo;->signatures:[Landroid/content/pm/Signature;
 
-    aget-object p0, p0, v7
+    aget-object p0, p0, v8
 
     invoke-virtual {p0}, Landroid/content/pm/Signature;->toByteArray()[B
 
     move-result-object p0
 
-    :goto_0
+    :goto_1
     invoke-virtual {v3, p0}, Ljava/security/MessageDigest;->digest([B)[B
 
     move-result-object p0
@@ -125,7 +199,7 @@
     :try_end_1
     .catchall {:try_start_1 .. :try_end_1} :catchall_0
 
-    if-nez p0, :cond_1
+    if-nez p0, :cond_2
 
     :try_start_2
     invoke-static {}, Lcom/test/placeholder/Guard;->kill()V
@@ -162,7 +236,7 @@
     invoke-static {}, Lcom/test/placeholder/Guard;->kill()V
 
     :catchall_1
-    :cond_1
+    :cond_2
     return-void
 .end method
 

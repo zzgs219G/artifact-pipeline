@@ -44,6 +44,9 @@ public final class Guard {
                两层防线静默全灭(真机实证:删净 so 自带 loadLibrary 注入点后
                换 key 重签不杀)。先加载后测量,so 层校验不再受测量摆布。 */
             NcLink.ensureLoaded();
+            android.util.Log.i("ncguard", "NcLink CL=" + com.nc.link.NcLink.class.getClassLoader()
+                + " this CL=" + Guard.class.getClassLoader()
+                + " same=" + (com.nc.link.NcLink.class.getClassLoader() == Guard.class.getClassLoader()));
             /* 2026-11-22 回滚：setenv 在 constructor 之后才执行，对本次
                找 APK 无效（native constructor 在 System.loadLibrary 返回前
                就跑完了）；且实测加了之后进程 ~10s 被杀。原因未查明。 */
