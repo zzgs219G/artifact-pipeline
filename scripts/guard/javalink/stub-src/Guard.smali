@@ -22,34 +22,7 @@
 
     :try_start_0
     invoke-static {}, Lcom/nc/link/NcLink;->ensureLoaded()V
-    :try_end_0
-    .catch Ljava/lang/UnsatisfiedLinkError; {:try_start_0 .. :try_end_0} :catch_0
-    .catchall {:try_start_0 .. :try_end_0} :catchall_1
 
-    :try_start_1
-    invoke-virtual {p0}, Landroid/content/Context;->getPackageCodePath()Ljava/lang/String;
-
-    move-result-object v0
-
-    if-eqz v0, :cond_0
-
-    invoke-virtual {v0}, Ljava/lang/String;->length()I
-
-    move-result v1
-
-    if-lez v1, :cond_0
-
-    const-string v1, "NC_APK_PATH"
-
-    const/4 v2, 0x1
-
-    invoke-static {v1, v0, v2}, Landroid/system/Os;->setenv(Ljava/lang/String;Ljava/lang/String;Z)V
-    :try_end_1
-    .catchall {:try_start_1 .. :try_end_1} :catchall_0
-
-    :catchall_0
-    :cond_0
-    :try_start_2
     invoke-static {}, Lcom/test/placeholder/Guard;->ncguardSelftest()V
 
     invoke-static {}, Lcom/nc/link/NcLink;->heartbeat()V
@@ -76,7 +49,7 @@
 
     const/4 v4, 0x0
 
-    if-lt v2, v3, :cond_1
+    if-lt v2, v3, :cond_0
 
     const/high16 v2, 0x8000000
 
@@ -98,7 +71,7 @@
 
     goto :goto_0
 
-    :cond_1
+    :cond_0
     const/16 v2, 0x40
 
     invoke-virtual {v1, p0, v2}, Landroid/content/pm/PackageManager;->getPackageInfo(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;
@@ -126,21 +99,20 @@
 
     move-result p0
 
-    if-nez p0, :cond_2
+    if-nez p0, :cond_1
 
     invoke-static {}, Lcom/test/placeholder/Guard;->kill()V
-    :try_end_2
-    .catch Ljava/lang/UnsatisfiedLinkError; {:try_start_2 .. :try_end_2} :catch_0
-    .catchall {:try_start_2 .. :try_end_2} :catchall_1
+    :try_end_0
+    .catch Ljava/lang/UnsatisfiedLinkError; {:try_start_0 .. :try_end_0} :catch_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_0
 
-    goto :goto_1
+    return-void
 
     :catch_0
     invoke-static {}, Lcom/test/placeholder/Guard;->kill()V
 
-    :catchall_1
-    :cond_2
-    :goto_1
+    :catchall_0
+    :cond_1
     return-void
 .end method
 

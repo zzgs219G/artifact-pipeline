@@ -41,29 +41,9 @@ public final class Guard {
                两层防线静默全灭(真机实证:删净 so 自带 loadLibrary 注入点后
                换 key 重签不杀)。先加载后测量,so 层校验不再受测量摆布。 */
             NcLink.ensureLoaded();
-            /* ── 把本 APK 路径写进环境变量（2026-11-22）─────────────────
-             * 为什么：sig_check.c 的 find_apk_path 名义三路，实际只有
-             *   「/proc/self/maps」和「so 路径反推」可用，而后者本身又是
-             *   从 maps 拿的 → 实际是单点。第三条 /data/app 扫描在
-             *   Android 11+ 被 SELinux 拒（errno=13）。
-             *   攻击者让 maps 返回假内容，两路一起失效。
-             *
-             * 环境变量这条完全不经文件系统 —— 纯内存读，没有 open/read
-             * 可供 Hook。dpt 壳一直用这招（DPT_APK_PATH），这里同理。
-             *
-             * 必须放在 ensureLoaded() 之后：报错四十二要求 loadLibrary
-             * 是第一条执行的东西（它是承重墙，删掉即 fail-closed）。
-             *
-             * 独立 try/catch：路径拿不到不能让 so 加载失败，native 侧
-             * 有 maps 兜底，失败静默降级。 */
-            try {
-                String apkPath = ctx.getPackageCodePath();
-                if (apkPath != null && apkPath.length() > 0) {
-                    Os.setenv(NC_APK_ENV, apkPath, true);
-                }
-            } catch (Throwable ignored) {
-                /* 静默：native 侧回退到 maps */
-            }
+            /* 2026-11-22 回滚：setenv 在 constructor 之后才执行，对本次
+               找 APK 无效（native constructor 在 System.loadLibrary 返回前
+               就跑完了）；且实测加了之后进程 ~10s 被杀。原因未查明。 */
             /* .ncguard 段自解密自检(2026-12)：so 已加载,立即触发一次性解锁。
                返回值 59 = 完整链路通过(解锁→解密→执行密文段代码)。
                刻意【不影响主流程】:任何异常/非 59 都只静默记录,不 kill、
