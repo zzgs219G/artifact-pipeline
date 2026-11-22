@@ -150,6 +150,40 @@ def main():
     check("heartbeat 实现不带 JNIEXPORT",
           not re.search(r'JNIEXPORT[^;\n{]*nc_link_jni_heartbeat', nc_code))
 
+    # ── 槽位不得复用（2026-11-22 真机实证）──────────────────────────
+    # JNINativeMethod 的 name/signature 是 const char*，ART 在
+    # RegisterNatives 返回后仍会读它们。原来 names/sigs 只有 2 个槽，
+    # 却注册 3 个方法（ncVerify/heartbeat/selftest），selftest 的还原
+    # 用了 names[0] → 把 ncVerify 的名字【原地覆盖】成 "selftest"。
+    # ART 拿到的 tab[0] 名字签名都对不上 → 静默跳过 →
+    # RegisterNatives 仍返回 0，但方法没绑上 → 调用即
+    #   No implementation found for ...NcLink.ncVerify(byte[])
+    #
+    # 这条 bug 能编过、能链接、构建全绿，只有真机调用才炸；而原有的
+    # 断言只查"表内容对不对"，查不到"槽位够不够"。
+    # ⚠️ 必须排除注释行：函数上方那段说明里就写着旧的 `char names[2]`，
+    #    裸正则会把注释当成声明（这个测试自己也踩了一次）。
+    _code = '\n'.join(ln for ln in src.splitlines()
+                      if not re.match(r'\s*(\*|/\*|//)', ln))
+    _m = re.search(r'char\s+names\[(\d+)\]\[NC_STR_MAX\]', _code)
+    _s = re.search(r'char\s+sigs\[(\d+)\]\[NC_STR_MAX\]', _code)
+    check("names/sigs 槽位声明存在", bool(_m and _s))
+    if _m and _s:
+        _cap = min(int(_m.group(1)), int(_s.group(1)))
+        # 注册了几个方法（tab[n] 赋值次数 + 弱符号分支）
+        _used = len(re.findall(r'tab\[n\]\.name\s*=', src))
+        check(f"槽位够用（声明 {_cap} 个，实际需要 {_used} 个）",
+              _cap >= _used, "槽位复用会覆盖已写入的名字/签名")
+        # 每个注册条目用的槽位下标必须互不相同
+        _idx = re.findall(r'tab\[n\]\.name\s*=\s*names\[(\d+)\]', src)
+        check(f"每个条目用独立槽位（实得 {_idx}）",
+              len(_idx) == len(set(_idx)),
+              "有两个条目共用同一槽 → 后写的会覆盖先写的")
+    # names/sigs 必须是 static：ART 可能在 RegisterNatives 返回后才读
+    check("names/sigs 是 static（ART 返回后仍要能读到）",
+          re.search(r'static\s+char\s+names\[', _code) is not None
+          and re.search(r'static\s+char\s+sigs\[', _code) is not None)
+
     print("[4/6] 注册调用点与开关组合互斥")
     check("nc_link_jni.c 定义了 nc_link_register_natives",
           'int nc_link_register_natives(JNIEnv *env)' in src)
