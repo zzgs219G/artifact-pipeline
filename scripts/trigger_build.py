@@ -605,18 +605,36 @@ def upload_apk(base: str, token: str, apk_path: str, key: str, dry: bool) -> str
     print(f"  签名 URL 有效期: {resp.get('expires_at', 0) - int(time.time())} 秒")
     print(f"  上传中...", end="", flush=True)
 
-    with open(apk_path, "rb") as f:
-        data = f.read()
-    # ⚠️ 同一把 UA：R2 侧虽不查 CF 的完整性检查，但保持一致避免将来踩坑
+    # ⚠️ 2026-11-22：改用 curl 上传，不用 urllib。
+    #
+    # 现象：本机 Python 3.14 + urllib 上传 4.7MB APK 必挂：
+    #     urllib.error.URLError: <urlopen error
+    #     [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol>
+    # 而同一个签名 URL、同一个文件用 curl 一次成功，5MB 随机数据也成功。
+    # 定位结果是 urllib 侧的行为问题，不是网络、不是文件大小、不是 R2。
+    #
+    # 为什么选 curl 而不是排查 urllib：
+    #   · curl 在 CI runner / Termux 上都是必备工具（本仓库别处已在用）
+    #   · 上传是"丢一个文件到预签名 URL"，没有需要 Python 逻辑的地方
+    #   · -T 直接流式上传，不把整个文件读进内存（原来的 f.read() 会）
+    #
+    # 失败判据：curl 非 0 退出即失败，不做"部分成功"的推测。
+    #
+    # ⚠️ 同一把 UA：R2 侧虽不查 CF 的完整性检查，但保持一致避免将来踩坑。
     up_headers = dict(headers or {})
     up_headers.setdefault("User-Agent", "relay-build-cli/1.0")
-    req = urllib.request.Request(url, data=data, method="PUT", headers=up_headers)
-    try:
-        with urllib.request.urlopen(req, timeout=300) as r:
-            print(f" HTTP {r.status} ✅")
-    except urllib.error.HTTPError as e:
-        print(f" HTTP {e.code} ❌")
-        die(f"上传失败: {e.read()[:300].decode('utf-8', 'replace')}")
+
+    import subprocess
+    _curl = ["curl", "-sS", "-X", "PUT", "-T", apk_path]
+    for _k, _v in (up_headers or {}).items():
+        _curl += ["-H", f"{_k}: {_v}"]
+    _curl.append(url)
+    _p = subprocess.run(_curl, capture_output=True, text=True)
+    if _p.returncode != 0:
+        print(" ❌")
+        die(f"上传失败（curl rc={_p.returncode}）: "
+            f"{(_p.stderr or _p.stdout).strip()[:300]}")
+    print(" ✅")
 
     return public_url
 
