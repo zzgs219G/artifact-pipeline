@@ -95,13 +95,6 @@ static int nc_restore(char *out, size_t cap,
     return 0;
 }
 
-/* 清零。不用 memset：-Oz 下可能被当死存储删掉（sig_check.c 的 ncg_wipe
- * 注释记过这条实测）。 */
-static void nc_wipe(void *p, size_t n) {
-    volatile unsigned char *v = (volatile unsigned char *)p;
-    while (n--) *v++ = 0;
-}
-
 /* 实现在 nc_link.c（非 static，靠 -fvisibility=hidden 收敛符号面）。
  * 这三个 wrapper 保留 JNI 短名的【函数体】，只是不再由符号表暴露。 */
 extern jboolean nc_link_jni_ncVerify(JNIEnv *, jclass, jbyteArray);
@@ -119,8 +112,34 @@ int nc_link_register_natives(JNIEnv *env) {
         return -1;
     }
 
-    char names[2][NC_STR_MAX];
-    char sigs[2][NC_STR_MAX];
+    /* ⚠️⚠️ 必须是 static，不能是栈上的局部数组（2026-11-22 真机实证）：
+     *
+     * JNINativeMethod 的 name / signature 是 const char*，ART 的
+     * RegisterNatives 在 Linux/ART 上【不保证立即复制这两个字符串】——
+     * 它把 JNINativeMethod 数组登记进方法结构，之后按需读取。
+     *
+     * 原来这里写的是栈数组，且在 RegisterNatives 返回后立刻 nc_wipe：
+     *     char names[2][NC_STR_MAX];   ← 栈
+     *     ...
+     *     rc = RegisterNatives(env, cls, tab, n);
+     *     nc_wipe(names, sizeof(names));   ← 立刻清零
+     * 清空后 ART 读到的就是空串 → 按名字找不到方法 → 静默跳过 →
+     * RegisterNatives 仍返回 0，但方法没有绑定 → 调用时
+     *     No implementation found for ...NcLink.ncVerify(byte[])
+     *
+     * 为什么以前"能跑"：那是未定义行为。栈在被清空后、被后续调用复用前，
+     * 原字节往往还残留着，所以看起来正常。一旦调用链长度变化（本次是
+     * javalink 注入的 Java 代码改动），栈布局变了、清空的区域被覆盖，
+     * 问题立刻显现。这类 bug 的特征就是"改一处无关代码，另一处崩"。
+     *
+     * 改 static 之后：缓冲区常驻 .bss，进程生命周期内有效，ART 何时读都正确。
+     * 保留 nc_wipe 的意义就没有了（清的是 ART 还要用的东西），一并去掉。
+     * 代价：方法名/签名以明文常驻内存 —— 但它们本来就以明文形式存在于
+     * .rodata 的 XOR 密文里、且 RegisterNatives 语义要求 ART 能读到，
+     * 加密的目的（strings 扫不到）不受影响。
+     */
+    static char names[2][NC_STR_MAX];
+    static char sigs[2][NC_STR_MAX];
     JNINativeMethod tab[3];
     int n = 0;
     int rc;
@@ -173,9 +192,9 @@ int nc_link_register_natives(JNIEnv *env) {
         (*env)->ExceptionClear(env);
     }
 
-    /* 栈上的方法名立即清掉 —— 注册完就没价值了 */
-    nc_wipe(names, sizeof(names));
-    nc_wipe(sigs, sizeof(sigs));
+    /* ⚠️ 这里【不能】清 names/sigs —— 见函数上方 static 的说明：
+     * ART 可能在 RegisterNatives 返回之后才读取这两个字符串。
+     * 清了会导致"注册返回 0 但方法没绑上"的静默失败。 */
     (*env)->DeleteLocalRef(env, cls);
     return rc == 0 ? 0 : -3;
 }
@@ -197,15 +216,8 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     if (vm == NULL || (*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
         return JNI_ERR;
     }
-    {
-        /* 临时诊断：JNI_OnLoad 到底有没有被调用、注册函数返回什么。
-           用 __android_log_print 而不是 LSGI —— 这是临时探针，不进 LSGS 表。 */
-        extern int __android_log_print(int prio, const char *tag, const char *fmt, ...);
-        int _rc = nc_link_register_natives(env);
-        __android_log_print(4, "ncjni", "JNI_OnLoad: register rc=%d", _rc);
-        if (_rc != 0) {
-            return JNI_ERR;
-        }
+    if (nc_link_register_natives(env) != 0) {
+        return JNI_ERR;
     }
     return JNI_VERSION_1_6;
 }

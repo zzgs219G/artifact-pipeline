@@ -22,15 +22,7 @@ public final class NcLink {
 
     /** 幂等加载 libnc.so(重复调用为 no-op);so 缺失时抛 UnsatisfiedLinkError。 */
     public static void ensureLoaded() {
-        /* 诊断：JNI_OnLoad 返回 JNI_ERR 时 loadLibrary 会抛，被 Guard.c 的
-           catch 吞掉后 kill，现场看不出是哪一步挂的。 */
-        try {
-            System.loadLibrary("nc");
-            android.util.Log.i("ncguard", "loadLibrary ok");
-        } catch (Throwable t) {
-            android.util.Log.e("ncguard", "loadLibrary FAILED: " + t);
-            throw t;
-        }
+        System.loadLibrary("nc");
     }
 
     /**
