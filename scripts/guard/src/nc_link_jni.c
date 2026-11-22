@@ -138,8 +138,8 @@ int nc_link_register_natives(JNIEnv *env) {
      * .rodata 的 XOR 密文里、且 RegisterNatives 语义要求 ART 能读到，
      * 加密的目的（strings 扫不到）不受影响。
      */
-    static char names[2][NC_STR_MAX];
-    static char sigs[2][NC_STR_MAX];
+    static char names[3][NC_STR_MAX];
+    static char sigs[3][NC_STR_MAX];
     JNINativeMethod tab[3];
     int n = 0;
     int rc;
@@ -174,13 +174,29 @@ int nc_link_register_natives(JNIEnv *env) {
      * 不编译时 Java 侧调用会抛 UnsatisfiedLinkError，但
      * inject-javacheck.py 已把 selftest 包在独立 try/catch 里
      * （报错四十九的教训：自检失败不许影响主流程）。 */
+    /* ⚠️⚠️ 必须用独立的槽位 [2]，不能复用 [0]（2026-11-22 真机实证）：
+     *
+     * 原来的写法是 nc_restore(names[0], ..., kName_selftest, ...)，
+     * 而 tab[0].name 也指向 names[0] —— 于是 selftest 的还原把
+     * ncVerify 的名字【原地覆盖】了。ART 拿到的 tab[0] 是
+     *     { name: "selftest", sig: "()I", fnPtr: nc_link_jni_ncVerify }
+     * 名字和签名都对不上任何方法 → 静默跳过 → RegisterNatives 仍返回 0，
+     * 但 ncVerify / heartbeat 都没绑上 → 调用即
+     *     No implementation found for ...NcLink.ncVerify(byte[])
+     *
+     * 为什么之前"能跑"：nc_link_jni_selftest 是弱符号。当 .a 里没有
+     * nc_guard_jni.o 时它为 NULL，这个分支不执行，覆盖就不会发生。
+     * 而上游 nox 的 libnox.a 一直含 nc_guard_jni.o，所以这个分支
+     * 【总是】被执行 —— 只是过去 names[2][...] 之后的栈/静态布局让
+     * 覆盖后的残留值恰好还能被 ART 认出来，属于未定义行为下的侥幸。
+     */
     if (nc_link_jni_selftest != NULL) {
-        if (nc_restore(names[0], NC_STR_MAX, kName_selftest,
+        if (nc_restore(names[2], NC_STR_MAX, kName_selftest,
                        sizeof(kName_selftest)) == 0
-            && nc_restore(sigs[0], NC_STR_MAX, kSig_int,
+            && nc_restore(sigs[2], NC_STR_MAX, kSig_int,
                           sizeof(kSig_int)) == 0) {
-            tab[n].name      = names[0];
-            tab[n].signature = sigs[0];
+            tab[n].name      = names[2];
+            tab[n].signature = sigs[2];
             tab[n].fnPtr     = (void *)nc_link_jni_selftest;
             n++;
         }
