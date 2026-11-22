@@ -2,15 +2,7 @@
 .super Ljava/lang/Thread;
 
 
-# annotations
-.annotation system Ldalvik/annotation/EnclosingClass;
-    value = Lcom/test/placeholder/Guard;
-.end annotation
 
-.annotation system Ldalvik/annotation/InnerClass;
-    accessFlags = 0x19
-    name = "Hb"
-.end annotation
 
 
 # direct methods

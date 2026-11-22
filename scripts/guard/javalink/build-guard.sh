@@ -137,6 +137,17 @@ text = open(src, encoding='utf-8').read()
 # 且对产物毫无用处 —— 与 build-stub.sh 同一处理）
 text = re.sub(r'^[ \t]*\.line[ \t]+\d+[ \t]*\n', '', text, flags=re.M)
 text = re.sub(r'^[ \t]*\.source[ \t]+.*\n', '', text, flags=re.M)
+# 去掉 javac 给内部类自动生成的 MemberClasses / EnclosingClass / InnerClass
+# 三条 annotation（2026-11-22 真机实证）：
+#   手写 smali 时没有这些，改用编译产出后自动带出，产物随即可疑地闪退
+#   （No implementation found for NcLink.ncVerify）。它们对运行没有任何
+#   作用（只是反射元数据），删掉与手写形态对齐、也少一处需要跟随类名
+#   替换的交叉引用。
+text = re.sub(r'^# annotations\n', '', text, flags=re.M)
+for _a in ('MemberClasses', 'EnclosingClass', 'InnerClass'):
+    text = re.sub(
+        r'^\.annotation [^\n]*/annotation/' + _a + r';\n(?:.*\n)*?\.end annotation\n',
+        '', text, flags=re.M)
 open(dst, 'w', encoding='utf-8').write(text)
 PY
     echo "    → ${_cls}.smali ($(grep -c '' "$OUT_DIR/$_cls.smali") 行)"

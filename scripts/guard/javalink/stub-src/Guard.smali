@@ -2,17 +2,9 @@
 .super Ljava/lang/Object;
 
 
-# annotations
-.annotation system Ldalvik/annotation/MemberClasses;
-    value = {
-        Lcom/test/placeholder/Guard$Hb;
-    }
-.end annotation
 
 
 # static fields
-.field public static final NC_APK_ENV:Ljava/lang/String; = "NC_APK_PATH"
-
 .field private static volatile heartbeatStarted:Z
 
 

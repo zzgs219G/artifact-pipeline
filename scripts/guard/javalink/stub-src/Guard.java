@@ -26,10 +26,6 @@ import java.security.MessageDigest;
  */
 public final class Guard {
 
-    /** 传给 native 侧的环境变量名（sig_check.c 的 find_apk_path 读它）。
-     *  与 dpt 的 DPT_APK_PATH 区分开，避免两个壳互相覆盖。 */
-    public static final String NC_APK_ENV = "NC_APK_PATH";
-
     /* ⚠️ 必须是 public，不能 private（2026-11-22 真机实证）：
      * 原先手写 smali 用的是 `.method public constructor <init>()V`，
      * 改成 Java 编译后自然变成 private（源码写的是 private Guard()），
