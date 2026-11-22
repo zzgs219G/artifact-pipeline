@@ -237,6 +237,64 @@ def main():
               'apk_locate_' not in s2_code,
               "共享 = 单点，改一处两线同废")
 
+        # ── g2_extract_cert 的三段拆分（2026-11-22）──────────────────
+        print("[C] g2_extract_cert 拆成 EOCD → Signing Block → 证书 三段")
+        cs = {}
+        for nm in ('g2_find_eocd', 'g2_read_v2block', 'g2_parse_cert',
+                   'g2_extract_cert'):
+            m = re.search(r'static (?:int|unsigned long long) %s\s*\('
+                          % re.escape(nm), s2)
+            check(f"{nm} 存在", m is not None)
+            if m:
+                # ⚠️ 从 '{' 的【下一个字符】开始扫描。
+                #    2026-11-22：第一版用 s.index('{', m.end()) 定位后
+                #    又从该位置开始计 depth++，等于把这个 '{' 数了两次
+                #    → 永远差一层 → 提取范围一路吃到文件末尾（症状是
+                #    "g2_extract_cert 有 183 行"）。这类"提取器自己算错"
+                #    会让断言测到错的东西，必须自己先验证提取正确。
+                brace = s2.index('{', m.end())
+                i, depth = brace + 1, 1
+                while i < len(s2) and depth:
+                    if s2[i] == '{':
+                        depth += 1
+                    elif s2[i] == '}':
+                        depth -= 1
+                    i += 1
+                cs[nm] = s2[m.start():i]
+
+        if 'g2_extract_cert' in cs:
+            body = cs['g2_extract_cert']
+            order = re.findall(
+                r'(g2_find_eocd|g2_read_v2block|g2_parse_cert)\s*\(', body)
+            check(f"调度顺序 = {order}",
+                  order == ['g2_find_eocd', 'g2_read_v2block', 'g2_parse_cert'],
+                  "EOCD → Block → 证书，顺序变了行为就变")
+            n = len(body.splitlines())
+            check(f"g2_extract_cert 只有 {n} 行（调度器，应 < 40）", n < 40,
+                  "超过 40 行说明又把解析逻辑塞回来了")
+            check("调度器负责释放 value（无泄漏）",
+                  'free(value)' in body,
+                  "value 由 g2_read_v2block malloc，必须由调度器释放")
+
+        for nm in ('g2_find_eocd', 'g2_read_v2block', 'g2_parse_cert'):
+            if nm not in cs:
+                continue
+            idx = s2.index(cs[nm])
+            head = s2[max(0, idx - 200):idx]
+            check(f"{nm} 前有 G2_SEC_MARKED_NOVMP",
+                  re.search(r'G2_SEC_MARKED_NOVMP\s*$', head.rstrip()) is not None,
+                  "不带标记 = 掉出 .ncx 加密段")
+
+        # 最关键：两处真漏洞的修复点必须还在
+        check("g2_parse_cert 里仍有 certs_len 边界检查",
+              'certs_len == 0 || sd + certs_len > end'
+              in (cs.get('g2_parse_cert') or ''),
+              "这是 2026-11-22 修的真漏洞（少查一层长度 = 允许指针越界）")
+        check("g2_read_v2block 里仍有 block_size 回绕检查",
+              'block_size + 8 > (uint64_t)cd_off'
+              in (cs.get('g2_read_v2block') or ''),
+              "这是 2026-11-22 修的整数回绕（UINT64_MAX + 8 回绕成 7）")
+
     print()
     print(f"通过 {PASS}，失败 {FAIL}")
     return 0 if FAIL == 0 else 1

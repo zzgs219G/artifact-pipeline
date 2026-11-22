@@ -34,6 +34,7 @@
 用法: python3 scripts/guard/tests/test-sigblock-bounds.py
 """
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -209,12 +210,22 @@ def main():
         # 目的：区分"边界检查主动拒绝"与"后续 IO 失败兜底"。
         # 前者是修复生效，后者是侥幸 —— 反向验证时发现两者都表现为 rc=-1，
         # 只看 rc 的话回退修复也测不出来。
-        probe = ('\n'
-                 'const char *g2_last_reject = "other";\n')
-        patched = patched.replace(
-            'int g2_extract_cert_test(int fd, unsigned char **out_der, size_t *out_len) {',
-            probe + 'int g2_extract_cert_test(int fd, unsigned char **out_der, size_t *out_len) {',
-            1)
+        #
+        # ⚠️ 声明必须放在【所有被插桩的函数之前】。
+        #    2026-11-22：g2_extract_cert 拆成三段后，边界检查搬进了
+        #    g2_read_v2block（在文件里更靠前），原来"插在 g2_extract_cert
+        #    前面"的写法就变成了"在使用点之后声明"→ 编译报
+        #    undeclared identifier。改成插在第一个 #include 之后。
+        probe = 'const char *g2_last_reject = "other";\n'
+        _inc_end = patched.find('\n', patched.find('#include'))
+        # 找到最后一个连续的 #include 行之后
+        last_inc = 0
+        for m in re.finditer(r'^#include\s.*$', patched, flags=re.M):
+            last_inc = m.end()
+        if last_inc == 0:
+            bad("探针注入失败：找不到 #include 锚点")
+            return 1
+        patched = patched[:last_inc] + '\n' + probe + patched[last_inc:]
         # 边界检查打 "bounds" 标记
         marked = patched.replace(
             'if (block_size > (uint64_t)cd_off) return -1;',
@@ -226,14 +237,27 @@ def main():
             bad("探针注入失败：源码里找不到修复后的边界检查 —— "
                 "如果检查被改回旧形态，本测试的 REASON 判据会失效")
             return 1
-        # certs 区长度检查打 "certs" 标记（走 goto fail 分支，不是 return）
+        # certs 区长度检查打 "certs" 标记。
+        # ⚠️ 2026-11-22：g2_extract_cert 拆成三段后，这段从 goto fail
+        #    改成了 return -1（拆出的 g2_parse_cert 用 return，不用 label）。
+        #    锚点要跟着源码形态走 —— 这里加了个兜底：两种形态都认，
+        #    但只命中一个，避免"改了形态测试静默失效"。
         before_certs = marked
-        marked = marked.replace(
-            'if (certs_len == 0 || sd + certs_len > end) goto fail;',
-            'if (certs_len == 0 || sd + certs_len > end) '
-            '{ g2_last_reject = "certs"; goto fail; }')
+        for old_form, new_form in (
+            ('if (certs_len == 0 || sd + certs_len > end) goto fail;',
+             'if (certs_len == 0 || sd + certs_len > end) '
+             '{ g2_last_reject = "certs"; goto fail; }'),
+            ('if (certs_len == 0 || sd + certs_len > end) return -1;',
+             'if (certs_len == 0 || sd + certs_len > end) '
+             '{ g2_last_reject = "certs"; return -1; }'),
+        ):
+            if old_form in marked:
+                marked = marked.replace(old_form, new_form, 1)
+                break
         if marked == before_certs:
-            bad("探针注入失败：找不到 certs_len 的边界检查")
+            bad("探针注入失败：找不到 certs_len 的边界检查 —— "
+                "如果该检查被删掉或改成别的形态，本测试的 REASON 判据会失效，"
+                "必须同步更新锚点而不是让测试静默通过")
             return 1
         patched = marked
         tsrc = os.path.join(T, 'sg2_test.c')
