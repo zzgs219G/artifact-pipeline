@@ -299,6 +299,14 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/guard/tests/test-dual-line.py
 
+      # APK Signing Block 解析的边界回绕回归。
+      # 2026-11-22 审核发现 block_size 是 uint64 且完全来自 APK 文件内容，
+      # `block_size + 8` 可回绕 → 边界检查被绕过。这条测的是"主动拒绝"，
+      # 不是"最终被拒"——后者靠 pread 失败兜底也能达到，测不出修复。
+      - name: Signing Block 边界回绕（构造恶意 APK，验主动拒绝）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/guard/tests/test-sigblock-bounds.py
+
       # 抽取器自身的回归：它是"生成侧↔校验侧"唯一的接缝，
       # 抽错段/静默降级都会让上面那条对拍重新变假。
       - name: 派生公式抽取器（两条线不互相顶替 + 跟随生产 + 破坏即报错）

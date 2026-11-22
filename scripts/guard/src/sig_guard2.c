@@ -59,6 +59,27 @@
 #include <sys/syscall.h>
 
 #include "sig_guard2.h"
+
+/* ── SHA-256 的【固有】输出长度 vs 业务摘要长度 ──────────────────────
+ *
+ * 2026-11-22 审核发现的一处混用：本文件里数组维度写死 [32]，
+ * 而循环上界用 SG2_HASH_LEN。两者当前都是 32 所以没暴露，
+ * 但只要有人把 SG2_HASH_LEN 改小（或生成侧改摘要长度），
+ * 比对循环就只覆盖前 SG2_HASH_LEN 字节，
+ * 【后 32 - SG2_HASH_LEN 字节的差异被静默忽略】—— 签名校验静默变弱。
+ *
+ * 实测：把 SG2_HASH_LEN 设成 16，循环停在 i=16，后 16 字节不参与比较。
+ *
+ * 区分两个概念：
+ *   SG2_SHA256_LEN  SHA-256 的输出长度，由算法决定，永远 32，不可改
+ *   SG2_HASH_LEN    业务用到的摘要长度，由生成侧写入（当前等于 32）
+ * 数组都按 SG2_SHA256_LEN 开（容量足够），循环上界用 SG2_HASH_LEN（业务语义），
+ * 并在下面加 _Static_assert 挡住"业务长度 > 算法能力"的误配。 */
+#define SG2_SHA256_LEN 32
+
+_Static_assert(SG2_HASH_LEN <= SG2_SHA256_LEN,
+               "SG2_HASH_LEN 超过 SHA-256 输出长度 —— "
+               "生成侧与 sig_guard2.c 的摘要长度契约不一致");
 #include "nc_guard_layout.h"  /* 契约常数单一真相源：段名/尺寸/偏移
                                * 2026-10-28 T5b：本文件此前没 include 它，
                                * 因为没有段标记需求；现在 G2_SEC_MARKED 要用
@@ -232,7 +253,7 @@ static void g2_sha_update(g2_sha_ctx *c, const unsigned char *d, size_t len) {
     }
 }
 
-static void g2_sha_final(g2_sha_ctx *c, unsigned char out[32]) {
+static void g2_sha_final(g2_sha_ctx *c, unsigned char out[SG2_SHA256_LEN]) {
     unsigned int i = c->datalen;
     int j;
     c->data[i++] = 0x80;
@@ -435,7 +456,22 @@ static int g2_extract_cert(int fd, unsigned char **out_der, size_t *out_len) {
     }
     if (g2_read_at(fd, sz8, 8, (off_t)cd_off - 24) != 0) return -1;
     block_size = g2_rd64le(sz8);
-    if ((off_t)(block_size + 8) > cd_off) return -1;
+    /* ⚠️⚠️ 2026-11-22 审核修：原来是
+     *     if ((off_t)(block_size + 8) > cd_off) return -1;
+     * 两处问题，都能被恶意 APK 利用：
+     *
+     * ① 整数回绕：block_size 是 uint64 且【完全来自 APK 文件内容】
+     *    （g2_rd64le 读的 8 字节）。传 0xFFFFFFFFFFFFFFFF 时
+     *    block_size + 8 回绕成 7，检查 "7 > cd_off" 恒假 → 边界检查被绕过
+     *    → block_start 变成负数 → 后续 g2_read_at 拿到非法偏移。
+     * ② 有符号/无符号混比：`(off_t)x > cd_off` 里 cd_off 是 unsigned long
+     *    long，off_t 是 signed → 按 C 规则转成无符号比，
+     *    任何"看起来是负数的 off_t"都会变成巨大正数。
+     *
+     * 正确写法：先把两边都收敛到同一个、能容纳全部合法值的类型，
+     * 并且【先判上界再相加】，不让加法有机会回绕。 */
+    if (block_size > (uint64_t)cd_off) return -1;        /* 块本身不能超出 EOF */
+    if (block_size + 8 > (uint64_t)cd_off) return -1;    /* 加 8 后仍不能超 */
     block_start = (off_t)cd_off - 8 - (off_t)block_size;
 
     pair_pos = block_start + 8;
@@ -477,7 +513,22 @@ static int g2_extract_cert(int fd, unsigned char **out_der, size_t *out_len) {
         digests_len = g2_rd32le(sd); sd += 4;
         if (sd + digests_len + 4 > sd + sd_len) goto fail;
         sd += digests_len;
+        /* ⚠️ 2026-11-22 审核修：certs_len 读出来后【从未被使用】——
+         * -Wunused-but-set-variable 一直在报，但此前没人处理。
+         * 这不是"删个变量"就能消掉的告警：certs_len 是 certs 区的长度，
+         * 不校验就等于允许 sd 随后续读取越出 signer 区。
+         * 越界读的后果是"指纹算错 → 签名不过"，排查者会往证书方向找，
+         * 与真实原因相距很远。
+         * 补上边界检查，与上面 signer_len / sd_len 的做法保持一致
+         * （用指针比较 + goto fail，与本函数既有风格对齐）。 */
+        /* 边界一律用 end（= value + found，即整个 v2/v3 value 的末尾）。
+         * 不用 signer+sd_len 之类的复合表达式：signer 在读完 sd_len 后
+         * 已经 +=4，再拼 "+4" 极易多算/少算（本次审核就踩了一次，
+         * 合法包被误拒）。上面的 signer_len / sd_len 检查用 end 是既有风格，
+         * 这里保持一致。 */
+        if (sd + 4 > end) goto fail;
         certs_len = g2_rd32le(sd); sd += 4;
+        if (certs_len == 0 || sd + certs_len > end) goto fail;
         certs = sd;
 
         if (certs + 4 > end) goto fail;
@@ -580,16 +631,17 @@ static int g2_open_ro(const char *path) {
  *   t2 = SHA256(b"G2" || fp)
  *   expected[i] = t2[i] ^ salt2[(i*7)%16] ^ ((i*0x5B+0x3D)&0xFF)  */
 G2_SEC_MARKED
-static void g2_derive(const unsigned char fp[32], unsigned char out[32]) {
+static void g2_derive(const unsigned char fp[SG2_SHA256_LEN],
+                      unsigned char out[SG2_SHA256_LEN]) {
     g2_sha_ctx c;
-    unsigned char t2[32];
+    unsigned char t2[SG2_SHA256_LEN];
     int i;
     g2_sha_init(&c);
     g2_sha_update(&c, (const unsigned char *)"G2", 2);
-    g2_sha_update(&c, fp, 32);
+    g2_sha_update(&c, fp, SG2_HASH_LEN);
     g2_sha_final(&c, t2);
-    for (i = 0; i < 32; i++) {
-        out[i] = (unsigned char)(t2[i] ^ SG2_SALT[(i * 7) % 16]
+    for (i = 0; i < SG2_HASH_LEN; i++) {
+        out[i] = (unsigned char)(t2[i] ^ SG2_SALT[(i * 7) % SG2_SALT_LEN]
                                  ^ (unsigned char)((i * 0x5B + 0x3D) & 0xFF));
     }
 }
@@ -615,7 +667,7 @@ static void g2_derive(const unsigned char fp[32], unsigned char out[32]) {
  *
  * 返回：0 = 成功拿到指纹；非 0 = 环境异常（调用方静默返回，不误伤）。 */
 __attribute__((noinline))
-static int g2_collect_fp(unsigned char fp[32]) {
+static int g2_collect_fp(unsigned char fp[SG2_SHA256_LEN]) {
     char apk[1024];
     int fd;
     unsigned char *der = NULL;
@@ -637,7 +689,7 @@ static int g2_collect_fp(unsigned char fp[32]) {
 
 G2_SEC_MARKED
 static void g2_verify(void) {
-    unsigned char fp[32], expected[32];
+    unsigned char fp[SG2_SHA256_LEN], expected[SG2_SHA256_LEN];
     int i, mismatch = 0, slot_configured = 0;
 
     /* 调试模式:标准答案全零(流水线未注入) → 跳过,不误伤 */
@@ -649,7 +701,7 @@ static void g2_verify(void) {
     if (g2_collect_fp(fp) != 0) return;   /* 环境异常 → 未检出 */
 
     g2_derive(fp, expected);
-    for (i = 0; i < 32; i++) mismatch |= expected[i] ^ SG2_STORED[i];
+    for (i = 0; i < SG2_HASH_LEN; i++) mismatch |= expected[i] ^ SG2_STORED[i];
 
     if (mismatch != 0) g2_fail();
 }
