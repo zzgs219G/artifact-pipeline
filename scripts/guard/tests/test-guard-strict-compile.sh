@@ -105,6 +105,17 @@ else
 fi
 
 # ── ③ 宿主模式 ────────────────────────────────────────────────────
+#
+# ⚠️⚠️ 这一档在 CI 上踩过一次（run 45006692729 全红）：
+#     本地 Termux 的 clang 能找到 android/log.h / jni.h / arm_acle.h
+#     （它们就在 /data/data/com.termux/files/usr/include 附近），
+#     而 CI 的宿主编译器是纯 x86_64 clang，【找不到任何 Android 头】——
+#     于是 8 个文件 7 个 fatal error: android/log.h No such file。
+#
+#     这不是被测代码的问题，是本脚本漏给了 include 路径。
+#     修法：宿主档也要把 NDK 的 sysroot include 加进来（只要头，不交叉编译）。
+#     注意不能直接用 nc_pick_ndk_cc —— 那是 ARM 交叉编译器，
+#     而本档要的是【在本机能跑的宿主 clang + Android 头】。
 echo "[host SIGCHECK_HOST_TEST]"
 # shellcheck source=../../lib/host-cc.sh
 source "$ROOT/scripts/lib/host-cc.sh"
@@ -112,10 +123,37 @@ HOST_CC="$(nc_pick_host_cc || command -v clang || command -v gcc)"
 if [[ -z "$HOST_CC" ]]; then
   skp "找不到宿主编译器"
 else
+  # 找一个可用的 NDK sysroot include（arm64 优先，退回 armv7）
+  SYSINC=""
+  if [[ -n "$NDKBIN" ]]; then
+    for t in aarch64-linux-android armv7a-linux-androideabi; do
+      d="$NDKBIN/../sysroot/usr/include"
+      [[ -d "$d" ]] && { SYSINC="$d"; break; }
+    done
+  fi
+  # ⚠️⚠️ 必须用 -idirafter，不能用 -I。
+  #
+  #   -I 把 NDK 的 include 插到【系统头之前】→ 宿主的 stdlib.h 解析时
+  #   会先看到 bionic 的 bits/*，两者混用 → 一堆 "unused parameter __l"
+  #   之类的库内告警（实测 4 个文件因此红）。host-cc.sh 的
+  #   nc_has_sysroot 注释里记过同一个坑：「自带 sysroot 时传 -I 反而
+  #   打乱头文件解析顺序」。
+  #
+  #   -idirafter 把 NDK include 放到【所有系统路径之后】：
+  #   宿主头优先（stdlib.h 用宿主那份），只有宿主找不到的
+  #   android/log.h / jni.h / arm_acle.h 才落到 NDK 那份。这才是
+  #   "宿主 clang + 少量 Android 头"想要的语义。
+  HINC=("${INC[@]}")
+  if [[ -n "$SYSINC" ]]; then
+    HINC+=(-idirafter "$SYSINC")
+    echo "  （宿主档 -idirafter NDK 头：$SYSINC）"
+  else
+    echo "  ⚠️ 没找到 NDK sysroot，宿主档可能因缺 android/log.h 而失败"
+  fi
   for f in "${FILES[@]}"; do
     base="$(basename "$f")"
     if out=$("$HOST_CC" -c -O2 -Wall -Wextra -Werror \
-               -DSIGCHECK_HOST_TEST "${INC[@]}" -o /dev/null "$f" 2>&1); then
+               -DSIGCHECK_HOST_TEST "${HINC[@]}" -o /dev/null "$f" 2>&1); then
       ok "$base (host)"
     else
       bad "$base (host)"
