@@ -2576,7 +2576,7 @@ repack_force_debuggable_off "$WORK/decompiled"
 # 所有模块都写完 smali 了，回编之前实测一遍：哪个 dex 装不下就只拆哪个。
 #
 # 为什么放在这里而不是解包后（2026-11-06 实测教出来的）：
-#   · 解包时不知道各模块会插多少 —— 实测囧次元勾 stringenc 全量后
+#   · 解包时不知道各模块会插多少 —— 实测某大包勾 stringenc 全量后
 #     classes4 从 53398 涨到 53502（+104），因为每个含
 #     `static final String` 的类都被加了 1 个 <clinit> 来给字段赋值
 #     （编译期内联常量改成运行期解密）。这种增长事前估不出来。

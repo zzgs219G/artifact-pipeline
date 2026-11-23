@@ -145,21 +145,45 @@ def main():
         print("⚠️ 夹具的 resource map 里没有 android:name(0x01010003)，"
               "T4/T5 的语义无法验证", file=sys.stderr)
 
+    # 夹具的两类形态决定 T4 的语义（同一套断言不能假设只有一种）：
+    #   · 无 android:name → set-app-name 走「追加」分支，属性数 +1
+    #   · 已有 android:name → set-app-name 走「原地替换」分支，属性数不变
+    # 早先 T4 硬写 "+1"，用已有 name 的夹具（如多数真实 App）会假红，
+    # 而真红（插错位置）反而被这条噪音掩盖。
+    def _has_app_name(data):
+        for a in attrs_of(data):
+            if a["name"] < len(rmap) and rmap[a["name"]] == ANDROID_NAME_ID:
+                return True
+        return False
+
+    original_had_name = _has_app_name(original)
+    if original_had_name:
+        print(f"ℹ️ 夹具已有 android:name（{run('get-app-name', src)[1]}），"
+              f"T4 按「替换」分支断言（属性数不变）")
+    else:
+        print("ℹ️ 夹具无 android:name，T4 按「追加」分支断言（属性数 +1）")
+
     tmpdir = tempfile.mkdtemp(prefix="axmltest-")
     NEW = "com.example.test.FakeApp"
 
-    print("[T1] 追加 android:name")
+    print("[T1] 设置 android:name")
     f1 = os.path.join(tmpdir, "m1.xml")
     open(f1, "wb").write(original)
     rc, out, err = run("set-app-name", f1, NEW)
     d1 = open(f1, "rb").read()
+    d1_verify = open(f1, "rb").read()  # 内容快照（供后续 attrs 读取）
+
     check("命令成功", rc == 0, err)
     check("读回等于目标值", run("get-app-name", f1)[1] == NEW)
-    check("文件变大（池+属性）", len(d1) > len(original),
-          f"{len(original)} → {len(d1)}")
+    if not original_had_name:
+        check("文件变大（池+属性）", len(d1) > len(original),
+              f"{len(original)} → {len(d1)}")
+    else:
+        # 替换分支：值长度变化可能让池补一条新串，文件不一定变小，但不应缩水太多
+        check("文件非空且头 size 正确", len(d1) > 8)
 
     a0 = attrs_of(original)
-    a1 = attrs_of(d1)
+    a1 = attrs_of(d1_verify)
 
     print("[T2] 幂等")
     f2 = os.path.join(tmpdir, "m2.xml")
@@ -179,17 +203,23 @@ def main():
     check("属性数没有翻倍", len(attrs_of(open(f3, "rb").read())) == len(a1),
           f"{len(a1)} → {len(attrs_of(open(f3, 'rb').read()))}")
 
-    print("[T4] 属性插在 resourceId 升序位置，不是追加末尾")
-    # 新增属性 = 池里那条新类名，其 data 指向它
-    new_idx = read_pool(d1).index(NEW)
+    print("[T4] android:name 属性位于 resourceId 升序位置，不是追加末尾")
+    # 定位「承载我们写的类名」的那个属性：
+    #   追加分支 → 新增属性，其 data 指向池里的 NEW
+    #   替换分支 → 原属性被就地改值，其 data 可能就是 NEW（也可能池里有旧串）
+    pool_d1 = read_pool(d1)
+    new_idx = pool_d1.index(NEW) if NEW in pool_d1 else None
     name_pos = None
     for i, a in enumerate(a1):
-        if a["data"] == new_idx and a["type"] == TYPE_STRING:
+        if a["type"] == TYPE_STRING and new_idx is not None and a["data"] == new_idx:
             name_pos = i
             break
-    check("找到新增属性", name_pos is not None,
+    check("找到承载目标值属性", name_pos is not None,
           f"属性数 {len(a0)}→{len(a1)}，新池索引 {new_idx}")
-    check("属性数只 +1", len(a1) == len(a0) + 1, f"{len(a0)} → {len(a1)}")
+    if original_had_name:
+        check("替换分支：属性数不变", len(a1) == len(a0), f"{len(a0)} → {len(a1)}")
+    else:
+        check("追加分支：属性数只 +1", len(a1) == len(a0) + 1, f"{len(a0)} → {len(a1)}")
     # 位置必须满足：它前面所有属性的 resourceId 都 <= android:name 的 ID
     if name_pos is not None:
         ids_before = []

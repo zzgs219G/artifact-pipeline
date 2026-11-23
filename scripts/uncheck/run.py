@@ -329,14 +329,14 @@ def run(in_apk, out_apk, keep_work=None, api=30, full_origin=False):
 
         # 6aa) native 层 IO 重定向（libusign.so）+ origin.apk
         #
-        # 为什么必须加这层：囧次元这类 App 在 native 里直接
+        # 为什么必须加这层：部分 App 在 native 里直接
         # open("/data/app/.../base.apk") 解析 APK Signing Block 取证书，
         # Java 层三层 hook（CREATOR / PMS 代理 / signingInfo）全部无效。
-        # 这里用 XHook 把 open/open64/openat/openat64 的 base.apk 路径
+        # 这里用 shadowhook 把 open/open64/openat/openat64 等 base.apk 路径
         # 重定向到 origin.apk（= 原签名 APK 完整副本）。
         lib_dir = os.path.join(_HERE, 'payload', 'lib')
         if os.environ.get('USIGN_NO_NATIVE') == '1':
-            print('==> USIGN_NO_NATIVE=1：跳过 libusign.so 投放（诊断：native hook 是否干扰广告 SDK）')
+            print('==> USIGN_NO_NATIVE=1：跳过 libusign.so 投放（诊断用）')
         else:
             for abi, so_name in (('arm64-v8a', 'libusign_arm64.so'),
                                  ('armeabi-v7a', 'libusign_armv7.so')):
@@ -351,12 +351,11 @@ def run(in_apk, out_apk, keep_work=None, api=30, full_origin=False):
         # 6ab) origin.apk 不再作为普通条目投放 —— 改用数据复用打包
         #
         # 为什么（2026-11-23 实测结论，别重试 min-origin）：
-        #   去签名校验需要 origin.apk（原签名 APK 副本），普通投放让体积翻倍：
-        #   囧次元 127MB → 254MB。
+        #   去签名校验需要 origin.apk（原签名 APK 副本），普通投放让体积翻倍。
         #   试过"最小化 origin.apk"（只留签名块 + 中央目录，4KB）→ 真机崩溃
         #   NoClassDefFoundError：IO 重定向会连 ART 的 dex 懒加载一起劫持，
         #   min-origin 的 ZIP 骨架合法但条目全空，ART 以为拿到正确 APK 却读不到
-        #   classes9.dex。三组对照实验见 docs/签名校验接手文档.md §6 待办 2。
+        #   内部 dex。详见 docs/签名校验接手文档.md §6 待办 2。
         #
         # 正解 = 数据复用（FancyBypass 的做法，实测反推）：
         #   origin.apk 的数据区与"整个 APK 的字节"共享，物理上只存一份。
@@ -376,8 +375,6 @@ def run(in_apk, out_apk, keep_work=None, api=30, full_origin=False):
         }
         if os.environ.get('USIGN_NO_SIGFIX') == '1':
             cfg['cert'] = ''   # 诊断：让 SigFix.install 读不到证书而提前 return（Java hook 全禁）
-        if os.environ.get('USIGN_MIN_PROXY') == '1':
-            cfg['minProxy'] = True   # 最小代理：不清 mBase / 不替换 mInitialApplication（广告兼容）
         cfg_bytes = _json.dumps(cfg, ensure_ascii=False).encode('utf-8')
         replaced['assets/nc_sigfix/sigfix.json'] = cfg_bytes
         print(f'==> 投放 assets/nc_sigfix/sigfix.json'

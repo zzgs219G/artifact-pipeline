@@ -8,8 +8,6 @@
 
 .field static sCertB64:Ljava/lang/String; = ""
 
-.field static sMinProxy:Z = false
-
 .field private static sOriginalApp:Ljava/lang/String; = ""
 
 # instance fields
@@ -187,13 +185,13 @@
 
     const-string v1, "SigFixApp"
 
-    if-eqz v0, :cond_5
+    if-eqz v0, :cond_2
 
     invoke-virtual {v0}, Ljava/lang/String;->isEmpty()Z
 
     move-result v0
 
-    if-nez v0, :cond_5
+    if-nez v0, :cond_2
 
     sget-object v0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
 
@@ -209,7 +207,7 @@
 
     if-eqz v0, :cond_0
 
-    goto/16 :goto_2
+    goto :goto_1
 
     :cond_0
     sget-object v0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
@@ -275,13 +273,8 @@
 
     iput-object v0, p0, Lcom/nc/uncheck/SigFixApp;->mOriginal:Landroid/app/Application;
 
-    sget-boolean v2, Lcom/nc/uncheck/SigFixApp;->sMinProxy:Z
-
-    if-nez v2, :cond_2
-
     invoke-direct {p0, v0}, Lcom/nc/uncheck/SigFixApp;->clearBaseContext(Landroid/app/Application;)V
 
-    :cond_2
     :try_start_0
     invoke-direct {p0, v0, p1}, Lcom/nc/uncheck/SigFixApp;->invokeAttachBaseContext(Landroid/app/Application;Landroid/content/Context;)V
 
@@ -301,13 +294,8 @@
     invoke-static {v1, v2, p1}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
 
     :goto_0
-    sget-boolean p1, Lcom/nc/uncheck/SigFixApp;->sMinProxy:Z
-
-    if-nez p1, :cond_3
-
     invoke-direct {p0, v0}, Lcom/nc/uncheck/SigFixApp;->replaceInitialApplication(Landroid/app/Application;)V
 
-    :cond_3
     new-instance p1, Ljava/lang/StringBuilder;
 
     const-string v0, "\u5df2\u63a5\u7ba1\u539f Application: "
@@ -320,18 +308,8 @@
 
     move-result-object p1
 
-    sget-boolean v0, Lcom/nc/uncheck/SigFixApp;->sMinProxy:Z
-
-    if-eqz v0, :cond_4
-
-    const-string v0, "\uff08\u6700\u5c0f\u4ee3\u7406\uff1a\u4e0d\u6e05 mBase / \u4e0d\u66ff\u6362 mInitialApplication\uff09"
-
-    goto :goto_1
-
-    :cond_4
     const-string v0, "\uff08\u5b8c\u6574\u4ee3\u7406\uff09"
 
-    :goto_1
     invoke-virtual {p1, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
 
     move-result-object p1
@@ -344,8 +322,8 @@
 
     return-void
 
-    :cond_5
-    :goto_2
+    :cond_2
+    :goto_1
     const-string p1, "\u65e0\u539f Application \u9700\u8981\u63a5\u7ba1\uff08\u539f\u5305\u6ca1\u6709 android:name\uff09"
 
     invoke-static {v1, p1}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
@@ -549,9 +527,9 @@
 
     move-result v4
 
-    const/4 v5, 0x0
-
     if-lez v4, :cond_0
+
+    const/4 v5, 0x0
 
     invoke-virtual {p0, v3, v5, v4}, Ljava/io/ByteArrayOutputStream;->write([BII)V
 
@@ -584,17 +562,9 @@
 
     invoke-virtual {p0, v3, v0}, Lorg/json/JSONObject;->optString(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
 
-    move-result-object v0
+    move-result-object p0
 
-    sput-object v0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
-
-    const-string v0, "minProxy"
-
-    invoke-virtual {p0, v0, v5}, Lorg/json/JSONObject;->optBoolean(Ljava/lang/String;Z)Z
-
-    move-result p0
-
-    sput-boolean p0, Lcom/nc/uncheck/SigFixApp;->sMinProxy:Z
+    sput-object p0, Lcom/nc/uncheck/SigFixApp;->sOriginalApp:Ljava/lang/String;
 
     new-instance p0, Ljava/lang/StringBuilder;
 
@@ -671,18 +641,6 @@
 
     :goto_2
     invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
-
-    move-result-object p0
-
-    const-string v0, "\uff0cminProxy="
-
-    invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
-
-    move-result-object p0
-
-    sget-boolean v0, Lcom/nc/uncheck/SigFixApp;->sMinProxy:Z
-
-    invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Z)Ljava/lang/StringBuilder;
 
     move-result-object p0
 

@@ -78,8 +78,13 @@ with zipfile.ZipFile(apk) as z:
     if not dexes:
         print('❌ 产物里没有任何 classes*.dex', file=sys.stderr)
         sys.exit(1)
-    # 载荷在新建的 dex 里（inject.py 强制 n+1），扫所有 dex 找它
-    found_in = None
+    # 载荷分两部分，判据要分开：
+    #   · 引导器类 SigFixApp 只在**新建**的 classesN.dex 里（不会被当调用点引用）
+    #   · 调用点 Lcom/nc/uncheck/SigFix; 则插在**原** dex 里（必须在原 dex 才执行）
+    # 早先只扫 'nc/uncheck/SigFix' 字符串会把调用点误判成载荷位置，
+    # 报出「载荷在 classes.dex」——与实际相反（载荷必须在新 dex）。
+    payload_in = None
+    call_in = []
     for n in dexes:
         blob = z.read(n)
         if blob[:4] != b'dex\n':
@@ -92,14 +97,21 @@ with zipfile.ZipFile(apk) as z:
         if blob[12:32] != hashlib.sha1(blob[32:]).digest():
             print(f'❌ {n} SHA-1 签名不自洽', file=sys.stderr)
             sys.exit(1)
-        if b'nc/uncheck/SigFix' in blob and found_in is None:
-            found_in = n
+        if b'com/nc/uncheck/SigFixApp' in blob and payload_in is None:
+            payload_in = n
+        if b'com/nc/uncheck/SigFix' in blob:
+            call_in.append(n)
 
-if found_in is None:
-    print('❌ 所有 dex 里都找不到载荷类，注入未生效', file=sys.stderr)
+if payload_in is None:
+    print('❌ 所有 dex 里都找不到引导器类 SigFixApp，注入未生效', file=sys.stderr)
+    sys.exit(1)
+if not call_in:
+    print('❌ 没有任何 dex 含 SigFix 调用点，载荷不会被调用', file=sys.stderr)
     sys.exit(1)
 
-print(f'✅ {len(dexes)} 个 dex 结构均合法，载荷在 {found_in}')
+print(f'✅ {len(dexes)} 个 dex 结构均合法')
+print(f'   引导器载荷在 {payload_in}')
+print(f'   调用点在 {", ".join(call_in)}')
 print(f'   dex 清单: {", ".join(dexes)}')
 PY
 

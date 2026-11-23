@@ -94,8 +94,8 @@ int shadowhook_init(shadowhook_mode_t default_mode, bool debuggable) {
       // 用于「自动 hook 后续新加载的 so」这一附加特性。
       //
       // 我们的使用场景不需要它：
-      //   · 目标 so（libSecureFuck.so / libliteso.so）在 Application 初始化前
-      //     就已加载完毕，shadowhook_hook_sym_name 直接就能 hook 到；
+      //   · 目标 so 在 Application 初始化前就已加载完毕，
+      //     shadowhook_hook_sym_name 直接就能 hook 到；
       //   · 不需要监听后续 dlopen。
       //
       // 实测失败环境：HyperOS V816 / Android 16，linker 私有符号

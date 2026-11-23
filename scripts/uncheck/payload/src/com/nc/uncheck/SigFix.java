@@ -130,11 +130,10 @@ public final class SigFix {
         //
         // 这一层解决的是 Java 层 hook 覆盖不到的两条路径：
         //   ① App 自己 ZipFile(base.apk) 读 META-INF/*.RSA
-        //   ② native so 直接解析 APK Signing Block（如 libSecureFuck.so
-        //      用 __open_2 + fstat + mmap 读签名块）
-        // 实测目标 so 的导入符号不含 openat、且 fopen 内部直调 open 不走 PLT，
-        // 所以 native 侧用 shadowhook 的 inline hook，覆盖
-        // open/open64/__open_2/openat/openat64/fopen/fopen64/access/faccessat/stat/lstat。
+        //   ② native so 直接解析 APK Signing Block（__open_2 + fstat + mmap 读签名块）
+        // 不同目标 so 的导入符号不同（有的不含 openat，有的 fopen 走 PLT），
+        // 所以 native 侧用 shadowhook 的 inline hook，覆盖路径类函数全集：
+        // open/open64/__open_2/openat/openat64/fopen/fopen64/access/faccessat/stat/lstat/readlink/opendir。
         installNativeRedirect(ctx);
 
         // 1) 投放 payload dex 到私有目录（已存在且大小一致则跳过）
@@ -256,11 +255,9 @@ public final class SigFix {
      * "通过 PackageManager 问签名"的路径。目标 App 若绕开 PMS：
      *   · Java:  new ZipFile(getPackageResourcePath()) → 读 META-INF/*.RSA
      *   · native: __open_2 + fstat + mmap 解析 APK Signing Block（v2/v3）
-     * 就完全不受影响。实测囧次元 1.0.17：
-     *   libSecureFuck.so  导入 __open_2/fopen/stat/fstat/mmap/access
-     *   libliteso.so      导入 open/__open_2/fopen/access/stat/fstat/mmap
-     * 两者都不含 openat，且 fopen 在 libc 内部直调 open 不走 PLT
-     * —— 所以必须用 inline hook（shadowhook），PLT hook（XHook）无效。
+     * 就完全不受影响。不同目标 so 的导入表各不相同（有的用 __open_2、
+     * 有的用 fopen、有的用 open），所以覆盖的函数集按「路径类 libc 函数」
+     * 全集来挂，不针对某个具体 so 裁剪。
      *
      * ==== 失败只降级 ====
      * 任何一步失败都只记日志：App 照常启动，只是这条路径没绕过。

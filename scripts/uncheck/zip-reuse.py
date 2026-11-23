@@ -3,10 +3,9 @@
 
 ## 问题
 
-去签名校验要往产物里塞一份 `origin.apk`（原签名 APK 副本），体积直接翻倍：
-囧次元 127MB → 254MB。
+去签名校验要往产物里塞一份 `origin.apk`（原签名 APK 副本），体积直接翻倍。
 
-## FancyBypass 的做法（实测反推自 囧次元1.0.17_kill_fancy.apk）
+## FancyBypass 的做法（实测反推自其产物）
 
 ```
 offset 0     : local header("fancy/origin.apk", 声明 size=197904980)

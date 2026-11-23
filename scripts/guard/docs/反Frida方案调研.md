@@ -226,7 +226,7 @@ return (gum || hits >= 2) ? 1 : 0;
 
 **严重度：中高。** 这不是理论风险 —— 我们的下游是**任意 APK**（影视 App 常带
 ExoPlayer / FFmpeg / 各种媒体 SDK，其中用 GLib 的不在少数），误判即杀用户。
-`§4` 已经记录过一次同类事故：「囧次元那次已经踩过：`libc_hook_probe` 误杀了广告 SDK」。
+`§4` 已经记录过一次同类事故：「此前某次已经踩过：`libc_hook_probe` 误杀了广告 SDK」。
 
 **修法**（成本极低，删两行 + 调整 `hits` 阈值）：
 1. 移除 `names[1]` / `names[2]`（`gmain` / `gdbus`），保留 Frida 专属词
@@ -333,7 +333,7 @@ snprintf(p, sizeof(p), "/proc/self/task/%s/comm", de->d_name);
 | **时序异常检测** | 低端机上会误杀正常用户（Sentry 也标了 `warnOnly`）|
 | **Key Attestation** | 同上，且我们不改系统分区，用不上 |
 | **ClassLinker 计数 / ArtMethod entry** | 强依赖 ART 内部布局，需长期跟版本 |
-| **24 项全上** | 囧次元那次已经踩过：`libc_hook_probe` 误杀了广告 SDK |
+| **24 项全上** | 此前某次已经踩过：`libc_hook_probe` 误杀了广告 SDK |
 
 ---
 

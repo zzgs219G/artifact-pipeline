@@ -2,7 +2,7 @@
 """test_dex_rebalance.py — dex-rebalance.py 的回归测试（纯 stdlib，秒级）
 
 【为什么补这个测试】
-  2026-11-06 的场景：大型包多个 dex 的方法表/字段表贴顶（实测囧次元
+  2026-11-06 的场景：大型包多个 dex 的方法表/字段表贴顶（实测某大包
   1.0.14：classes.dex method 余量 17、classes4 余量 73、classes7 的
   field_ids 65357/65536），加固往里写东西就回编失败：
       Unsigned short value out of range: 65536

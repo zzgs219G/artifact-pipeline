@@ -158,17 +158,14 @@ LAUNCHER.onCreate              ← 最晚，兜底
 | `getPackageArchiveInfo(自身路径)` | ✅ | 走同一接口 |
 | 自读 APK 文件（`sourceDir` + ZipFile / 解析 Signing Block / `stat` 大小） | ✅ | native 层 IO 重定向（见 §native） |
 | native so 读 APK（`open`/`fopen`/`__open_2`/`access`/`stat`） | ✅ | 同上，shadowhook inline hook |
-| **native 自校验探针（q7.a() → nativeSigStatus → 业务 API 判破解）** | ✅* | *需配合 `apply-mods.py` H 组补丁（改探针脚本常量）。本模块 hook 不到——判定逻辑在混淆 so 内，只能改结论出口 |
-| **硬件证明（STRONGBOX Key Attestation）** | ✅* | *需配合 `apply-mods.py` F 组补丁（isSupported 恒 false 不发起）。证书链由系统 keystore2 进程组装，App 内 hook 结构性无法伪造 |
-| **libc .text CRC（inline hook 痕迹 → detail.libcCrc）** | ✅* | *需配合 `apply-mods.py` G 组补丁（键隐匿） |
 | 硬编码 `/data/app/<pkg>/base.apk` 直呼 `svc #0` | ❌ | 绕过 libc，需 seccomp / SVC patch |
 | native 硬编码证书哈希（`memcmp` 常量） | ❌ | 需逆向该 so 逐个 patch |
-| 上报服务端裁决 / Play Integrity | ⚠️ | 安全层 verdict 本地无法胜出；但同模板 App 实测业务层判决可全链对齐（F/G/H 组 + uncheck 配套，见 `apply-mods.py` 头部注释） |
+| 硬件证明（STRONGBOX Key Attestation） | ❌ | 证书链由系统 keystore2 进程从真实安装签名组装，App 内 hook 结构性无法伪造 |
+| 上报服务端裁决 / Play Integrity / SafetyNet | ❌ | 安全层与硬件级证明，本地无法胜出 |
 
-> ⚠️ **同模板 App（囧次元/动漫共和国系）必须走完整链**：
-> `apply-mods.py（业务补丁 + F/G/H 组）→ uncheck.sh → MT 签名`。
-> 只跑 uncheck：囧次元能过（服务器不验探针线），动漫共和国必死（验，业务 API 逐请求判"破解版"）。
-> 只打 apply-mods 不跑 uncheck：两条签名线口径矛盾（Java=重签指纹 vs 探针=官方指纹），也死。
+> **本模块只做「去签名校验」**，不含任何业务补丁（广告绕过 / 任务自动化 /
+> 弹窗去除 / 反检测 / 探针伪造等）。那些是针对具体 App 的定制工作，
+> 不属于通用能力，需要时由使用者自行按目标包处理。
 
 ### native 层（2026-11-23 新增）
 
@@ -176,17 +173,17 @@ LAUNCHER.onCreate              ← 最晚，兜底
 **所有指向 base.apk 的文件操作**重定向到 `origin.apk`（原签名 APK 全量副本，
 注入时放进 `assets/nc_sigfix/origin.apk`，运行时释放到 `codeCacheDir`）。
 
-覆盖 11 个路径类函数：`open` `open64` `__open_2` `openat` `openat64`
-`fopen` `fopen64` `access` `faccessat` `stat` `lstat`。
+覆盖路径类 libc 函数：`open` `open64` `__open_2` `openat` `openat64`
+`fopen` `fopen64` `access` `faccessat` `stat` `lstat` `readlink` `opendir`。
 
-- 为什么必须逐个核对函数名：目标 so 的导入表（`readelf -r | grep JUMP_SLOT`）
-  决定哪些函数有用。囧次元的两个 so 全是 `__open_2`/`fopen`，**没有 openat**。
+- 为什么覆盖全集而非按包裁剪：不同目标 so 的导入表（`readelf -r | grep JUMP_SLOT`）
+  各不相同，有的用 `__open_2`/`fopen`、有的用 `open`、有的根本没有 `openat`。
+  挂全集靠 `is_target_apk` 精确匹配路径，不匹配立即透传，开销可忽略。
 - 为什么只 hook 路径类不 hook fd 类：`open` 返回的 fd 指向 origin.apk 后，
   后续 `fstat`/`mmap`/`read` 自然正确；反向 hook 需维护 fd→path 映射，易错。
 - 编译：`bash payload/c/build-native.sh`（需 NDK；无 NDK 时 `build.sh` 自动跳过）
 - 详细踩坑（含 Android 16 必需的 shadowhook 补丁）见
   [`../../docs/签名校验接手文档.md`](../../docs/签名校验接手文档.md)
-| Play Integrity / SafetyNet / Key Attestation | ❌ **无解** | 硬件级证明 |
 
 后两类是**结构性无解**，不是「还没做」。工具不会假装能处理它们，
 也不会在这种包上产出一个「装上去才发现没用」的结果。

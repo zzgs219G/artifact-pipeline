@@ -10,16 +10,13 @@
 // 就完全不受影响。
 //
 // ==== hook 哪些函数：由目标 so 的导入表决定 ====
-// 实测两个目标 so（`readelf -r` 看 R_AARCH64_JUMP_SLOT）：
-//   libSecureFuck.so: fopen@LIBC, __open_2@LIBC, stat, fstat, mmap, access, opendir, popen
-//   libliteso.so    : open@LIBC, __open_2@LIBC, fopen@LIBC, access, stat, fstat, mmap, opendir
+// 不同目标 so 导入的路径类函数各不相同（`readelf -r` 看 R_AARCH64_JUMP_SLOT）：
+//   有的只用 fopen/__open_2，有的用 open，有的还带 access/stat/opendir。
+// 所以这里覆盖「路径类 libc 函数」全集，逐个核对导入表时按需取舍。
 //
 // 关键结论：
-//   · 两个都**没有 openat** —— 所以只 hook open/openat 的初版完全无效
-//   · fopen / __open_2 都是 PLT 跳转槽（JUMP_SLOT）→ **PLT hook 就能拦住**，
-//     不需要 inline hook
-//     （我曾以为 fopen 内部直调 open 所以必须 inline hook，实测证伪：
-//       对 libc 而言 fopen 是导出函数，目标 so 调用它走自己的 PLT）
+//   · 部分目标 so **没有 openat** —— 只 hook open/openat 会漏
+//   · fopen / __open_2 都是 PLT 跳转槽（JUMP_SLOT）→ PLT hook 就能拦住
 //
 // ==== 为什么只 hook 路径类函数，不 hook fd 类 ====
 // open 返回的 fd 一旦指向 origin.apk，后续 fstat/mmap/read/fstat 全部自然正确。
@@ -143,7 +140,7 @@ static int proxy_lstat(const char *path, struct stat *buf) {
 }
 
 // ── readlink：fd 路径伪装 ──
-// libsupport.so 导入 readlink。目标 so 可以 readlink("/proc/self/fd/N")
+// 部分 so 导入 readlink。目标 so 可以 readlink("/proc/self/fd/N")
 // 解析出 fd 的真实文件路径做一致性校验：open(base.apk) 被我们重定向后，
 // fd 实际指向 code_cache/sigfix-origin.apk —— readlink 一查就露馅
 // （路径对不上 base.apk）。代理：结果路径等于 rep_path 时改报 apk_path。
@@ -162,7 +159,7 @@ static ssize_t proxy_readlink(const char *path, char *buf, size_t bufsiz) {
 }
 
 // ── opendir：目录打开重定向 ──
-// libzhuque/libsupport/libSecureFuck 都导入 opendir/readdir。主要风险点：
+// 多个目标 so 导入 opendir/readdir。主要风险点：
 // ① 目标 so opendir(base.apk 所在目录) 后 readdir 枚举——目录本身没有
 //    可疑条目（我们没在安装目录写东西），透传安全；
 // ② 但 code_cache 下有 sigfix-origin.apk / sigfix-payload.dex —— 若目标
@@ -211,9 +208,8 @@ static void patch_all(void) {
     hook_one("stat",      (void *) proxy_stat,      (void **) &orig_stat);
     hook_one("lstat",     (void *) proxy_lstat,     (void **) &orig_lstat);
     // 2026-11-23 补全（对照 so 导入表）：
-    //   libzhuque.so   : open/stat/lstat/mmap/read/opendir/readdir
-    //   libsupport.so  : access/fopen/mmap/read/opendir/readdir/readlink
-    //   libSecureFuck.so: __open_2/fopen/stat/mmap
+    //   不同目标的 so 导入集各不相同，常见的有：
+    //   open/stat/lstat/mmap/read/opendir/readdir/access/fopen/readlink/__open_2。
     // readlink 是 fd 路径一致性校验的关键漏点；opendir 先透传占位。
     hook_one("readlink",  (void *) proxy_readlink,  (void **) &orig_readlink);
     hook_one("opendir",   (void *) proxy_opendir,   (void **) &orig_opendir);

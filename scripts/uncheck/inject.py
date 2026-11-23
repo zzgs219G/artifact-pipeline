@@ -239,11 +239,10 @@ def extract_cert_der(apk_path):
         # ── v1 兜底：从 META-INF/*.RSA|DSA|EC 里解析 PKCS#7 取证书
         #
         # 为什么需要（2026-11-23 踩坑）：
-        #   apply-mods.py 首版重打包时用 zipfile 逐条复制，
-        #   把 APK Signing Block 丢了 → 产物是 v1-only 包 →
+        #   重打包工具若用 zipfile 逐条复制，
+        #   可能把 APK Signing Block 丢掉 → 产物是 v1-only 包 →
         #   这里直接抛错，整个去校验流程失败。
-        #   （apply-mods 已修为保留签名块；此处仍加兜底，
-        #     因为用户送来的包也可能是 v1-only —— 比如用旧工具重签过）
+        #   （此处加兜底，因为用户送来的包也可能是 v1-only —— 比如用旧工具重签过）
         v1_cert = _extract_cert_from_v1(apk_path)
         if v1_cert is not None:
             return v1_cert

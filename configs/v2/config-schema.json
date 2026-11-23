@@ -9,7 +9,7 @@
         {
             "key": "uncheck",
             "label": "去签名校验",
-            "desc": "选这条流水线就是要做这件事，没有额外开关。\n\n原理：改「App 问系统要签名」这一层 —— 在 IPackageManager 接口上挂代理，让 App 拿到原版证书。App 自己的校验代码一个字都不动，所以它用什么方式写校验、混淆成什么样都不影响。\n\n覆盖：\n✅ App 通过系统接口查签名（PackageManager / checkSignatures / getPackageArchiveInfo）\n✅ App 自己打开 APK 文件解析（sourceDir + ZipFile / Signing Block 解析）—— 2026-11-23 新增 native 层 IO 重定向（shadowhook inline hook）\n✅ native so 读 APK（open/fopen/__open_2/mmap）—— 同上\n✅ 注入 hook 框架（SupportGuard.checkHookXposed 已拆，远程名单不怕）\n❌ 上报服务端裁决 / Play Integrity —— 本地无解，本工具不尝试",
+            "desc": "选这条流水线就是要做这件事，没有额外开关。\n\n原理：改「App 问系统要签名」这一层 —— 在 IPackageManager 接口上挂代理，让 App 拿到原版证书。App 自己的校验代码一个字都不动，所以它用什么方式写校验、混淆成什么样都不影响。\n\n覆盖：\n✅ App 通过系统接口查签名（PackageManager / checkSignatures / getPackageArchiveInfo）\n✅ App 自己打开 APK 文件解析（sourceDir + ZipFile / Signing Block 解析）—— 2026-11-23 新增 native 层 IO 重定向（shadowhook inline hook）\n✅ native so 读 APK（open/fopen/__open_2/mmap）—— 同上\n❌ native 裸 svc #0 / 硬编码证书哈希 —— 需逆向，本工具不做\n❌ 上报服务端裁决 / Play Integrity / 硬件证明 —— 结构性无解，本工具不尝试\n\n注意：本模块只做签名校验绕过，不含任何业务补丁（广告/任务/弹窗/反检测等）。",
             "type": "leaf",
             "default": true,
             "arg": "--uncheck"
