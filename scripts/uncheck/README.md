@@ -167,21 +167,45 @@ LAUNCHER.onCreate              ← 最晚，兜底
 > 弹窗去除 / 反检测 / 探针伪造等）。那些是针对具体 App 的定制工作，
 > 不属于通用能力，需要时由使用者自行按目标包处理。
 
-### native 层（2026-11-23 新增）
+### native 层（2026-11-23 新增，2026-11-24 补全）
 
 `payload/c/usign_hook.c` 用字节跳动 shadowhook（inline hook）把目标进程里
 **所有指向 base.apk 的文件操作**重定向到 `origin.apk`（原签名 APK 全量副本，
 注入时放进 `assets/nc_sigfix/origin.apk`，运行时释放到 `codeCacheDir`）。
 
-覆盖路径类 libc 函数：`open` `open64` `__open_2` `openat` `openat64`
-`fopen` `fopen64` `access` `faccessat` `stat` `lstat` `readlink` `opendir`。
+覆盖 **17 个**路径类 libc 函数：
 
+```
+open      open64    __open_2    openat    openat64   __openat_2  openat2
+fopen     fopen64   access      faccessat  stat       lstat      statx
+readlink  readlinkat opendir
+```
+
+- **为什么 `__openat_2` 必须挂**（2026-11-24 实测）：C 里写
+  `openat(AT_FDCWD, path, O_RDONLY)`，`_FORTIFY_SOURCE` 会把它编成
+  **`__openat_2`**，不是 `openat`。只挂 `openat` 等于没挂。
+  同理 `readlinkat` 是 `readlink` 的 at 版本，各挂各的。
 - 为什么覆盖全集而非按包裁剪：不同目标 so 的导入表（`readelf -r | grep JUMP_SLOT`）
-  各不相同，有的用 `__open_2`/`fopen`、有的用 `open`、有的根本没有 `openat`。
-  挂全集靠 `is_target_apk` 精确匹配路径，不匹配立即透传，开销可忽略。
+  各不相同。挂全集靠 `is_target_apk` 精确匹配路径，不匹配立即透传，开销可忽略。
 - 为什么只 hook 路径类不 hook fd 类：`open` 返回的 fd 指向 origin.apk 后，
   后续 `fstat`/`mmap`/`read` 自然正确；反向 hook 需维护 fd→path 映射，易错。
 - 编译：`bash payload/c/build-native.sh`（需 NDK；无 NDK 时 `build.sh` 自动跳过）
+
+#### ⚠️ 通用 hook 的硬边界（如实，别高估）
+
+加固侧（`scripts/guard`）已升级为**多路取证书 + 交叉比对**。本模块补全 hook
+后实测：6 条路线中能拦住 3 条，另外 3 条属于技术边界，**不是没做**：
+
+| 路线 | 为什么拦不住 |
+|---|---|
+| 内联 `svc #0` | 指令长在调用方函数体里，没有符号、没有独立函数可供 inline hook |
+| `syscall()` 的 inline 展开 | 同上 |
+| `/proc/self/fd/N` 复用系统已开 fd | 压根不发起 `open` |
+
+要破这 3 条只能去改加密段 `.ncx` 里的指令 —— 那是针对性逆向，不再是
+"通用去校验"。详见 [`scripts/guard/README.md`](../guard/README.md) 的
+「签名校验：多路取证书」一节。
+
 - 详细踩坑（含 Android 16 必需的 shadowhook 补丁）见
   [`../../docs/签名校验接手文档.md`](../../docs/签名校验接手文档.md)
 
