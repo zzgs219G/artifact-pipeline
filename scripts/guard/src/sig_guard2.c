@@ -479,7 +479,16 @@ static int g2_find_apk(char *out, size_t outlen) {
  * 返回 16 字节静态缓冲（magic 只有前 14 字节有效，末 2 字节补 0）。 */
 #ifdef G2_HAVE_LSGS
 static const char *g2_block_magic(void) {
-    static char buf[16];
+    /* ⚠️ 必须 ≥17：lsg_s 是「C 字符串」语义，缓冲按 len+1 给
+     * （16 字节 magic + 1 字节 NUL）。曾写 buf[16] → lsg_decode 判
+     * len+1 > buflen 恒失败 → 返回 NULL → magic 比对必败 → 第二线
+     * 在真机上 6 路全部 "cert extract fail" 静默跳过（防御自部署起
+     * 从未生效，失败语义是"未检出"所以从不崩溃也从不报错）。
+     * 2026-11-24 第二线多路化加日志后才暴露。第一线同款函数
+     * （sig_check.c:sig_block_magic）2026-10-21 全量误杀事故时已修到
+     * buf[17]，教训只修了自己那条线 —— 本文件同构 bug 沉睡至今。
+     * 宿主测试测不到它：SIGGUARD2_HOST_TEST 下走明文 #else 分支。 */
+    static char buf[17];
     const char *s = lsg_s(LSGS_G2_BLOCK_MAGIC, buf, sizeof(buf));
     if (!s) return NULL;
     return buf;
