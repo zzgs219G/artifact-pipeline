@@ -35,6 +35,9 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+/* struct statx（Android 11+ 的 statx 代理用）。定义在 linux/stat.h，
+ * 而 sys/stat.h 只声明函数原型。 */
+#include <linux/stat.h>
 #include <dirent.h>
 #include <android/log.h>
 #include <pthread.h>
@@ -60,16 +63,24 @@ static inline int is_target_apk(const char *path) {
 // ─────────────────────── 原始函数指针 ───────────────────────
 
 typedef int   (*open_t)(const char *, int, ...);
+typedef int   (*openat_t)(int, const char *, int, ...);
+typedef int   (*openat2_t)(int, const char *, void *, size_t);
 typedef FILE *(*fopen_t)(const char *, const char *);
 typedef int   (*access_t)(const char *, int);
 typedef int   (*stat_t)(const char *, struct stat *);
 typedef int   (*faccessat_t)(int, const char *, int, int);
 typedef ssize_t (*readlink_t)(const char *, char *, size_t);
+typedef ssize_t (*readlinkat_t)(int, const char *, char *, size_t);
 typedef DIR  *(*opendir_t)(const char *);
+typedef int   (*statx_t)(int, const char *, int, unsigned int, struct statx *);
 
 static open_t      orig_open      = NULL;
 static open_t      orig_open64    = NULL;
 static open_t      orig___open_2  = NULL;
+static openat_t    orig_openat    = NULL;
+static openat_t    orig_openat64  = NULL;
+static openat_t    orig___openat_2= NULL;
+static openat2_t   orig_openat2   = NULL;
 static fopen_t     orig_fopen     = NULL;
 static fopen_t     orig_fopen64   = NULL;
 static access_t    orig_access    = NULL;
@@ -78,7 +89,9 @@ static stat_t      orig_stat      = NULL;
 static stat_t      orig_lstat     = NULL;
 static stat_t      orig___stat    = NULL;
 static readlink_t  orig_readlink  = NULL;
+static readlinkat_t orig_readlinkat = NULL;
 static opendir_t   orig_opendir   = NULL;
+static statx_t     orig_statx     = NULL;
 
 // ─────────────────────────── 代理实现 ───────────────────────────
 
@@ -104,6 +117,48 @@ static int proxy_open64(const char *path, int flags, ...) {
 static int proxy___open_2(const char *path, int flags) {
     if (is_target_apk(path)) return orig___open_2(s_rep_path, flags);
     return orig___open_2(path, flags);
+}
+
+/* ── openat 家族（2026-11-24 补）──
+ *
+ * ⚠️ 这是本模块最容易被漏掉的一族，理由很实在：
+ *    在 C 里写 `openat(AT_FDCWD, path, O_RDONLY)`，_FORTIFY_SOURCE 会把它
+ *    编成 **`__openat_2`**，不是 `openat`。只挂 `openat` 完全拦不住
+ *    （实测：加固侧的 sig_check.c 就编成了 __openat_2，见其导入表）。
+ *    三个符号都得挂。
+ *
+ * 只在 dirfd == AT_FDCWD（相对当前目录）时判断路径：
+ *    其它 dirfd 下 path 是相对该目录的，与绝对路径 base.apk 不可能相等，
+ *    直接透传（也避免误伤）。 */
+static int proxy_openat(int dirfd, const char *path, int flags, ...) {
+    mode_t mode = 0;
+    if (flags & O_CREAT) { va_list ap; va_start(ap, flags); mode = (mode_t) va_arg(ap, int); va_end(ap); }
+    if (dirfd == AT_FDCWD && is_target_apk(path))
+        return orig_openat(dirfd, s_rep_path, flags, mode);
+    return orig_openat(dirfd, path, flags, mode);
+}
+
+static int proxy_openat64(int dirfd, const char *path, int flags, ...) {
+    mode_t mode = 0;
+    if (flags & O_CREAT) { va_list ap; va_start(ap, flags); mode = (mode_t) va_arg(ap, int); va_end(ap); }
+    if (dirfd == AT_FDCWD && is_target_apk(path))
+        return orig_openat64(dirfd, s_rep_path, flags, mode);
+    return orig_openat64(dirfd, path, flags, mode);
+}
+
+/* __openat_2 是 fortify 版：没有 mode 参数（调用方保证不带 O_CREAT） */
+static int proxy___openat_2(int dirfd, const char *path, int flags) {
+    if (dirfd == AT_FDCWD && is_target_apk(path))
+        return orig___openat_2(dirfd, s_rep_path, flags);
+    return orig___openat_2(dirfd, path, flags);
+}
+
+/* openat2 是 Linux 5.6+/Android 11+ 的新接口，第三个参数是 struct open_how*。
+ * 不解析该结构，只改路径；how 原样透传。 */
+static int proxy_openat2(int dirfd, const char *path, void *how, size_t size) {
+    if (dirfd == AT_FDCWD && is_target_apk(path))
+        return orig_openat2(dirfd, s_rep_path, how, size);
+    return orig_openat2(dirfd, path, how, size);
 }
 
 static FILE *proxy_fopen(const char *path, const char *mode) {
@@ -156,6 +211,33 @@ static ssize_t proxy_readlink(const char *path, char *buf, size_t bufsiz) {
         }
     }
     return r;
+}
+
+// ── readlinkat：fd 路径伪装（at 版本，2026-11-24 补）──
+// 目标 so 可能用 readlinkat(AT_FDCWD, "/proc/self/fd/N", ...) 而不是 readlink。
+// 加固侧的 sig_find_apk_fd 正是用 readlinkat 反查 fd 真实路径 ——
+// 如果只挂 readlink，那一路就能识破重定向。
+static ssize_t proxy_readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+    ssize_t r = orig_readlinkat(dirfd, path, buf, bufsiz);
+    if (r > 0 && (size_t) r == strlen(s_rep_path)
+            && strncmp(buf, s_rep_path, (size_t) r) == 0) {
+        ssize_t n = (ssize_t) strlen(s_apk_path);
+        if ((size_t) n <= bufsiz) {
+            memcpy(buf, s_apk_path, (size_t) n);
+            return n;
+        }
+    }
+    return r;
+}
+
+// ── statx：新式 stat（2026-11-24 补）──
+// Android 11+ 的 statx 是 stat 的现代替代；只挂 stat/lstat 会漏。
+// 返回结构体很复杂，但路径重定向只需要换路径，结构由内核填。
+static int proxy_statx(int dirfd, const char *path, int flags,
+                       unsigned int mask, struct statx *buf) {
+    if (dirfd == AT_FDCWD && is_target_apk(path))
+        return orig_statx(dirfd, s_rep_path, flags, mask, buf);
+    return orig_statx(dirfd, path, flags, mask, buf);
 }
 
 // ── opendir：目录打开重定向 ──
@@ -213,6 +295,17 @@ static void patch_all(void) {
     // readlink 是 fd 路径一致性校验的关键漏点；opendir 先透传占位。
     hook_one("readlink",  (void *) proxy_readlink,  (void **) &orig_readlink);
     hook_one("opendir",   (void *) proxy_opendir,   (void **) &orig_opendir);
+
+    // 2026-11-24 补全 openat 家族 + 新式接口（对照加固侧的导入表）：
+    //   加固的 sig_check.c 实际导入的是 __openat_2（fortify 版），
+    //   而 readlinkat / openat2 / statx 是 6 路取证书里绕开 open 的手段。
+    //   只挂 open/open64/__open_2 会让这 5 条路线全部漏过。
+    hook_one("openat",     (void *) proxy_openat,     (void **) &orig_openat);
+    hook_one("openat64",   (void *) proxy_openat64,   (void **) &orig_openat64);
+    hook_one("__openat_2", (void *) proxy___openat_2, (void **) &orig___openat_2);
+    hook_one("openat2",    (void *) proxy_openat2,    (void **) &orig_openat2);
+    hook_one("readlinkat", (void *) proxy_readlinkat, (void **) &orig_readlinkat);
+    hook_one("statx",      (void *) proxy_statx,      (void **) &orig_statx);
 
     // 统计关键函数是否挂上：open / __open_2 / fopen 是目标 so 的主力，
     // 加上 access / stat 共 5 个。至少 3 个成功才算可用。
