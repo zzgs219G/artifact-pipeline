@@ -17,7 +17,6 @@ set -euo pipefail
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WANT_UNCHECK=0
-FULL_ORIGIN=0
 
 log_info() { printf '\033[32m[uncheck]\033[0m %s\n' "$*"; }
 log_warn() { printf '\033[33m[uncheck]\033[0m %s\n' "$*"; }
@@ -25,11 +24,12 @@ log_err()  { printf '\033[31m[uncheck]\033[0m %s\n' "$*" >&2; }
 
 usage() {
   cat >&2 <<'EOF'
-用法: uncheck.sh <输入.apk> <输出_未签名.apk> --uncheck [--full-origin]
+用法: uncheck.sh <输入.apk> <输出_未签名.apk> --uncheck
 
   --uncheck       执行去校验（必填）
-  --full-origin   origin.apk 用全量副本（回退方案，体积翻倍但兼容性最好）
-                  默认走最小化（只留签名块，约 4KB）
+
+  （原 --full-origin 全量副本参数已于 2026-11-24 移除：该分支从未被
+    实现，恒走数据复用打包，见 docs/交接-2026-11-24.md §6.4）
 EOF
   exit 2
 }
@@ -45,7 +45,6 @@ OUT_APK="$(cd "$(dirname "$OUT_APK")" && pwd)/$(basename "$OUT_APK")"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --uncheck) WANT_UNCHECK=1; shift ;;
-    --full-origin) FULL_ORIGIN=1; shift ;;
     *) log_err "未知参数: $1"; usage ;;
   esac
 done
@@ -56,11 +55,7 @@ if [[ $WANT_UNCHECK -eq 0 ]]; then
 fi
 
 log_info "注入签名伪造载荷"
-if [[ "${FULL_ORIGIN:-0}" -eq 1 ]]; then
-  python3 "$_HERE/run.py" "$IN_APK" "$OUT_APK" --full-origin
-else
-  python3 "$_HERE/run.py" "$IN_APK" "$OUT_APK"
-fi
+python3 "$_HERE/run.py" "$IN_APK" "$OUT_APK"
 
 # ── 产物自检（不签名，只验证结构合法）──────────────────────────────────
 log_info "产物自检"

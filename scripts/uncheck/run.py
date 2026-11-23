@@ -283,7 +283,7 @@ def zipalign(src, dst):
 
 # ───────────────────────── 主流程 ─────────────────────────
 
-def run(in_apk, out_apk, keep_work=None, api=30, full_origin=False):
+def run(in_apk, out_apk, keep_work=None, api=30):
     if not os.path.isfile(in_apk):
         raise RuntimeError(f'输入 APK 不存在: {in_apk}')
     if not os.path.isfile(APKTOOL):
@@ -458,7 +458,9 @@ def run(in_apk, out_apk, keep_work=None, api=30, full_origin=False):
         #   origin.apk 的数据区与"整个 APK 的字节"共享，物理上只存一份。
         #   本文件的 origin 投放改为标记，由 zip-reuse.py 在最后一步完成，
         #   见下方「数据复用打包」段。
-        need_origin_reuse = True
+        #
+        # （2026-11-24 清理：原 `--full-origin` 全量副本参数已删除 ——
+        #   它对应的分支从未被实现消费，恒走数据复用，见交接文档 §6.4。）
 
 
         # 6a) 投放配置文件：证书 + 原 Application 类名。
@@ -514,47 +516,46 @@ def run(in_apk, out_apk, keep_work=None, api=30, full_origin=False):
             kind = '替换' if name in src_names else '新增'
             print(f'    {kind} {name}（{len(replaced[name])} B）')
 
-        if need_origin_reuse:
-            # 复用前先对齐中间包：zipalign 会重写 ZIP，必须在"还没被
-            # 重叠共享"的时候做。复用之后只改 offset 表、不动数据，
-            # 对齐属性自然保留。
-            aligned_in = os.path.join(work, 'aligned_before_reuse.apk')
-            used = zipalign(tmp_apk, aligned_in)
-            if used:
-                print(f'==> zipalign（复用前）: {used}')
-                tmp_apk = aligned_in
-            else:
-                # ⚠️ 不能"警告后继续"：未对齐的中间包 + 数据复用平移，
-                # resources.arsc 必然落在非 4 倍数 → 装机被拒。
-                # 这是必需依赖，缺了就该在构建期失败，不要产出一个装不上的包。
-                raise RuntimeError(
-                    '找不到 zipalign —— 无法保证 resources.arsc 的 4 字节对齐。\n'
-                    '  Android R+ 装机要求：resources.arsc 必须 STORED 且 4 字节对齐。\n'
-                    '  修复：安装 Android build-tools 并确保 zipalign 在 PATH，\n'
-                    '        或用 SIGFIX_ZIPALIGN=<path> 指定。')
+        # 7b) 复用前先对齐中间包：zipalign 会重写 ZIP，必须在"还没被
+        # 重叠共享"的时候做。复用之后只改 offset 表、不动数据，
+        # 对齐属性自然保留。
+        aligned_in = os.path.join(work, 'aligned_before_reuse.apk')
+        used = zipalign(tmp_apk, aligned_in)
+        if used:
+            print(f'==> zipalign（复用前）: {used}')
+            tmp_apk = aligned_in
+        else:
+            # ⚠️ 不能"警告后继续"：未对齐的中间包 + 数据复用平移，
+            # resources.arsc 必然落在非 4 倍数 → 装机被拒。
+            # 这是必需依赖，缺了就该在构建期失败，不要产出一个装不上的包。
+            raise RuntimeError(
+                '找不到 zipalign —— 无法保证 resources.arsc 的 4 字节对齐。\n'
+                '  Android R+ 装机要求：resources.arsc 必须 STORED 且 4 字节对齐。\n'
+                '  修复：安装 Android build-tools 并确保 zipalign 在 PATH，\n'
+                '        或用 SIGFIX_ZIPALIGN=<path> 指定。')
 
-            # ⚠️ Signing Block 必须在 zipalign **之后**注入：
-            #    zipalign 重写整个 ZIP，会丢掉它不认识的 Signing Block
-            #    （2026-11-24 实测：先在 rebuild_apk 里注入 → zipalign 后消失）。
-            #    注入点选在这里，是因为 origin.apk 的数据区 = 中间包字节，
-            #    必须在复用**之前**注入，origin.apk 里才会带上签名块。
-            if inject_sig_block(tmp_apk, in_apk):
-                print('==> 注入 APK Signing Block（origin.apk 需要它读证书）')
-            else:
-                print('⚠️ 输入包没有 APK Signing Block（v1-only？），origin.apk 将不含签名块')
+        # ⚠️ Signing Block 必须在 zipalign **之后**注入：
+        #    zipalign 重写整个 ZIP，会丢掉它不认识的 Signing Block
+        #    （2026-11-24 实测：先在 rebuild_apk 里注入 → zipalign 后消失）。
+        #    注入点选在这里，是因为 origin.apk 的数据区 = 中间包字节，
+        #    必须在复用**之前**注入，origin.apk 里才会带上签名块。
+        if inject_sig_block(tmp_apk, in_apk):
+            print('==> 注入 APK Signing Block（origin.apk 需要它读证书）')
+        else:
+            print('⚠️ 输入包没有 APK Signing Block（v1-only？），origin.apk 将不含签名块')
 
-            print('==> 数据复用打包（origin.apk 与整包共享字节）')
-            reuse_mod = _load_module('zip_reuse', ('scripts', 'uncheck', 'zip-reuse.py'))
-            reused = os.path.join(work, 'reused.apk')
-            st = reuse_mod.build(tmp_apk, reused)
-            print(f'    中间包 {st["src_size"]/1e6:.2f} MB '
-                  f'→ 复用包 {st["out_size"]/1e6:.2f} MB '
-                  f'（仅增加 {st["out_size"]-st["src_size"]} B 头开销）')
-            probs = reuse_mod.verify(reused)
-            if probs:
-                raise RuntimeError('数据复用自检失败: ' + '; '.join(probs))
-            print('    自检通过：origin.apk 是完整 APK，各条目可读')
-            tmp_apk = reused
+        print('==> 数据复用打包（origin.apk 与整包共享字节）')
+        reuse_mod = _load_module('zip_reuse', ('scripts', 'uncheck', 'zip-reuse.py'))
+        reused = os.path.join(work, 'reused.apk')
+        st = reuse_mod.build(tmp_apk, reused)
+        print(f'    中间包 {st["src_size"]/1e6:.2f} MB '
+              f'→ 复用包 {st["out_size"]/1e6:.2f} MB '
+              f'（仅增加 {st["out_size"]-st["src_size"]} B 头开销）')
+        probs = reuse_mod.verify(reused)
+        if probs:
+            raise RuntimeError('数据复用自检失败: ' + '; '.join(probs))
+        print('    自检通过：origin.apk 是完整 APK，各条目可读')
+        tmp_apk = reused
 
         # 8) 输出
         #
@@ -567,17 +568,8 @@ def run(in_apk, out_apk, keep_work=None, api=30, full_origin=False):
         # 对齐已在**中间包**阶段做过（rebuild_apk 后的 tmp_apk 若需要对齐，
         # 由 zipalign 在复用前处理）；复用只是改 ZIP 的 offset 表，
         # 条目数据本身没有移动，对齐属性保留。
-        #
-        # 若 --full-origin（不复用），则照常对齐。
-        if need_origin_reuse:
-            shutil.copyfile(tmp_apk, out_apk)
-            print('==> 数据复用包跳过 zipalign（对齐会破坏重叠共享结构）')
-        else:
-            used = zipalign(tmp_apk, out_apk)
-            if used:
-                print(f'==> zipalign: {used}')
-            else:
-                print('⚠️ 未找到 zipalign，产物未对齐（apksigner 签之前请自行 zipalign）')
+        shutil.copyfile(tmp_apk, out_apk)
+        print('==> 数据复用包跳过 zipalign（对齐会破坏重叠共享结构）')
 
         print(f'\n✅ 完成: {out_apk} ({os.path.getsize(out_apk)} B)')
         print('   产物未签名 —— 请用你自己的 keystore 签:')
@@ -595,7 +587,6 @@ def main(argv):
     in_apk, out_apk = argv[1], argv[2]
     keep = None
     api = 30
-    full_origin = False
     i = 3
     while i < len(argv):
         if argv[i] == '--keep-work' and i + 1 < len(argv):
@@ -604,15 +595,11 @@ def main(argv):
         elif argv[i] == '--api' and i + 1 < len(argv):
             api = int(argv[i + 1])
             i += 2
-        elif argv[i] == '--full-origin':
-            # origin.apk 用全量副本（回退方案）：体积翻倍，但兼容任何读法
-            full_origin = True
-            i += 1
         else:
             print(f'未知参数: {argv[i]}', file=sys.stderr)
             return 2
     try:
-        run(in_apk, out_apk, keep, api, full_origin)
+        run(in_apk, out_apk, keep, api)
     except (RuntimeError, ValueError) as e:
         print(f'❌ {e}', file=sys.stderr)
         return 1
