@@ -44,7 +44,7 @@
 #       + 防回退）★ 2026-10-30
 #   T33 解密后代码页完整性校验（检测逻辑进加密段 / 入口留 .text /
 #       基线紧贴解密 / 未锁态放行）★ 2026-10-30
-#   T34 分发 .a 混淆在位（ncg_xor_key 指令数 ≥60 = VMP 形态）★ 2026-11-24
+#   T34 分发 .a 混淆在位（.ncq VMP 字节码 ≥10KB = VMP 形态）★ 2026-11-24
 #       —— v0.9.48-maps-fix 绕过 -obf 通道丢混淆的产物侧断言
 #
 # 用法：bash scripts/lib/tests/test-so-lock.sh
@@ -1479,43 +1479,43 @@ echo
 #   本文件其余项用 ensure_nox_src【源码】编译 —— 根本不消费 .a，
 #   所以"换了个没混淆的 .a"在全部既有测试里都是绿的。
 #
-# 判据：反汇编 .a 里的 ncg_xor_key 数指令。基准出处：
-#   交接文档 §5.2 —— VMP 生效 ~210 条；未生效/被跳过 ~15 条。
-#   nc_guard_xor.c 头注 —— 该函数 2026-11-06 专门拆出来"以便单独 VMP"。
-#   阈值取 60（两态之间留余量）。
-# ⚠️ 若 nox 侧 VMP 清单变更（ncg_xor_key 不再在列），同步改本项的判据函数。
-# ⚠️ 本项在 v0.9.48-maps-fix 换成 -obf 版之前【必然红】—— 这是设计：
-#   活警报，直到 nox 侧补发混淆包（推 v0.9.48-*-obf tag 走 release.yml）。
+# 判据：.a 里 VMP 字节码段（.ncq）的总字节数。
+#   实测两态（2026-11-24）：无混淆 0 B；有混淆 95,394 B（.ncr 解释器 142,532 B）。
+#   阈值 10,000 —— 两态相差一个数量级，余量充足。
+# ⚠️ 判据演进史（别改回去）：初版用「反汇编 ncg_xor_key 数指令」，
+#   基准取交接文档 §5.2 的 ~210 条。补发 obf 包后实测只有 31 条 ——
+#   VMP 的实现形态是把函数逻辑抽成 .ncq 字节码、函数体只剩解释器调用，
+#   **函数指令数根本不是 VMP 生效的判据**（16 条=无 VMP、31 条=VMP 后、
+#   210 条=历史实现时代的记录，三种值无法用单一阈值区分）。
+#   段字节数是结构判据，与 amice 实现细节解耦。
+# ⚠️ 若 nox 侧段架构变更（.ncq 改名/合并），同步本项。
 echo "── T34 分发 .a 混淆在位（防 v0.9.48 式静默降级复发）──"
 NOX_A=""
 for cand in "$ROOT/tools/nox.zip"; do
     [ -f "$cand" ] && { NOX_A="$cand"; break; }
 done
-OBJDUMP=""
-for ocand in "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-objdump \
-             "$(command -v llvm-objdump || true)" \
-             "$(command -v objdump || true)"; do
-    [ -n "$ocand" ] && [ -x "$ocand" ] && { OBJDUMP="$ocand"; break; }
+SIZETOOL=""
+for scand in "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-size \
+             "$(command -v llvm-size || true)" \
+             "$(command -v size || true)"; do
+    [ -n "$scand" ] && [ -x "$scand" ] && { SIZETOOL="$scand"; break; }
 done
 if [ -z "$NOX_A" ]; then
     skip "T34 无 tools/nox.zip，跳过"
-elif [ -z "$OBJDUMP" ]; then
-    skip "T34 找不到 objdump/llvm-objdump（装 NDK 或 binutils 后可查），跳过"
+elif [ -z "$SIZETOOL" ]; then
+    skip "T34 找不到 size/llvm-size（装 NDK 或 binutils 后可查），跳过"
 else
     T34DIR=$(mktemp -d "${TMPDIR:-/tmp}/t34.XXXXXX" 2>/dev/null || mktemp -d "$HOME/.t34.XXXXXX")
     if unzip -o -q "$NOX_A" 'nox/so-guard/lib/arm64-v8a/libnox.a' -d "$T34DIR" 2>/dev/null \
        && [ -f "$T34DIR/nox/so-guard/lib/arm64-v8a/libnox.a" ]; then
-        N_INSN=$("$OBJDUMP" -d "$T34DIR/nox/so-guard/lib/arm64-v8a/libnox.a" \
-                 --disassemble-symbols=ncg_xor_key 2>/dev/null \
-                 | grep -cE '^[[:space:]]*[0-9a-f]+:')
-        if [ -z "$N_INSN" ] || [ "$N_INSN" -eq 0 ]; then
-            bad "T34 反汇编不出 ncg_xor_key（符号名变了？同步本项判据）"
-        elif [ "$N_INSN" -ge 60 ]; then
-            ok "T34 分发 .a 混淆在位（ncg_xor_key ${N_INSN} 条指令 ≥ 60，VMP 形态）"
+        NCQ=$("$SIZETOOL" -A "$T34DIR/nox/so-guard/lib/arm64-v8a/libnox.a" 2>/dev/null \
+              | awk '/^\.ncq /{s+=$2} END {print s+0}')
+        if [ "$NCQ" -ge 10000 ]; then
+            ok "T34 分发 .a 混淆在位（.ncq VMP 字节码 ${NCQ} B ≥ 10000）"
         else
-            bad "T34 分发 .a 【无混淆】（ncg_xor_key 仅 ${N_INSN} 条指令 < 60，普通编译形态）
+            bad "T34 分发 .a 【无混淆】（.ncq VMP 字节码 ${NCQ} B < 10000，普通编译形态）
      → 当前 tools/nox.zip 绕过了 -obf 通道（v0.9.48-maps-fix 事故同型）。
-     → 补发：nox 侧推 v0.9.48-maps-fix-obf tag 走 release.yml（勾 obfuscate），
+     → 补发：nox 侧推 v0.9.48-*-obf tag 走 release.yml（tag 名含 -obf 自动混淆），
        或本地 AMICE_BUNDLE=<bundle> make-zip-lib.sh；换包后删 tools/nox/ 重跑本测试。"
         fi
     else
