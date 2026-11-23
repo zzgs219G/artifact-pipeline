@@ -41,6 +41,9 @@ APKTOOL = os.path.join(_ROOT, 'tools', 'apktool.jar')
 
 SMALI_DIR_RE = re.compile(r'^smali(?:_classes\d+)?$')
 
+# APK Signing Block（v2/v3）的魔数：位于中央目录前 16 字节
+SIG_BLOCK_MAGIC = b'APK Sig Block 42'
+
 
 # ───────────────────────── dex 版本头 ─────────────────────────
 
@@ -135,6 +138,42 @@ def _load_module(name, relpath):
     return module
 
 
+def _extract_sig_block(apk_path):
+    """取出 APK 的 APK Signing Block（v2/v3 签名块）原始字节。
+
+    返回 (block_bytes, block_offset) 或 (None, None)。
+
+    ==== 为什么必须保留（2026-11-24 真机 SIGBUS 事故）====
+    加固的 libnc.so 用 `k_so = HKDF(master, SHA256(certDER), pkg)` 解 .ncx
+    锁箱段，其中 certDER 是从**自己所在 APK 的 Signing Block** 里读的。
+    去校验的 libusign.so 又把 `open(base.apk)` 重定向到 origin.apk。
+
+    原先 rebuild_apk 用 zipfile 逐条目重写 → Signing Block 不是条目、
+    必然丢失 → origin.apk 没有签名块 → libnc.so 读不到证书 → k_so 错
+    → .ncx 解出乱码 → 跳野地址 → SIGBUS（栈上留「不匹配（fail-closed -12）」）。
+
+    注意：Signing Block 里的签名是对**原包内容**签的，放进改过的包并不能
+    让包通过系统校验（装机时本来就要重签）。这里保留它，只是为了满足
+    「App/native 从自己 APK 里读证书」这条运行期路径 —— 证书 DER 与包内容
+    无关，所以取到的值是正确的。
+    """
+    with open(apk_path, 'rb') as f:
+        data = f.read()
+    eocd = data.rfind(b'PK\x05\x06')
+    if eocd < 0:
+        return None, None
+    cd_off = struct.unpack_from('<I', data, eocd + 16)[0]
+    if cd_off < 32 or cd_off > len(data):
+        return None, None
+    if data[cd_off - 16:cd_off] != SIG_BLOCK_MAGIC:
+        return None, None
+    size_total = struct.unpack_from('<Q', data, cd_off - 24)[0]
+    if size_total + 8 > cd_off:
+        return None, None
+    start = cd_off - 8 - size_total
+    return data[start:cd_off], start
+
+
 def rebuild_apk(src_apk, dst_apk, replace_entries):
     """按原包条目顺序重打包，替换/新增指定条目。
 
@@ -142,7 +181,14 @@ def rebuild_apk(src_apk, dst_apk, replace_entries):
 
     保留原条目的压缩方式（STORED/DEFLATED）与时间戳 —— dex 若是 STORED，
     保持 STORED 可以维持原对齐假设；改为 DEFLATED 会改变体积但不影响加载。
+
+    另外**把原包的 APK Signing Block 原样写回**（中央目录之前）。
+    zipfile 无法表达签名块（它不是条目），所以这里手工拼接：
+    [条目数据] + [Signing Block] + [中央目录] + [EOCD]。
+    见 _extract_sig_block 的注释说明为什么必须保留。
     """
+    sig_block, _ = _extract_sig_block(src_apk)
+
     with zipfile.ZipFile(src_apk) as zin:
         infos = zin.infolist()
         names = {i.filename for i in infos}
@@ -168,6 +214,56 @@ def rebuild_apk(src_apk, dst_apk, replace_entries):
                 else:
                     zi.compress_type = zipfile.ZIP_DEFLATED
                 zout.writestr(zi, data)
+
+    if sig_block:
+        # ⚠️ 这里**不能**注入签名块（2026-11-24 实测）：
+        #   后续 zipalign 会重写整个 ZIP，把不认识的 Signing Block 丢掉。
+        #   正确顺序：zipalign → 再注入（见 inject_sig_block 的调用点）。
+        pass
+
+
+def inject_sig_block(dst_apk, src_apk):
+    """从 src_apk 取 Signing Block 并注入 dst_apk（必须在 zipalign 之后调用）。
+
+    返回 True 表示注入了，False 表示源包没有签名块。
+    """
+    sig_block, _ = _extract_sig_block(src_apk)
+    if not sig_block:
+        return False
+    _inject_sig_block(dst_apk, sig_block)
+    return True
+
+
+def _inject_sig_block(apk_path, sig_block):
+    """把 Signing Block 插到中央目录之前，并修正 EOCD 的 CD offset。
+
+    ZIP 布局：[条目...][中央目录][EOCD]
+    插入后：  [条目...][Signing Block][中央目录][EOCD]
+    → CD 与 EOCD 整体后移 len(sig_block)，EOCD 里的 CD offset 要相应加上。
+    """
+    with open(apk_path, 'rb') as f:
+        data = f.read()
+    eocd = data.rfind(b'PK\x05\x06')
+    if eocd < 0:
+        raise RuntimeError(f'{apk_path}: 找不到 EOCD')
+    cd_off = struct.unpack_from('<I', data, eocd + 16)[0]
+    if data[cd_off - 16:cd_off] == SIG_BLOCK_MAGIC:
+        return          # 已经有签名块（幂等）
+
+    new_cd_off = cd_off + len(sig_block)
+    if new_cd_off > 0xFFFFFFFF:
+        raise RuntimeError('注入签名块后 CD offset 超出 32 位，暂不支持 >4GB 包')
+
+    out = bytearray()
+    out += data[:cd_off]                 # 条目数据
+    out += sig_block                     # ← Signing Block
+    out += data[cd_off:eocd]             # 原中央目录
+    new_eocd = bytearray(data[eocd:])
+    struct.pack_into('<I', new_eocd, 16, new_cd_off)
+    out += new_eocd
+
+    with open(apk_path, 'wb') as f:
+        f.write(out)
 
 
 def zipalign(src, dst):
@@ -436,6 +532,16 @@ def run(in_apk, out_apk, keep_work=None, api=30, full_origin=False):
                     '  Android R+ 装机要求：resources.arsc 必须 STORED 且 4 字节对齐。\n'
                     '  修复：安装 Android build-tools 并确保 zipalign 在 PATH，\n'
                     '        或用 SIGFIX_ZIPALIGN=<path> 指定。')
+
+            # ⚠️ Signing Block 必须在 zipalign **之后**注入：
+            #    zipalign 重写整个 ZIP，会丢掉它不认识的 Signing Block
+            #    （2026-11-24 实测：先在 rebuild_apk 里注入 → zipalign 后消失）。
+            #    注入点选在这里，是因为 origin.apk 的数据区 = 中间包字节，
+            #    必须在复用**之前**注入，origin.apk 里才会带上签名块。
+            if inject_sig_block(tmp_apk, in_apk):
+                print('==> 注入 APK Signing Block（origin.apk 需要它读证书）')
+            else:
+                print('⚠️ 输入包没有 APK Signing Block（v1-only？），origin.apk 将不含签名块')
 
             print('==> 数据复用打包（origin.apk 与整包共享字节）')
             reuse_mod = _load_module('zip_reuse', ('scripts', 'uncheck', 'zip-reuse.py'))
