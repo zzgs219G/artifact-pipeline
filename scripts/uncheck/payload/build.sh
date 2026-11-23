@@ -3,6 +3,12 @@
 #
 #   SigFix.java      → javac → d8 → baksmali → SigFix.smali      （进 App 的 dex）
 #   SigFixImpl.java  → javac → d8 → payload.dex                  （进 assets，运行时投放）
+#   usign_hook.c     → clang → libusign_{arm64,armv7}.so          （进 lib/{abi}/，
+#                                                                 shadowhook 静态链入）
+#
+# 第三段是 native 层 APK 路径重定向（补 Java 层 hook 覆盖不到的路径）：
+#   App 自己 ZipFile(base.apk) 读签名 / native so 解析 APK Signing Block。
+# 只在 host 有 NDK 时才编；没有 NDK 则跳过并警告（Java 层仍可用）。
 #
 # ⚠️ 为什么必须两段（2026-11-21 真机实测后重构）：
 #   目标是反射访问隐藏 API，而 Android 9+ 的拦截判定依据是
@@ -58,6 +64,18 @@ done
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+# ── native 层（可选：需要 NDK）─────────────────────────────────────────
+# 没有 NDK 时跳过，产物少两个 so —— Java 层 hook 仍然工作，
+# 只是 App 自读 APK / native 解析签名块这两条路径不会被覆盖。
+echo "==> native 层（APK 路径重定向）"
+if bash "$_HERE/c/build-native.sh"; then
+  : # build-native.sh 自己会打印产物
+else
+  echo "⚠️ native 层编译失败（缺 NDK？），跳过。"
+  echo "   Java 层 hook 仍可用，但 App 自读 APK 的签名校验不会被绕过。"
+  echo "   要补：装 Android NDK 后重跑本脚本。"
+fi
 
 echo "==> javac (android.jar = $ANDROID_JAR)"
 mkdir -p "$WORK/src/com/nc/uncheck" "$WORK/classes"

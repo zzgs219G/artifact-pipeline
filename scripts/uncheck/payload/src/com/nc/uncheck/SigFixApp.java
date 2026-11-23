@@ -69,6 +69,14 @@ public class SigFixApp extends Application {
     /** 从 sigfix.json 读到的原证书 Base64。 */
     static String sCertB64 = "";
 
+    /**
+     * 最小代理模式（sigfix.json 的 "minProxy": true）：
+     *   true = 不清原 Application 的 mBase、不替换 mInitialApplication。
+     *   完整代理对 Tinker 系 App 会杀死广告 SDK 的前台 Activity 获取
+     *   （实测对照矩阵 2026-11-23），默认关闭，需要时在 sigfix.json 开。
+     */
+    static boolean sMinProxy = false;
+
     /** 原 Application 实例。 */
     private Application mOriginal;
 
@@ -123,8 +131,10 @@ public class SigFixApp extends Application {
             org.json.JSONObject o = new org.json.JSONObject(json);
             sCertB64 = o.optString("cert", "");
             sOriginalApp = o.optString("originalApp", "");
+            sMinProxy = o.optBoolean("minProxy", false);
             Log.i(TAG, "配置已读取：cert " + (sCertB64.isEmpty() ? "缺失" : sCertB64.length() + " 字符")
-                    + "，originalApp=" + (sOriginalApp.isEmpty() ? "(无)" : sOriginalApp));
+                    + "，originalApp=" + (sOriginalApp.isEmpty() ? "(无)" : sOriginalApp)
+                    + "，minProxy=" + sMinProxy);
         } catch (Throwable t) {
             Log.e(TAG, "读取 " + CONFIG_ASSET + " 失败", t);
         } finally {
@@ -199,7 +209,16 @@ public class SigFixApp extends Application {
         //
         // 清零 mBase 后，原类的 super 调用就能正常执行，
         // 它在 attachBaseContext 里的初始化逻辑（dex 加载 / SP 读取等）才不会丢。
-        clearBaseContext(app);
+        // 2026-11-23 最小代理模式（sigfix.json 的 "minProxy": true）：
+        //   实测对照矩阵（囧次元 1.0.17）确认：完整代理（清 mBase + 替换
+        //   mInitialApplication）会让广告 SDK 拿不到前台 Activity
+        //   （"Advertising requires a foreground Android Activity"），
+        //   广告全挂 —— Tinker 系 App 对这两个扰动敏感。
+        //   最小模式只做：创建原实例 + attach + 转发 attachBaseContext/onCreate，
+        //   不清 mBase、不替换 mInitialApplication。
+        if (!sMinProxy) {
+            clearBaseContext(app);
+        }
 
         // 让原 Application 跑它自己的 attachBaseContext（尊重其 override）
         try {
@@ -210,8 +229,11 @@ public class SigFixApp extends Application {
         }
 
         // 替换 ActivityThread.mInitialApplication —— 让系统认为原实例才是真的
-        replaceInitialApplication(app);
-        Log.i(TAG, "已接管原 Application: " + sOriginalApp);
+        if (!sMinProxy) {
+            replaceInitialApplication(app);
+        }
+        Log.i(TAG, "已接管原 Application: " + sOriginalApp
+                + (sMinProxy ? "（最小代理：不清 mBase / 不替换 mInitialApplication）" : "（完整代理）"));
     }
 
     private Application newApplicationViaInstrumentation(Class<?> cls, Context base)

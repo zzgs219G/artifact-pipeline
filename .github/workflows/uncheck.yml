@@ -3,13 +3,12 @@
 # ==============================================================================
 # 与 protect-modules.yml 的关系：**两条完全独立的流水线**。
 #   protect-modules.yml → 加固（configs/v1，7 个模块，要用 NDK/Amice/nox）
-#   uncheck.yml         → 去校验（configs/v2，1 个模块，纯 Python，无 NDK）
+#   uncheck.yml         → 去校验（configs/v2，含 native 层 IO 重定向）
 #
 # 为什么不合并成一个 workflow：
 #   1. 方向相反。合并后「勾 sigcheck（加校验）同时又勾 uncheck（去校验）」
 #      是个自相矛盾且无法给出合理语义的配置，只能在 UI 上互斥；
-#   2. 依赖天差地别。加固要 NDK/Amice/nox（几分钟环境准备），
-#      去校验只要 JDK（apktool + d8），合并等于让小事也付大代价；
+#   2. 依赖不同。加固要 NDK/Amice/nox，去校验要 JDK + NDK（native 层）
 #   3. 失败面隔离。去校验出错不该让加固流水线变红，反之亦然。
 #
 # 卡片发现机制（2026-11-21）：App 拉 configs/v{N}/config-schema.json 生成 UI，
@@ -71,6 +70,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
+      # native 层（APK 路径重定向）需要 NDK 交叉编译 libusign.so
+      # 2026-11-23 新增：覆盖「App 自己读 APK 文件解析签名」这条路径
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
 
       - name: 校验卡片与解释器
         run: |

@@ -122,6 +122,21 @@ public final class SigFix {
     }
 
     private static void boot(Context ctx) throws Throwable {
+        // 0) native 层：APK 路径重定向（让 so 读到 origin.apk 的签名块）
+        //
+        // ⚠️ 必须在**这里**（app 域）做，不能在 SigFixImpl（boot 域）里做：
+        //    System.loadLibrary 按"调用类的 ClassLoader"查找 nativeLibraryDir，
+        //    BootClassLoader 域找不到导航库目录，会静默失败。
+        //
+        // 这一层解决的是 Java 层 hook 覆盖不到的两条路径：
+        //   ① App 自己 ZipFile(base.apk) 读 META-INF/*.RSA
+        //   ② native so 直接解析 APK Signing Block（如 libSecureFuck.so
+        //      用 __open_2 + fstat + mmap 读签名块）
+        // 实测目标 so 的导入符号不含 openat、且 fopen 内部直调 open 不走 PLT，
+        // 所以 native 侧用 shadowhook 的 inline hook，覆盖
+        // open/open64/__open_2/openat/openat64/fopen/fopen64/access/faccessat/stat/lstat。
+        installNativeRedirect(ctx);
+
         // 1) 投放 payload dex 到私有目录（已存在且大小一致则跳过）
         java.io.File dexOut = new java.io.File(ctx.getCodeCacheDir(), PAYLOAD_DEX);
         boolean needWrite = true;
@@ -219,8 +234,163 @@ public final class SigFix {
         }
     }
 
-    private static long assetSize(Context ctx, String name) throws Throwable {
-        android.content.res.AssetFileDescriptor fd = ctx.getAssets().openFd(name);
+    // ─────────────────── native 层 APK 路径重定向 ───────────────────
+
+    /** native 库名（打进 lib/{abi}/libusign.so） */
+    private static final String NATIVE_LIB = "usign";
+
+    /** origin.apk 在 assets 里的位置（注入器投放，= 原签名 APK 全量副本） */
+    private static final String ORIGIN_ASSET = "nc_sigfix/origin.apk";
+
+    /** origin.apk 在私有目录的落点文件名 */
+    private static final String ORIGIN_FILE = "sigfix-origin.apk";
+
+    /** 只装一次的标记（native hook 是进程级的，重复装会互相覆盖） */
+    private static volatile boolean sNativeDone;
+
+    /**
+     * native 层：把 base.apk 的所有文件读操作重定向到 origin.apk。
+     *
+     * ==== 为什么需要这一层 ====
+     * Java 层三层 hook（CREATOR / PMS 代理 / signingInfo）只能拦
+     * "通过 PackageManager 问签名"的路径。目标 App 若绕开 PMS：
+     *   · Java:  new ZipFile(getPackageResourcePath()) → 读 META-INF/*.RSA
+     *   · native: __open_2 + fstat + mmap 解析 APK Signing Block（v2/v3）
+     * 就完全不受影响。实测囧次元 1.0.17：
+     *   libSecureFuck.so  导入 __open_2/fopen/stat/fstat/mmap/access
+     *   libliteso.so      导入 open/__open_2/fopen/access/stat/fstat/mmap
+     * 两者都不含 openat，且 fopen 在 libc 内部直调 open 不走 PLT
+     * —— 所以必须用 inline hook（shadowhook），PLT hook（XHook）无效。
+     *
+     * ==== 失败只降级 ====
+     * 任何一步失败都只记日志：App 照常启动，只是这条路径没绕过。
+     * 绝不能让 native 层的问题把 App 搞崩。
+     */
+    private static void installNativeRedirect(Context ctx) {
+        if (sNativeDone) {
+            Log.i(TAG, "native hook 已安装，跳过");
+            return;
+        }
+        java.io.File rep = null;
+        try {
+            // ① 定位当前 APK 路径（优先 PackageManager，失败退回 /proc/self/maps）
+            String apkPath = resolveApkPath(ctx);
+            if (apkPath == null) {
+                Log.w(TAG, "拿不到自身 APK 路径，跳过 native 重定向");
+                return;
+            }
+
+            // ② 释放 origin.apk 到私有目录（已存在且大小一致则复用）
+            rep = new java.io.File(ctx.getCodeCacheDir(), ORIGIN_FILE);
+            long expect = assetSize(ctx, ORIGIN_ASSET);
+            if (rep.isFile() && rep.length() == expect && expect > 0) {
+                Log.i(TAG, "origin.apk 已存在，复用: " + rep.length() + " B");
+            } else {
+                if (rep.exists() && !rep.delete()) {
+                    Log.w(TAG, "旧 origin.apk 删不掉，尝试覆盖");
+                }
+                extractAssetPlain(ctx, ORIGIN_ASSET, rep);
+                Log.i(TAG, "origin.apk 已释放: " + rep.length() + " B");
+            }
+
+            // ③ 加载 native 库并装 hook
+            //
+            // 用绝对路径 System.load 而不是 loadLibrary：
+            //   · loadLibrary 依赖 java.library.path / ClassLoader 的 nativeLibraryDir，
+            //     在部分 ROM + 多 ClassLoader 场景下会找不到；
+            //   · 绝对路径最直接，且能明确知道加载的是我们打进包里的那一份。
+            String libDir = ctx.getApplicationInfo().nativeLibraryDir;
+            java.io.File so = new java.io.File(libDir, "lib" + NATIVE_LIB + ".so");
+            if (!so.isFile()) {
+                Log.w(TAG, "找不到 native 库: " + so.getAbsolutePath()
+                        + "（该 ABI 未投放？），跳过 native 重定向");
+                return;
+            }
+            System.load(so.getAbsolutePath());
+            Log.i(TAG, "native 库已加载: " + so.getAbsolutePath());
+
+            boolean ok = nativeHookApkPath(apkPath, rep.getAbsolutePath());
+            if (ok) {
+                sNativeDone = true;
+                Log.i(TAG, "native 重定向已生效: " + apkPath + " -> " + rep.getAbsolutePath());
+            } else {
+                Log.e(TAG, "native 重定向返回失败（去校验仅剩 Java 层生效）");
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "native 重定向安装失败（仅 Java 层生效）", t);
+        }
+    }
+
+    /** 取自身 APK 路径。优先 PMS，退回 /proc/self/maps 扫描。 */
+    private static String resolveApkPath(Context ctx) {
+        // 优先：ApplicationInfo.sourceDir（最可靠，且是真实安装路径）
+        try {
+            String p = ctx.getApplicationInfo().sourceDir;
+            if (p != null && p.endsWith(".apk") && new java.io.File(p).isFile()) {
+                return p;
+            }
+        } catch (Throwable ignored) {
+        }
+        // 退回：/proc/self/maps 里找 base.apk
+        java.io.BufferedReader r = null;
+        try {
+            final String pkg = ctx.getPackageName();
+            r = new java.io.BufferedReader(new java.io.FileReader("/proc/self/maps"));
+            String line;
+            while ((line = r.readLine()) != null) {
+                String[] arr = line.split("\\s+");
+                if (arr.length == 0) {
+                    continue;
+                }
+                String path = arr[arr.length - 1];
+                if (path.startsWith("/data/app/") && path.endsWith("/base.apk")
+                        && path.contains(pkg)) {
+                    return path;
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            if (r != null) {
+                try {
+                    r.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 投放普通资产（不 setReadOnly）。
+     *
+     * 与 extractAsset 的区别：那个是给 dex 用的（必须设只读，否则系统拒绝加载），
+     * 这是给 origin.apk 用的 —— 它只是个被读取的数据文件，不需要只读，
+     * 也不需要走 dex 的那套校验。
+     */
+    private static void extractAssetPlain(Context ctx, String name, java.io.File out)
+            throws Throwable {
+        java.io.InputStream in = ctx.getAssets().open(name);
+        try {
+            java.io.FileOutputStream os = new java.io.FileOutputStream(out);
+            try {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    os.write(buf, 0, n);
+                }
+                os.flush();
+            } finally {
+                os.close();
+            }
+        } finally {
+            in.close();
+        }
+    }
+
+    /** native 实现：安装 IO 重定向 hook。成功返回 true。 */
+    private static native boolean nativeHookApkPath(String apkPath, String repPath);
+
+    private static long assetSize(Context ctx, String name) throws Throwable {        android.content.res.AssetFileDescriptor fd = ctx.getAssets().openFd(name);
         try {
             return fd.getLength();
         } finally {

@@ -109,6 +109,114 @@ def _find_eocd(data):
     raise ValueError('未找到 EOCD（不是合法 ZIP/APK，或文件不完整）')
 
 
+
+def _extract_cert_from_v1(apk_path):
+    """从 META-INF/*.RSA|DSA|EC（PKCS#7 SignedData）里取第一张证书 DER。
+
+    纯 stdlib 手工解析 DER，不依赖 openssl（Termux 上未必有）。
+
+    PKCS#7 结构（RFC 2315）：
+      ContentInfo ::= SEQUENCE {
+        contentType OID,                      -- 1.2.840.113549.1.7.2 (signedData)
+        content [0] EXPLICIT {
+          SignedData ::= SEQUENCE {
+            version INTEGER,
+            digestAlgorithms SET,
+            contentInfo SEQUENCE,
+            certificates [0] IMPLICIT {       -- ← 证书在这里（一串 SEQUENCE）
+              Certificate ::= SEQUENCE { ... }
+              ...
+            },
+            ...
+          }
+        }
+      }
+
+    ⚠️ 两个容易搞错的点（都实际踩过）：
+      ① `read_tlv` 返回的第二个值必须是 **header 长度**，
+         内容起点 = `off + hdr`（不是直接拿 hdr 当偏移）
+      ② `[0] EXPLICIT` 里面还有一层 SignedData SEQUENCE，不能漏
+
+    找不到返回 None。
+    """
+    import zipfile as _zf
+    try:
+        with _zf.ZipFile(apk_path) as z:
+            cands = [n for n in z.namelist()
+                     if n.startswith('META-INF/')
+                     and n.upper().endswith(('.RSA', '.DSA', '.EC'))]
+            if not cands:
+                return None
+            blob = z.read(sorted(cands)[0])
+    except Exception:
+        return None
+
+    def tlv(buf, off):
+        """读一个 DER TLV → (tag, content_start, content_len, total_len)"""
+        if off + 2 > len(buf):
+            return None
+        tag = buf[off]
+        l = buf[off + 1]
+        if l < 0x80:
+            hdr_len, clen = 2, l
+        elif l == 0x81:
+            if off + 3 > len(buf):
+                return None
+            hdr_len, clen = 3, buf[off + 2]
+        elif l == 0x82:
+            if off + 4 > len(buf):
+                return None
+            hdr_len, clen = 4, (buf[off + 2] << 8) | buf[off + 3]
+        elif l == 0x83:
+            if off + 5 > len(buf):
+                return None
+            hdr_len, clen = 5, (buf[off + 2] << 16) | (buf[off + 3] << 8) | buf[off + 4]
+        else:
+            return None
+        cstart = off + hdr_len
+        if cstart + clen > len(buf):
+            return None
+        return tag, cstart, clen, hdr_len + clen
+
+    # 外层 ContentInfo SEQUENCE
+    t = tlv(blob, 0)
+    if not t or t[0] != 0x30:
+        return None
+    pos = t[1]                      # 内容起点
+    # contentType OID
+    t2 = tlv(blob, pos)
+    if not t2 or t2[0] != 0x06:
+        return None
+    pos += t2[3]
+    # content [0]
+    t3 = tlv(blob, pos)
+    if not t3 or t3[0] != 0xA0:
+        return None
+    pos = t3[1]
+    # SignedData SEQUENCE
+    t4 = tlv(blob, pos)
+    if not t4 or t4[0] != 0x30:
+        return None
+    pos = t4[1]
+    # 跳过 version(INTEGER) / digestAlgorithms(SET) / contentInfo(SEQUENCE)
+    for _ in range(3):
+        tt = tlv(blob, pos)
+        if not tt:
+            return None
+        pos += tt[3]
+    # certificates [0] IMPLICIT
+    tc = tlv(blob, pos)
+    if not tc or tc[0] != 0xA0:
+        return None
+    # 里面第一项就是第一张 Certificate SEQUENCE
+    first = tlv(blob, tc[1])
+    if not first or first[0] != 0x30:
+        return None
+    # 返回第一张证书的完整 DER（TLV 起点 = 内容起点 - header 长度）
+    cert_start = first[1] - (first[3] - first[2])
+    return blob[cert_start:cert_start + first[3]]
+
+
 def extract_cert_der(apk_path):
     """取第一张签名者证书 DER。
 
@@ -128,10 +236,21 @@ def extract_cert_der(apk_path):
         raise ValueError('central directory 偏移异常')
 
     if data[cd_off - 16:cd_off] != SIG_BLOCK_MAGIC:
+        # ── v1 兜底：从 META-INF/*.RSA|DSA|EC 里解析 PKCS#7 取证书
+        #
+        # 为什么需要（2026-11-23 踩坑）：
+        #   apply-mods.py 首版重打包时用 zipfile 逐条复制，
+        #   把 APK Signing Block 丢了 → 产物是 v1-only 包 →
+        #   这里直接抛错，整个去校验流程失败。
+        #   （apply-mods 已修为保留签名块；此处仍加兜底，
+        #     因为用户送来的包也可能是 v1-only —— 比如用旧工具重签过）
+        v1_cert = _extract_cert_from_v1(apk_path)
+        if v1_cert is not None:
+            return v1_cert
         raise ValueError(
-            '未找到 APK Signing Block（无 v2/v3 签名）。\n'
-            '  v1-only（JAR 签名）的包无法从中提取证书 —— 请用 v2+ 签名的包，'
-            '或先用 apksigner 重签一次。')
+            '未找到 APK Signing Block（无 v2/v3 签名），'
+            '且 META-INF 里也没有可解析的 v1 证书。\n'
+            '  请检查输入包是否被工具破坏过签名结构。')
     size_total = struct.unpack_from('<Q', data, cd_off - 24)[0]
     if size_total + 8 > cd_off:
         raise ValueError('Signing Block 大小异常')

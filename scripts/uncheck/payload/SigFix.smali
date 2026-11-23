@@ -6,6 +6,12 @@
 
 .field private static final CONFIG_ASSET:Ljava/lang/String; = "nc_sigfix/sigfix.json"
 
+.field private static final NATIVE_LIB:Ljava/lang/String; = "usign"
+
+.field private static final ORIGIN_ASSET:Ljava/lang/String; = "nc_sigfix/origin.apk"
+
+.field private static final ORIGIN_FILE:Ljava/lang/String; = "sigfix-origin.apk"
+
 .field private static final PAYLOAD_ASSET:Ljava/lang/String; = "nc_sigfix/payload.dex"
 
 .field private static final PAYLOAD_CLASS:Ljava/lang/String; = "com.nc.uncheck.SigFixImpl"
@@ -15,6 +21,8 @@
 .field private static final TAG:Ljava/lang/String; = "SigFix"
 
 .field private static volatile sDone:Z
+
+.field private static volatile sNativeDone:Z
 
 # direct methods
 .method static constructor <clinit>()V
@@ -79,6 +87,8 @@
     const-string v1, "SigFix"
 
     const-string v2, "payload \u7c7b\u5df2\u52a0\u8f7d\uff08BootClassLoader \u57df\uff09: "
+
+    invoke-static {p0}, Lcom/nc/uncheck/SigFix;->installNativeRedirect(Landroid/content/Context;)V
 
     new-instance v3, Ljava/io/File;
 
@@ -537,6 +547,79 @@
     throw p1
 .end method
 
+.method private static extractAssetPlain(Landroid/content/Context;Ljava/lang/String;Ljava/io/File;)V
+    .locals 2
+    .annotation system Ldalvik/annotation/Throws;
+        value = {
+            Ljava/lang/Throwable;
+        }
+    .end annotation
+
+    invoke-virtual {p0}, Landroid/content/Context;->getAssets()Landroid/content/res/AssetManager;
+
+    move-result-object p0
+
+    invoke-virtual {p0, p1}, Landroid/content/res/AssetManager;->open(Ljava/lang/String;)Ljava/io/InputStream;
+
+    move-result-object p0
+
+    :try_start_0
+    new-instance p1, Ljava/io/FileOutputStream;
+
+    invoke-direct {p1, p2}, Ljava/io/FileOutputStream;-><init>(Ljava/io/File;)V
+    :try_end_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_1
+
+    const/high16 p2, 0x10000
+
+    :try_start_1
+    new-array p2, p2, [B
+
+    :goto_0
+    invoke-virtual {p0, p2}, Ljava/io/InputStream;->read([B)I
+
+    move-result v0
+
+    if-lez v0, :cond_0
+
+    const/4 v1, 0x0
+
+    invoke-virtual {p1, p2, v1, v0}, Ljava/io/FileOutputStream;->write([BII)V
+
+    goto :goto_0
+
+    :cond_0
+    invoke-virtual {p1}, Ljava/io/FileOutputStream;->flush()V
+    :try_end_1
+    .catchall {:try_start_1 .. :try_end_1} :catchall_0
+
+    :try_start_2
+    invoke-virtual {p1}, Ljava/io/FileOutputStream;->close()V
+    :try_end_2
+    .catchall {:try_start_2 .. :try_end_2} :catchall_1
+
+    invoke-virtual {p0}, Ljava/io/InputStream;->close()V
+
+    return-void
+
+    :catchall_0
+    move-exception p2
+
+    :try_start_3
+    invoke-virtual {p1}, Ljava/io/FileOutputStream;->close()V
+
+    throw p2
+    :try_end_3
+    .catchall {:try_start_3 .. :try_end_3} :catchall_1
+
+    :catchall_1
+    move-exception p1
+
+    invoke-virtual {p0}, Ljava/io/InputStream;->close()V
+
+    throw p1
+.end method
+
 .method public static install(Landroid/content/Context;)V
     .locals 3
 
@@ -688,6 +771,289 @@
     invoke-static {v1, p0}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;)I
 
     return-void
+.end method
+
+.method private static installNativeRedirect(Landroid/content/Context;)V
+    .locals 15
+
+    const-string v0, "nc_sigfix/origin.apk"
+
+    const-string v1, "native \u91cd\u5b9a\u5411\u5df2\u751f\u6548: "
+
+    const-string v2, "native \u5e93\u5df2\u52a0\u8f7d: "
+
+    const-string v3, "\u627e\u4e0d\u5230 native \u5e93: "
+
+    const-string v4, "origin.apk \u5df2\u91ca\u653e: "
+
+    const-string v5, "origin.apk \u5df2\u5b58\u5728\uff0c\u590d\u7528: "
+
+    sget-boolean v6, Lcom/nc/uncheck/SigFix;->sNativeDone:Z
+
+    const-string v7, "SigFix"
+
+    if-eqz v6, :cond_0
+
+    const-string p0, "native hook \u5df2\u5b89\u88c5\uff0c\u8df3\u8fc7"
+
+    invoke-static {v7, p0}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+
+    :cond_0
+    :try_start_0
+    invoke-static {p0}, Lcom/nc/uncheck/SigFix;->resolveApkPath(Landroid/content/Context;)Ljava/lang/String;
+
+    move-result-object v6
+
+    if-nez v6, :cond_1
+
+    const-string p0, "\u62ff\u4e0d\u5230\u81ea\u8eab APK \u8def\u5f84\uff0c\u8df3\u8fc7 native \u91cd\u5b9a\u5411"
+
+    invoke-static {v7, p0}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+
+    :cond_1
+    new-instance v8, Ljava/io/File;
+
+    invoke-virtual {p0}, Landroid/content/Context;->getCodeCacheDir()Ljava/io/File;
+
+    move-result-object v9
+
+    const-string v10, "sigfix-origin.apk"
+
+    invoke-direct {v8, v9, v10}, Ljava/io/File;-><init>(Ljava/io/File;Ljava/lang/String;)V
+
+    invoke-static {p0, v0}, Lcom/nc/uncheck/SigFix;->assetSize(Landroid/content/Context;Ljava/lang/String;)J
+
+    move-result-wide v9
+
+    invoke-virtual {v8}, Ljava/io/File;->isFile()Z
+
+    move-result v11
+    :try_end_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_0
+
+    const-string v12, " B"
+
+    if-eqz v11, :cond_2
+
+    :try_start_1
+    invoke-virtual {v8}, Ljava/io/File;->length()J
+
+    move-result-wide v13
+
+    cmp-long v11, v13, v9
+
+    if-nez v11, :cond_2
+
+    const-wide/16 v13, 0x0
+
+    cmp-long v11, v9, v13
+
+    if-lez v11, :cond_2
+
+    new-instance v0, Ljava/lang/StringBuilder;
+
+    invoke-direct {v0, v5}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v8}, Ljava/io/File;->length()J
+
+    move-result-wide v4
+
+    invoke-virtual {v0, v4, v5}, Ljava/lang/StringBuilder;->append(J)Ljava/lang/StringBuilder;
+
+    move-result-object v0
+
+    invoke-virtual {v0, v12}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v0
+
+    invoke-virtual {v0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v0
+
+    invoke-static {v7, v0}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+
+    goto :goto_0
+
+    :cond_2
+    invoke-virtual {v8}, Ljava/io/File;->exists()Z
+
+    move-result v5
+
+    if-eqz v5, :cond_3
+
+    invoke-virtual {v8}, Ljava/io/File;->delete()Z
+
+    move-result v5
+
+    if-nez v5, :cond_3
+
+    const-string v5, "\u65e7 origin.apk \u5220\u4e0d\u6389\uff0c\u5c1d\u8bd5\u8986\u76d6"
+
+    invoke-static {v7, v5}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    :cond_3
+    invoke-static {p0, v0, v8}, Lcom/nc/uncheck/SigFix;->extractAssetPlain(Landroid/content/Context;Ljava/lang/String;Ljava/io/File;)V
+
+    new-instance v0, Ljava/lang/StringBuilder;
+
+    invoke-direct {v0, v4}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v8}, Ljava/io/File;->length()J
+
+    move-result-wide v4
+
+    invoke-virtual {v0, v4, v5}, Ljava/lang/StringBuilder;->append(J)Ljava/lang/StringBuilder;
+
+    move-result-object v0
+
+    invoke-virtual {v0, v12}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v0
+
+    invoke-virtual {v0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v0
+
+    invoke-static {v7, v0}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+
+    :goto_0
+    invoke-virtual {p0}, Landroid/content/Context;->getApplicationInfo()Landroid/content/pm/ApplicationInfo;
+
+    move-result-object p0
+
+    iget-object p0, p0, Landroid/content/pm/ApplicationInfo;->nativeLibraryDir:Ljava/lang/String;
+
+    new-instance v0, Ljava/io/File;
+
+    const-string v4, "libusign.so"
+
+    invoke-direct {v0, p0, v4}, Ljava/io/File;-><init>(Ljava/lang/String;Ljava/lang/String;)V
+
+    invoke-virtual {v0}, Ljava/io/File;->isFile()Z
+
+    move-result p0
+
+    if-nez p0, :cond_4
+
+    new-instance p0, Ljava/lang/StringBuilder;
+
+    invoke-direct {p0, v3}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v0}, Ljava/io/File;->getAbsolutePath()Ljava/lang/String;
+
+    move-result-object v0
+
+    invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p0
+
+    const-string v0, "\uff08\u8be5 ABI \u672a\u6295\u653e\uff1f\uff09\uff0c\u8df3\u8fc7 native \u91cd\u5b9a\u5411"
+
+    invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p0
+
+    invoke-virtual {p0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object p0
+
+    invoke-static {v7, p0}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+
+    :cond_4
+    invoke-virtual {v0}, Ljava/io/File;->getAbsolutePath()Ljava/lang/String;
+
+    move-result-object p0
+
+    invoke-static {p0}, Ljava/lang/System;->load(Ljava/lang/String;)V
+
+    new-instance p0, Ljava/lang/StringBuilder;
+
+    invoke-direct {p0, v2}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v0}, Ljava/io/File;->getAbsolutePath()Ljava/lang/String;
+
+    move-result-object v0
+
+    invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p0
+
+    invoke-virtual {p0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object p0
+
+    invoke-static {v7, p0}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+
+    invoke-virtual {v8}, Ljava/io/File;->getAbsolutePath()Ljava/lang/String;
+
+    move-result-object p0
+
+    invoke-static {v6, p0}, Lcom/nc/uncheck/SigFix;->nativeHookApkPath(Ljava/lang/String;Ljava/lang/String;)Z
+
+    move-result p0
+
+    if-eqz p0, :cond_5
+
+    const/4 p0, 0x1
+
+    sput-boolean p0, Lcom/nc/uncheck/SigFix;->sNativeDone:Z
+
+    new-instance p0, Ljava/lang/StringBuilder;
+
+    invoke-direct {p0, v1}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {p0, v6}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p0
+
+    const-string v0, " -> "
+
+    invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p0
+
+    invoke-virtual {v8}, Ljava/io/File;->getAbsolutePath()Ljava/lang/String;
+
+    move-result-object v0
+
+    invoke-virtual {p0, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p0
+
+    invoke-virtual {p0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object p0
+
+    invoke-static {v7, p0}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+
+    :cond_5
+    const-string p0, "native \u91cd\u5b9a\u5411\u8fd4\u56de\u5931\u8d25\uff08\u53bb\u6821\u9a8c\u4ec5\u5269 Java \u5c42\u751f\u6548\uff09"
+
+    invoke-static {v7, p0}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;)I
+    :try_end_1
+    .catchall {:try_start_1 .. :try_end_1} :catchall_0
+
+    return-void
+
+    :catchall_0
+    move-exception p0
+
+    const-string v0, "native \u91cd\u5b9a\u5411\u5b89\u88c5\u5931\u8d25\uff08\u4ec5 Java \u5c42\u751f\u6548\uff09"
+
+    invoke-static {v7, v0, p0}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Throwable;)I
+
+    return-void
+.end method
+
+.method private static native nativeHookApkPath(Ljava/lang/String;Ljava/lang/String;)Z
 .end method
 
 .method private static readCertFromConfig(Landroid/content/Context;)Ljava/lang/String;
@@ -853,4 +1219,149 @@
     :catchall_4
     :cond_4
     throw p0
+.end method
+
+.method private static resolveApkPath(Landroid/content/Context;)Ljava/lang/String;
+    .locals 4
+
+    :try_start_0
+    invoke-virtual {p0}, Landroid/content/Context;->getApplicationInfo()Landroid/content/pm/ApplicationInfo;
+
+    move-result-object v0
+
+    iget-object v0, v0, Landroid/content/pm/ApplicationInfo;->sourceDir:Ljava/lang/String;
+
+    if-eqz v0, :cond_0
+
+    const-string v1, ".apk"
+
+    invoke-virtual {v0, v1}, Ljava/lang/String;->endsWith(Ljava/lang/String;)Z
+
+    move-result v1
+
+    if-eqz v1, :cond_0
+
+    new-instance v1, Ljava/io/File;
+
+    invoke-direct {v1, v0}, Ljava/io/File;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v1}, Ljava/io/File;->isFile()Z
+
+    move-result v1
+    :try_end_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_0
+
+    if-eqz v1, :cond_0
+
+    return-object v0
+
+    :catchall_0
+    :cond_0
+    const/4 v0, 0x0
+
+    :try_start_1
+    invoke-virtual {p0}, Landroid/content/Context;->getPackageName()Ljava/lang/String;
+
+    move-result-object p0
+
+    new-instance v1, Ljava/io/BufferedReader;
+
+    new-instance v2, Ljava/io/FileReader;
+
+    const-string v3, "/proc/self/maps"
+
+    invoke-direct {v2, v3}, Ljava/io/FileReader;-><init>(Ljava/lang/String;)V
+
+    invoke-direct {v1, v2}, Ljava/io/BufferedReader;-><init>(Ljava/io/Reader;)V
+    :try_end_1
+    .catchall {:try_start_1 .. :try_end_1} :catchall_3
+
+    :cond_1
+    :goto_0
+    :try_start_2
+    invoke-virtual {v1}, Ljava/io/BufferedReader;->readLine()Ljava/lang/String;
+
+    move-result-object v2
+
+    if-eqz v2, :cond_3
+
+    const-string v3, "\\s+"
+
+    invoke-virtual {v2, v3}, Ljava/lang/String;->split(Ljava/lang/String;)[Ljava/lang/String;
+
+    move-result-object v2
+
+    array-length v3, v2
+
+    if-nez v3, :cond_2
+
+    goto :goto_0
+
+    :cond_2
+    array-length v3, v2
+
+    add-int/lit8 v3, v3, -0x1
+
+    aget-object v2, v2, v3
+
+    const-string v3, "/data/app/"
+
+    invoke-virtual {v2, v3}, Ljava/lang/String;->startsWith(Ljava/lang/String;)Z
+
+    move-result v3
+
+    if-eqz v3, :cond_1
+
+    const-string v3, "/base.apk"
+
+    invoke-virtual {v2, v3}, Ljava/lang/String;->endsWith(Ljava/lang/String;)Z
+
+    move-result v3
+
+    if-eqz v3, :cond_1
+
+    invoke-virtual {v2, p0}, Ljava/lang/String;->contains(Ljava/lang/CharSequence;)Z
+
+    move-result v3
+    :try_end_2
+    .catchall {:try_start_2 .. :try_end_2} :catchall_2
+
+    if-eqz v3, :cond_1
+
+    :try_start_3
+    invoke-virtual {v1}, Ljava/io/BufferedReader;->close()V
+    :try_end_3
+    .catchall {:try_start_3 .. :try_end_3} :catchall_1
+
+    :catchall_1
+    return-object v2
+
+    :cond_3
+    :goto_1
+    :try_start_4
+    invoke-virtual {v1}, Ljava/io/BufferedReader;->close()V
+    :try_end_4
+    .catchall {:try_start_4 .. :try_end_4} :catchall_4
+
+    goto :goto_3
+
+    :catchall_2
+    nop
+
+    goto :goto_2
+
+    :catchall_3
+    nop
+
+    move-object v1, v0
+
+    :goto_2
+    if-eqz v1, :cond_4
+
+    goto :goto_1
+
+    :catchall_4
+    :cond_4
+    :goto_3
+    return-object v0
 .end method

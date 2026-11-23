@@ -24,6 +24,7 @@ CLI 契约（与 AGENTS.md §4「模块 = 独立脚本 + <输入> <输出> [参�
 
 ⚠️ 产物未签名。装上之前必须自己签（本模块不碰 keystore）。
 """
+import importlib.util
 import json
 import os
 import re
@@ -117,6 +118,23 @@ def assemble_smali(decompiled_dir, out_dex, api):
 
 # ───────────────────────── zip 组装 ─────────────────────────
 
+def _load_module(name, relpath):
+    """加载文件名带连字符、不能常规 import 的模块。
+
+    与 inject.py 的同名函数保持一致的语义（路径按本文件位置推算）。
+    """
+    # relpath 形如 ('scripts', 'uncheck', 'zip-reuse.py')，相对**仓库根**。
+    # _HERE = scripts/uncheck，所以往上退两级。
+    root = os.path.dirname(os.path.dirname(_HERE))
+    path = os.path.join(root, *relpath)
+    if not os.path.isfile(path):
+        raise RuntimeError(f'找不到依赖模块: {path}')
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def rebuild_apk(src_apk, dst_apk, replace_entries):
     """按原包条目顺序重打包，替换/新增指定条目。
 
@@ -144,7 +162,11 @@ def rebuild_apk(src_apk, dst_apk, replace_entries):
                 if name in names:
                     continue
                 zi = zipfile.ZipInfo(name)
-                zi.compress_type = zipfile.ZIP_DEFLATED
+                # origin.apk / .so 用 STORED：体积大且运行时需要随机访问
+                if name.endswith('.apk') or name.endswith('.so'):
+                    zi.compress_type = zipfile.ZIP_STORED
+                else:
+                    zi.compress_type = zipfile.ZIP_DEFLATED
                 zout.writestr(zi, data)
 
 
@@ -164,7 +186,7 @@ def zipalign(src, dst):
 
 # ───────────────────────── 主流程 ─────────────────────────
 
-def run(in_apk, out_apk, keep_work=None, api=30):
+def run(in_apk, out_apk, keep_work=None, api=30, full_origin=False):
     if not os.path.isfile(in_apk):
         raise RuntimeError(f'输入 APK 不存在: {in_apk}')
     if not os.path.isfile(APKTOOL):
@@ -305,6 +327,44 @@ def run(in_apk, out_apk, keep_work=None, api=30):
         replaced['assets/nc_sigfix/payload.dex'] = payload_bytes
         print(f'==> 投放 assets/nc_sigfix/payload.dex（{len(payload_bytes)} B）')
 
+        # 6aa) native 层 IO 重定向（libusign.so）+ origin.apk
+        #
+        # 为什么必须加这层：囧次元这类 App 在 native 里直接
+        # open("/data/app/.../base.apk") 解析 APK Signing Block 取证书，
+        # Java 层三层 hook（CREATOR / PMS 代理 / signingInfo）全部无效。
+        # 这里用 XHook 把 open/open64/openat/openat64 的 base.apk 路径
+        # 重定向到 origin.apk（= 原签名 APK 完整副本）。
+        lib_dir = os.path.join(_HERE, 'payload', 'lib')
+        if os.environ.get('USIGN_NO_NATIVE') == '1':
+            print('==> USIGN_NO_NATIVE=1：跳过 libusign.so 投放（诊断：native hook 是否干扰广告 SDK）')
+        else:
+            for abi, so_name in (('arm64-v8a', 'libusign_arm64.so'),
+                                 ('armeabi-v7a', 'libusign_armv7.so')):
+                so_path = os.path.join(lib_dir, so_name)
+                if os.path.isfile(so_path):
+                    with open(so_path, 'rb') as f:
+                        replaced[f'lib/{abi}/libusign.so'] = f.read()
+                    print(f'==> 投放 lib/{abi}/libusign.so（{os.path.getsize(so_path)} B）')
+                else:
+                    print(f'⚠️ 缺 {so_path}，native 层不覆盖')
+
+        # 6ab) origin.apk 不再作为普通条目投放 —— 改用数据复用打包
+        #
+        # 为什么（2026-11-23 实测结论，别重试 min-origin）：
+        #   去签名校验需要 origin.apk（原签名 APK 副本），普通投放让体积翻倍：
+        #   囧次元 127MB → 254MB。
+        #   试过"最小化 origin.apk"（只留签名块 + 中央目录，4KB）→ 真机崩溃
+        #   NoClassDefFoundError：IO 重定向会连 ART 的 dex 懒加载一起劫持，
+        #   min-origin 的 ZIP 骨架合法但条目全空，ART 以为拿到正确 APK 却读不到
+        #   classes9.dex。三组对照实验见 docs/签名校验接手文档.md §6 待办 2。
+        #
+        # 正解 = 数据复用（FancyBypass 的做法，实测反推）：
+        #   origin.apk 的数据区与"整个 APK 的字节"共享，物理上只存一份。
+        #   本文件的 origin 投放改为标记，由 zip-reuse.py 在最后一步完成，
+        #   见下方「数据复用打包」段。
+        need_origin_reuse = True
+
+
         # 6a) 投放配置文件：证书 + 原 Application 类名。
         #
         # 这些是**唯一的目标相关数据**，全部集中在这份小 JSON 里。
@@ -314,6 +374,10 @@ def run(in_apk, out_apk, keep_work=None, api=30):
             'cert': cert_b64,
             'originalApp': original_app_java or '',
         }
+        if os.environ.get('USIGN_NO_SIGFIX') == '1':
+            cfg['cert'] = ''   # 诊断：让 SigFix.install 读不到证书而提前 return（Java hook 全禁）
+        if os.environ.get('USIGN_MIN_PROXY') == '1':
+            cfg['minProxy'] = True   # 最小代理：不清 mBase / 不替换 mInitialApplication（广告兼容）
         cfg_bytes = _json.dumps(cfg, ensure_ascii=False).encode('utf-8')
         replaced['assets/nc_sigfix/sigfix.json'] = cfg_bytes
         print(f'==> 投放 assets/nc_sigfix/sigfix.json'
@@ -335,10 +399,20 @@ def run(in_apk, out_apk, keep_work=None, api=30):
             raise RuntimeError(
                 '解包出的 AndroidManifest.xml 不是二进制 AXML。\n'
                 '  改 Manifest 的流程要求 apktool 解包时带 -r（保持二进制）。')
-        replaced['AndroidManifest.xml'] = mf_bytes
-        print(f'==> 写回改写后的 AndroidManifest.xml（{len(mf_bytes)} B）')
+        if os.environ.get('USIGN_NO_MANIFEST') == '1':
+            print('==> USIGN_NO_MANIFEST=1：不写回 Manifest（保持原 Application，SigFixApp 代理禁用）')
+        else:
+            replaced['AndroidManifest.xml'] = mf_bytes
+            print(f'==> 写回改写后的 AndroidManifest.xml（{len(mf_bytes)} B）')
 
         # 7) 组装
+        #
+        # 分两步：
+        #   a) 先用常规方式产出「不含 origin.apk 的中间包」（业务补丁/payload/so 都在里面）
+        #   b) 再用 zip-reuse 把中间包的全字节作为 origin.apk 的数据共享进去
+        #
+        # 为什么不在 rebuilt 里直接加 origin：常规 ZIP 写入器无法让两个条目
+        # 共享同一片物理字节，只能复制一份 → 体积翻倍。
         print('==> 组装 APK')
         tmp_apk = os.path.join(work, 'aligned_in.apk')
         rebuild_apk(in_apk, tmp_apk, replaced)
@@ -346,12 +420,53 @@ def run(in_apk, out_apk, keep_work=None, api=30):
             kind = '替换' if name in src_names else '新增'
             print(f'    {kind} {name}（{len(replaced[name])} B）')
 
-        # 7) 对齐
-        used = zipalign(tmp_apk, out_apk)
-        if used:
-            print(f'==> zipalign: {used}')
+        if need_origin_reuse:
+            # 复用前先对齐中间包：zipalign 会重写 ZIP，必须在"还没被
+            # 重叠共享"的时候做。复用之后只改 offset 表、不动数据，
+            # 对齐属性自然保留。
+            aligned_in = os.path.join(work, 'aligned_before_reuse.apk')
+            used = zipalign(tmp_apk, aligned_in)
+            if used:
+                print(f'==> zipalign（复用前）: {used}')
+                tmp_apk = aligned_in
+            else:
+                print('⚠️ 未对齐（找不到 zipalign），产物可能未 4 字节对齐')
+
+            print('==> 数据复用打包（origin.apk 与整包共享字节）')
+            reuse_mod = _load_module('zip_reuse', ('scripts', 'uncheck', 'zip-reuse.py'))
+            reused = os.path.join(work, 'reused.apk')
+            st = reuse_mod.build(tmp_apk, reused)
+            print(f'    中间包 {st["src_size"]/1e6:.2f} MB '
+                  f'→ 复用包 {st["out_size"]/1e6:.2f} MB '
+                  f'（仅增加 {st["out_size"]-st["src_size"]} B 头开销）')
+            probs = reuse_mod.verify(reused)
+            if probs:
+                raise RuntimeError('数据复用自检失败: ' + '; '.join(probs))
+            print('    自检通过：origin.apk 是完整 APK，各条目可读')
+            tmp_apk = reused
+
+        # 8) 输出
+        #
+        # ⚠️ 数据复用包**绝不能 zipalign**。
+        #
+        # 实测（2026-11-23）：zipalign 会重写整个 ZIP，把"重叠共享"的字节
+        # 展开成两份独立数据 —— 127.96MB 的复用包被撑回 255.6MB，
+        # 数据复用完全失效。
+        #
+        # 对齐已在**中间包**阶段做过（rebuild_apk 后的 tmp_apk 若需要对齐，
+        # 由 zipalign 在复用前处理）；复用只是改 ZIP 的 offset 表，
+        # 条目数据本身没有移动，对齐属性保留。
+        #
+        # 若 --full-origin（不复用），则照常对齐。
+        if need_origin_reuse:
+            shutil.copyfile(tmp_apk, out_apk)
+            print('==> 数据复用包跳过 zipalign（对齐会破坏重叠共享结构）')
         else:
-            print('⚠️ 未找到 zipalign，产物未对齐（apksigner 签之前请自行 zipalign）')
+            used = zipalign(tmp_apk, out_apk)
+            if used:
+                print(f'==> zipalign: {used}')
+            else:
+                print('⚠️ 未找到 zipalign，产物未对齐（apksigner 签之前请自行 zipalign）')
 
         print(f'\n✅ 完成: {out_apk} ({os.path.getsize(out_apk)} B)')
         print('   产物未签名 —— 请用你自己的 keystore 签:')
@@ -369,6 +484,7 @@ def main(argv):
     in_apk, out_apk = argv[1], argv[2]
     keep = None
     api = 30
+    full_origin = False
     i = 3
     while i < len(argv):
         if argv[i] == '--keep-work' and i + 1 < len(argv):
@@ -377,11 +493,15 @@ def main(argv):
         elif argv[i] == '--api' and i + 1 < len(argv):
             api = int(argv[i + 1])
             i += 2
+        elif argv[i] == '--full-origin':
+            # origin.apk 用全量副本（回退方案）：体积翻倍，但兼容任何读法
+            full_origin = True
+            i += 1
         else:
             print(f'未知参数: {argv[i]}', file=sys.stderr)
             return 2
     try:
-        run(in_apk, out_apk, keep, api)
+        run(in_apk, out_apk, keep, api, full_origin)
     except (RuntimeError, ValueError) as e:
         print(f'❌ {e}', file=sys.stderr)
         return 1
