@@ -97,28 +97,14 @@ EOF
     echo "  [abi] ⚠️ 单 ABI 构建（NC_APP_ABI=$abis）—— 产物不完整，不可发布" >&2
   fi
 
-  # ── 调试报告（2026-11-19）────────────────────────────────────────
-  # 默认【不定义】NCGUARD_DEBUG_REPORT → nc_guard_report.c 的
-  # ncg_debug_log_path() 整段被编译掉，产物里 strings 搜不到
-  # xixin_debug / NCG_REPORT_PATH（外部 0 信息逆向报告标 ★★★ 的弱点）。
-  #
-  # 要出调试包时设 DEBUG_REPORT=1：
-  #     python3 scripts/trigger_build.py app.apk --sigcheck --vmp --debug-report
-  #
-  # ⚠️ 调试包不能发给用户（带调试开关），但强度与正式包相同，可用于真机排障。
-  # ⚠️ 这是【临时调试开关】，不是产品选项：不走 config-schema.json。
-  if [[ "${DEBUG_REPORT:-0}" == "1" ]]; then
-    cat >> "$jni/Application.mk" <<'DBGEOF'
-
-# ── 调试自检报告（DEBUG_REPORT=1 时开启）─────────────────────────
-# 让 nc_guard_report.c 的 ncg_debug_log_path() 参与编译 →
-# 报告写到 /storage/emulated/0/Android/data/<包名>/files/ncguard_log.md
-# 开关哨兵仍为 /storage/emulated/0/xixin_debug（或 NCG_REPORT_PATH 环境变量）
-APP_CFLAGS  += -DNCGUARD_DEBUG_REPORT
-APP_CPPFLAGS += -DNCGUARD_DEBUG_REPORT
-DBGEOF
-    echo "  [mk] ⚠️ DEBUG_REPORT=1：已编入自检报告（产物不可分发）"
-  fi
+  # ── 自检报告（2026-11-24：无条件编入，原 DEBUG_REPORT=1 开关废止）──
+  # 2026-11-19 曾把 nc_guard_report.c 的 ncg_debug_log_path() 整段
+  # 包在 #ifdef NCGUARD_DEBUG_REPORT 里（release 编译掉，0 信息逆向
+  # 报告标 ★★★ 的弱点）—— 代价是排障必须重打包，线上问题没法查。
+  # 2026-11-24 用户决策：开源阶段可维护性优先 —— 报告无条件编入，
+  # 哨兵/env/日志路径在 nox 侧走 nc_guard_paths 密文表（.rodata 零明文，
+  # strings 扫不到）。运行期开关：touch /storage/emulated/0/xixin_debug。
+  # （DEBUG_REPORT=1 / --debug-report 参数保留但已无作用，传不传一样。）
   # ── Amice 混淆（2026-11-05）──────────────────────────────────────
   # 为什么追加而不是改上面的 heredoc：上面的 APP_CFLAGS 是 'EOF' 单引号
   # heredoc（不展开变量），而这里要用 $obf_spec 做条件判断，混在一起会让
