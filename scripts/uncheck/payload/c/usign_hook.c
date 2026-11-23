@@ -38,6 +38,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <dirent.h>
 #include <android/log.h>
 #include <pthread.h>
 
@@ -66,6 +67,8 @@ typedef FILE *(*fopen_t)(const char *, const char *);
 typedef int   (*access_t)(const char *, int);
 typedef int   (*stat_t)(const char *, struct stat *);
 typedef int   (*faccessat_t)(int, const char *, int, int);
+typedef ssize_t (*readlink_t)(const char *, char *, size_t);
+typedef DIR  *(*opendir_t)(const char *);
 
 static open_t      orig_open      = NULL;
 static open_t      orig_open64    = NULL;
@@ -77,6 +80,8 @@ static faccessat_t orig_faccessat = NULL;
 static stat_t      orig_stat      = NULL;
 static stat_t      orig_lstat     = NULL;
 static stat_t      orig___stat    = NULL;
+static readlink_t  orig_readlink  = NULL;
+static opendir_t   orig_opendir   = NULL;
 
 // ─────────────────────────── 代理实现 ───────────────────────────
 
@@ -137,6 +142,36 @@ static int proxy_lstat(const char *path, struct stat *buf) {
     return orig_lstat(path, buf);
 }
 
+// ── readlink：fd 路径伪装 ──
+// libsupport.so 导入 readlink。目标 so 可以 readlink("/proc/self/fd/N")
+// 解析出 fd 的真实文件路径做一致性校验：open(base.apk) 被我们重定向后，
+// fd 实际指向 code_cache/sigfix-origin.apk —— readlink 一查就露馅
+// （路径对不上 base.apk）。代理：结果路径等于 rep_path 时改报 apk_path。
+static ssize_t proxy_readlink(const char *path, char *buf, size_t bufsiz) {
+    ssize_t r = orig_readlink(path, buf, bufsiz);
+    if (r > 0 && (size_t) r == strlen(s_rep_path)
+            && strncmp(buf, s_rep_path, (size_t) r) == 0) {
+        // fd 确实指向 origin.apk —— 谎报为安装包路径
+        ssize_t n = (ssize_t) strlen(s_apk_path);
+        if ((size_t) n <= bufsiz) {
+            memcpy(buf, s_apk_path, (size_t) n);
+            return n;
+        }
+    }
+    return r;
+}
+
+// ── opendir：目录打开重定向 ──
+// libzhuque/libsupport/libSecureFuck 都导入 opendir/readdir。主要风险点：
+// ① 目标 so opendir(base.apk 所在目录) 后 readdir 枚举——目录本身没有
+//    可疑条目（我们没在安装目录写东西），透传安全；
+// ② 但 code_cache 下有 sigfix-origin.apk / sigfix-payload.dex —— 若目标
+//    扫 code_cache 会发现注入痕迹。当前无证据表明它扫 code_cache，
+//    先透传并留好扩展点（若后续实测暴露，在此挂拦截）。
+static DIR *proxy_opendir(const char *path) {
+    return orig_opendir(path);
+}
+
 // ─────────────────────── hook 安装 ───────────────────────
 
 // xhook_register 的 pattern 传 ".*" —— 匹配所有已加载和后续加载的 so。
@@ -175,6 +210,13 @@ static void patch_all(void) {
     hook_one("faccessat", (void *) proxy_faccessat, (void **) &orig_faccessat);
     hook_one("stat",      (void *) proxy_stat,      (void **) &orig_stat);
     hook_one("lstat",     (void *) proxy_lstat,     (void **) &orig_lstat);
+    // 2026-11-23 补全（对照 so 导入表）：
+    //   libzhuque.so   : open/stat/lstat/mmap/read/opendir/readdir
+    //   libsupport.so  : access/fopen/mmap/read/opendir/readdir/readlink
+    //   libSecureFuck.so: __open_2/fopen/stat/mmap
+    // readlink 是 fd 路径一致性校验的关键漏点；opendir 先透传占位。
+    hook_one("readlink",  (void *) proxy_readlink,  (void **) &orig_readlink);
+    hook_one("opendir",   (void *) proxy_opendir,   (void **) &orig_opendir);
 
     // 统计关键函数是否挂上：open / __open_2 / fopen 是目标 so 的主力，
     // 加上 access / stat 共 5 个。至少 3 个成功才算可用。

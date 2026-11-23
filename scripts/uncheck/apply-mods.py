@@ -157,6 +157,10 @@ PATCH_CLASSES = [
     'com/yy/myuko/feature/riskcollector/binding/Hx.smali',
     'com/yy/myuko/shared/data/security/integrity/AndroidIntegrityInspector.smali',
     'com/yy/myuko/shared/data/behavior/risk/AndroidRiskEnvProbe.smali',
+    # I. UI 层终极拦截（2026-11-23）：服务器 verdict → 破解版引导页的唯一出口
+    #    toOfficialGuide 恒返回 null → 不管服务器怎么判定都不弹不换。
+    #    比伪造 39 处上报点更彻底（FourLink/SupportGuard 等漏网点都绕过了）。
+    # [已停用-未验证有效或有害] 'com/yy/myuko/shared/data/security/integrity/OfficialGuideNotifierKt.smali',
     # A. 广告绕过
     'com/yy/myuko/shared/presentation/ad/SdkRenderBridgeKt.smali',
     'com/yy/myuko/shared/domain/ad/AdSdkReadyGate.smali',
