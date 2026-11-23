@@ -82,6 +82,10 @@ tools/nox.zip → tools/nox/so-guard/      ← 生产分发形态（静态库）
 
 - **改设施 = 去 nox 仓库改**，冻结契约见该仓库的 `AGENTS.md`。本仓库对它的
   改动方式只有一种：换 `tools/nox.zip`（换版纪律见 `docs/流程文档.md` §3.13.5）。
+  ⚠️ **换入的 .a 必须是混淆版**（`-obf` 通道 / 设 `AMICE_BUNDLE`）——
+  Amice 混淆只能烧死在 nox 打包期，消费方无法事后补。2026-11-24
+  v0.9.48-maps-fix 绕过该通道，nox 层 VMP 静默丢失两个月无人察觉
+  （`test-so-lock.sh` 的 T34 现在会拦：无混淆必红）。
 - **本仓库不得复制 vendored 源码副本**——双源头必然漂移。
 - `nc_guard_layout.h` 仍是**加密契约的唯一真相源**（段名/slot 尺寸/偏移/magic
   seed/XOR 碎片表），但它现在位于 `tools/nox/so-guard/`（解压产物）与

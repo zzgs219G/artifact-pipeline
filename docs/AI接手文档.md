@@ -460,16 +460,24 @@ RELAY_TOKEN=... python3 scripts/trigger_build.py --sigcheck --stringenc \
 cd ../nox && ./test.sh          # 必须 23 通过 0 失败（2026-11-09 实测 23/0）
 
 # 分发包要更新（artifact-pipeline 消费的是 zip，不是你的工作区）
+# ⚠️⚠️ 2026-11-24 血的教训（v0.9.48-maps-fix 丢混淆事故）：
+#   make-zip-lib.sh 【没设 AMICE_BUNDLE 就是不混淆的普通编译】——
+#   上一手照旧流程直打，nox 设施层的 VMP/MBA 全部静默丢失，
+#   全部测试照绿（test-so-lock 用源码编译，不消费 .a），装机也正常 ——
+#   两个月后才发现生产包的解密链裸奔。
+#   生产 zip 必须带混淆，二选一：
+#   a)【推荐】nox 侧推 v0.9.48-maps-fix-obf 风格的 tag 走 release.yml（勾 obfuscate）
+#   b) 本地打：先 export AMICE_BUNDLE=<amice-android-ndk-bundle 解压目录>
 export ANDROID_NDK_HOME=/data/data/com.termux/files/home/android-ndk-r29-aarch64/android-ndk-r29
-cd ../nox && bash scripts/make-zip-lib.sh <版本号>          # 静态库形态（生产用）
-cd ../nox && bash scripts/make-zip-src.sh  <版本号>          # 源码形态（仅调试）
-cp ../nox/dist/nox-<版本>.zip /path/to/artifact-pipeline/tools/nox.zip
+cd ../nox && bash scripts/make-zip-lib.sh <版本号-obf>      # 静态库形态（生产用，版本名带 -obf）
+cd ../nox && bash scripts/make-zip-src.sh  <版本号>         # 源码形态（仅调试，不需混淆）
+cp ../nox/dist/nox-<版本-obf>.zip /path/to/artifact-pipeline/tools/nox.zip
 rm -rf /path/to/artifact-pipeline/tools/nox                 # 强制重新解压
 
 # 回到本仓库：先跑不依赖 NDK 的
 cd artifact-pipeline
 python3 scripts/actions/tests/test-docs-paths.py
-bash scripts/lib/tests/test-so-lock.sh                      # 52 项，需 ../nox 源码
+bash scripts/lib/tests/test-so-lock.sh   # T34 会断言 .a 混淆在位（无混淆必红）
 
 # 端到端
 RELAY_TOKEN='zzgs219' python3 scripts/trigger_build.py scripts/样本.apk --std --sign
@@ -486,8 +494,11 @@ CI 的 `setup-toolchain` action 会校验，源码形态会直接失败：
 ⚠️ **不要凭 `tools/nox.zip` 里的 `VERSION` 去写 CI 的 `ref`**——
 那是包版本（形如 `2026.11.02-final`），不是 git tag。nox 仓库的 tag
 当年凭 "v0.4.2" 猜 tag 导致 checkout 直接失败。要写就写取数命令，别抄具体 tag 名。
-⚠️ **打 tag 时注意**：nox 的 `release.yml` 只在 tag 名含 `-obf` 时启用 Amice/VMP；
-不带 `-obf` 出的是普通编译版 —— 验证 VMP 改动时必须带，否则等于没测。
+⚠️ **打 tag 时注意**：nox 的 `release.yml` 只在勾选 obfuscate 时用 Amice 混淆 .a；
+不带混淆出的 .a 是普通编译版。**这条不只关乎"验证 VMP 改动"** ——
+生产分发的 .a 一律要带混淆（混淆只能在 nox 打包时做，消费方拿到 .a 后
+无法再补），语境不是"改 VMP 才需要"。2026-11-24 v0.9.48-maps-fix 事故
+的根源之一就是本条原文把混淆说成"验证 VMP 改动时"的事，误导换包人跳过。
 
 ---
 

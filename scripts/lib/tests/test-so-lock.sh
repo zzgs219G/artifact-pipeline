@@ -44,6 +44,8 @@
 #       + 防回退）★ 2026-10-30
 #   T33 解密后代码页完整性校验（检测逻辑进加密段 / 入口留 .text /
 #       基线紧贴解密 / 未锁态放行）★ 2026-10-30
+#   T34 分发 .a 混淆在位（ncg_xor_key 指令数 ≥60 = VMP 形态）★ 2026-11-24
+#       —— v0.9.48-maps-fix 绕过 -obf 通道丢混淆的产物侧断言
 #
 # 用法：bash scripts/lib/tests/test-so-lock.sh
 set -uo pipefail
@@ -1469,5 +1471,58 @@ PYT33
 fi
 
 echo
+# ── T34 分发 .a 的混淆在位（2026-11-24，v0.9.48 丢混淆事故的产物侧断言）──
+#
+# 事故：v0.9.48-maps-fix 换包时走本地直打（未设 AMICE_BUNDLE）→
+#   libnox.a 是普通编译版，nox 设施层 VMP/MBA 全部静默丢失。三道防线
+#   全漏：换包流程文档没写混淆要求；make-zip-lib.sh 默认静默降级；
+#   本文件其余项用 ensure_nox_src【源码】编译 —— 根本不消费 .a，
+#   所以"换了个没混淆的 .a"在全部既有测试里都是绿的。
+#
+# 判据：反汇编 .a 里的 ncg_xor_key 数指令。基准出处：
+#   交接文档 §5.2 —— VMP 生效 ~210 条；未生效/被跳过 ~15 条。
+#   nc_guard_xor.c 头注 —— 该函数 2026-11-06 专门拆出来"以便单独 VMP"。
+#   阈值取 60（两态之间留余量）。
+# ⚠️ 若 nox 侧 VMP 清单变更（ncg_xor_key 不再在列），同步改本项的判据函数。
+# ⚠️ 本项在 v0.9.48-maps-fix 换成 -obf 版之前【必然红】—— 这是设计：
+#   活警报，直到 nox 侧补发混淆包（推 v0.9.48-*-obf tag 走 release.yml）。
+echo "── T34 分发 .a 混淆在位（防 v0.9.48 式静默降级复发）──"
+NOX_A=""
+for cand in "$ROOT/tools/nox.zip"; do
+    [ -f "$cand" ] && { NOX_A="$cand"; break; }
+done
+OBJDUMP=""
+for ocand in "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-objdump \
+             "$(command -v llvm-objdump || true)" \
+             "$(command -v objdump || true)"; do
+    [ -n "$ocand" ] && [ -x "$ocand" ] && { OBJDUMP="$ocand"; break; }
+done
+if [ -z "$NOX_A" ]; then
+    skip "T34 无 tools/nox.zip，跳过"
+elif [ -z "$OBJDUMP" ]; then
+    skip "T34 找不到 objdump/llvm-objdump（装 NDK 或 binutils 后可查），跳过"
+else
+    T34DIR=$(mktemp -d "${TMPDIR:-/tmp}/t34.XXXXXX" 2>/dev/null || mktemp -d "$HOME/.t34.XXXXXX")
+    if unzip -o -q "$NOX_A" 'nox/so-guard/lib/arm64-v8a/libnox.a' -d "$T34DIR" 2>/dev/null \
+       && [ -f "$T34DIR/nox/so-guard/lib/arm64-v8a/libnox.a" ]; then
+        N_INSN=$("$OBJDUMP" -d "$T34DIR/nox/so-guard/lib/arm64-v8a/libnox.a" \
+                 --disassemble-symbols=ncg_xor_key 2>/dev/null \
+                 | grep -cE '^[[:space:]]*[0-9a-f]+:')
+        if [ -z "$N_INSN" ] || [ "$N_INSN" -eq 0 ]; then
+            bad "T34 反汇编不出 ncg_xor_key（符号名变了？同步本项判据）"
+        elif [ "$N_INSN" -ge 60 ]; then
+            ok "T34 分发 .a 混淆在位（ncg_xor_key ${N_INSN} 条指令 ≥ 60，VMP 形态）"
+        else
+            bad "T34 分发 .a 【无混淆】（ncg_xor_key 仅 ${N_INSN} 条指令 < 60，普通编译形态）
+     → 当前 tools/nox.zip 绕过了 -obf 通道（v0.9.48-maps-fix 事故同型）。
+     → 补发：nox 侧推 v0.9.48-maps-fix-obf tag 走 release.yml（勾 obfuscate），
+       或本地 AMICE_BUNDLE=<bundle> make-zip-lib.sh；换包后删 tools/nox/ 重跑本测试。"
+        fi
+    else
+        bad "T34 解包 tools/nox.zip 失败（包损坏或路径变更）"
+    fi
+    rm -rf "$T34DIR"
+fi
+
 echo "=== 结果: $PASS 通过, $FAIL 失败 ==="
 [ "$FAIL" -eq 0 ] || exit 1
