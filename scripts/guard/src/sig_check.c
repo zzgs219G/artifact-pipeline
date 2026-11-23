@@ -1392,6 +1392,232 @@ static int nc_open_ro(const char *path) {
     return open(path, O_RDONLY);
 }
 
+/* ── 多路取证书（2026-11-24）────────────────────────────────────────
+ *
+ * ==== 为什么要有"多路" ====
+ * 原实现只走 `open()` 一条路。而「去签名校验」这类工具用 inline hook
+ * 把 `open(base.apk)` 重定向到一份诱饵 APK（证书是官方原版），
+ * 于是一次 hook 就让整条签名校验读到错误的证书并通过。
+ * 真机日志实证：打印的 path 是 base.apk，但 fsize=5066408 对应的是
+ * 诱饵包（真实 base.apk 是 10MB）——路径没变、打开的却是别的文件。
+ *
+ * 对策：用**多条互不依赖的取文件路径**各拿一次证书，交叉比对。
+ *   路 A: open()                 —— 最容易被 hook（保留，作诱饵探针）
+ *   路 B: openat(AT_FDCWD, ...)  —— 语义等价，但函数不同，常规 hook 常漏
+ *   路 C: syscall(__NR_openat)   —— 直投内核，不经 libc
+ *   路 D: 内联 svc #0（arm64/armv7）—— 连 syscall() 函数都不经
+ * 任何一路被拦截 → 该路的指纹与他人不同 → 判定被劫持 → fail-closed。
+ *
+ * ==== 降级策略（重要）====
+ * B/C/D 失败（seccomp 拦截、非 ARM 平台等）**不杀进程**，只记日志并跳过；
+ * 只有当「至少两路成功且指纹不一致」才判定被劫持。
+ * 理由是这几路属于"加强"而非"必需"：加进来是为了发现劫持，
+ * 不是为了在个别 ROM 上把正常包判死。
+ */
+
+/* 路径 ID：写在日志里，便于对照"哪一路拿到了什么"。
+ *
+ * ⚠️ 新增路线请【追加到末尾】并把 SIG_ROUTE_NUM 加一 —— 中间插入会让
+ *    历史日志里的 route= 编号含义漂移，排障时对不上。 */
+#define SIG_ROUTE_OPEN      0   /* open()               —— 最易被 hook，作诱饵探针 */
+#define SIG_ROUTE_OPENAT    1   /* openat()             —— 独立符号 */
+#define SIG_ROUTE_OPENAT64  2   /* openat64()           —— 又一个独立符号 */
+#define SIG_ROUTE_SYSCALL   3   /* syscall(__NR_openat) —— 不经 libc 封装 */
+#define SIG_ROUTE_SVC       4   /* 内联 svc #0          —— 连 syscall() 都不经 */
+#define SIG_ROUTE_FD        5   /* /proc/self/fd/N 复用系统已开的 fd */
+#define SIG_ROUTE_NUM       6
+
+/* 用指定路线打开 path。成功返回 fd，失败 -1（errno 不强求准确）。
+ *
+ * ⚠️ SIG_ROUTE_FD 不在此处理（它不 open，而是返回"已存在的 fd"），
+ *    见 sig_find_apk_fd()。 */
+SIG_SEC_MARKED_NOVMP
+static int sig_open_route(int route, const char *path) {
+    if (route == SIG_ROUTE_OPEN) {
+        return nc_open_ro(path);
+    }
+    if (route == SIG_ROUTE_OPENAT) {
+        /* ⚠️ 不走 nc_open_ro：那个是 open()，会被同一处 hook 命中。
+         * openat 是独立符号，常规路径重定向工具通常只挂 open/open64。 */
+        return openat(AT_FDCWD, path, O_RDONLY);
+    }
+    if (route == SIG_ROUTE_OPENAT64) {
+        return openat64(AT_FDCWD, path, O_RDONLY);
+    }
+#if defined(__aarch64__) || defined(__arm__)
+    if (route == SIG_ROUTE_SYSCALL) {
+        long r = syscall(__NR_openat, (long)AT_FDCWD, (long)path, (long)O_RDONLY, 0L);
+        return (int)r;
+    }
+    if (route == SIG_ROUTE_SVC) {
+        /* 内联 svc：连 libc 的 syscall() 都不经过。
+         * arm64: 号进 x8，参数 x0..x5。
+         * armv7: 号必须进 r7，但 r7 是【保留寄存器】（Thumb frame pointer），
+         *        clang 拒绝 `register long r7 __asm__("r7")`
+         *        （CI 实证 `error: write to reserved register 'R7'`）。
+         *        必须在内联汇编里显式 push/pop 保存恢复 —— 与
+         *        env_check.c:env_raw_syscall 的写法保持一致。 */
+        long r;
+#if defined(__aarch64__)
+        register long x8 __asm__("x8") = __NR_openat;
+        register long x0 __asm__("x0") = (long)AT_FDCWD;
+        register long x1 __asm__("x1") = (long)path;
+        register long x2 __asm__("x2") = (long)O_RDONLY;
+        register long x3 __asm__("x3") = 0L;
+        __asm__ volatile("svc #0"
+                         : "+r"(x0)
+                         : "r"(x8), "r"(x1), "r"(x2), "r"(x3)
+                         : "memory");
+        r = x0;
+#else
+        register long r0 __asm__("r0") = (long)AT_FDCWD;
+        register long r1 __asm__("r1") = (long)path;
+        __asm__ volatile(
+            "push {r7}\n\t"
+            "mov  r7, %[nr]\n\t"
+            "mov  r2, %[flags]\n\t"
+            "svc  #0\n\t"
+            "pop  {r7}"
+            : "+r"(r0)
+            : [nr] "r"((long)__NR_openat), [flags] "r"((long)O_RDONLY),
+              "r"(r1)
+            : "memory");
+        r = r0;
+#endif
+        return (int)r;
+    }
+#endif
+    return -1;
+}
+
+/* 路线名（只用于日志；不含敏感语义，不触发 LSG 密文化要求） */
+static const char *sig_route_name(int route) {
+    switch (route) {
+        case SIG_ROUTE_OPEN:     return "open";
+        case SIG_ROUTE_OPENAT:   return "openat";
+        case SIG_ROUTE_OPENAT64: return "openat64";
+        case SIG_ROUTE_SYSCALL:  return "syscall";
+        case SIG_ROUTE_SVC:      return "svc";
+        case SIG_ROUTE_FD:       return "sysfd";
+        default:                 return "?";
+    }
+}
+
+/* ── 路线 FD：复用内核里已打开的 base.apk 句柄 ──────────────────────
+ *
+ * ==== 为什么这条最抗 hook ====
+ * 前 5 条都是"自己发起一次 open"。无论用 open / openat / syscall / svc，
+ * 攻击者只要把**所有发起 open 的入口**都挂上，就能统一重定向。
+ *
+ * 本路线不发起 open：ART 在启动时为了加载 dex/res，通常已经持有
+ * base.apk 的 fd（`/proc/self/fd/N` → .../base.apk）。直接借用那个句柄，
+ * 读到的必然是**安装包本体**，与任何 hook 无关。
+ *
+ * 判据：遍历 /proc/self/fd/N，用 readlinkat 解析目标路径，挑出以
+ * "base.apk" 结尾且能 lseek 到文件尾（即普通文件）的那个。
+ *
+ * ⚠️ readlink 已被去校验 hook（proxy_readlink 会谎报成 base.apk），
+ *    所以这里 **必须** 用 syscall(SYS_readlinkat) 直投内核。
+ *    否则本路线反而会被诱骗到假路径上。
+ * ⚠️ 不关闭返回的 fd：它属于系统，不是我们打开的。
+ *    调用方只能 pread/lseek，不能 close。 */
+SIG_SEC_MARKED_NOVMP
+static int sig_find_apk_fd(void) {
+#if defined(__aarch64__) || defined(__arm__)
+    int dfd, fd, found = -1;
+    char link[256];
+
+    dfd = sig_open_route(SIG_ROUTE_SVC, "/proc/self/fd");
+    if (dfd < 0) {
+        /* svc 被拦时退回 openat —— 目录本身不是攻击目标，风险可接受 */
+        dfd = openat(AT_FDCWD, "/proc/self/fd", O_RDONLY | O_DIRECTORY);
+    }
+    if (dfd < 0) return -1;
+
+    for (fd = 3; fd < 512 && found < 0; fd++) {
+        char name[16];
+        int nl = 0, v = fd;
+
+        /* 手工拼 "N" —— 避免 snprintf 拉入额外依赖 */
+        if (v >= 100) { name[nl++] = (char)('0' + v / 100); v %= 100; }
+        if (nl || v >= 10) { name[nl++] = (char)('0' + v / 10); }
+        name[nl++] = (char)('0' + v % 10);
+        name[nl] = '\0';
+
+        long r = syscall(__NR_readlinkat, (long)dfd, (long)name,
+                         (long)link, (long)(sizeof(link) - 1));
+        if (r <= 0) continue;
+        link[r] = '\0';
+        {
+            size_t L = (size_t)r;
+            if (L < 8) continue;
+            if (strcmp(link + L - 8, "base.apk") != 0) continue;
+            /* 命中：确认是普通文件（能 seek 到尾部且长度 > 1MB） */
+            {
+                int probe = openat(dfd, name, O_RDONLY);
+                off_t sz;
+                if (probe < 0) continue;
+                sz = lseek(probe, 0, SEEK_END);
+                close(probe);            /* probe 是自己打开的，要关 */
+                if (sz <= (off_t)(1024 * 1024)) continue;
+            }
+            /* 真正使用时要 dup 一份，避免调用方误关 */
+            found = openat(dfd, name, O_RDONLY);
+        }
+    }
+    close(dfd);
+    return found;
+#else
+    return -1;
+#endif
+}
+
+/* 用某一路线采集证书指纹。成功 0（fp 写入 out_fp），失败 -1。
+ * 每路都打印：路线名 / open 结果 / fsize / 证书指纹。 */
+SIG_SEC_MARKED_NOVMP
+static int sig_collect_fp_route(int route, const char *apk_path,
+                                unsigned char out_fp[32], long *out_size) {
+    int fd;
+    unsigned char *der = NULL;
+    size_t der_len = 0;
+    off_t fsize;
+    int fd_from_sys = 0;      /* 1 = fd 属于系统，不能 close */
+
+    if (route == SIG_ROUTE_FD) {
+        fd = sig_find_apk_fd();
+        fd_from_sys = 1;
+    } else {
+        fd = sig_open_route(route, apk_path);
+    }
+    if (fd < 0) {
+        /*LSG:ROUTE_OPEN_FAIL|【流程】该路取证书打开失败(记日志后跳过)*/
+        LSGE(LSG_ROUTE_OPEN_FAIL, "route=%s", sig_route_name(route));
+        return -1;
+    }
+
+    /* fsize 是被劫持的关键破绽：路径看着对，文件大小却对不上。
+     * 真实 base.apk 与诱饵 origin.apk 体积必然不同。 */
+    fsize = lseek(fd, 0, SEEK_END);
+    lseek(fd, 0, SEEK_SET);
+    /*LSG:ROUTE_OPEN_OK|【数据】该路取证书成功打开(fd/size)*/
+    LSGI(LSG_ROUTE_OPEN_OK, "route=%s fd=%d size=%ld",
+         sig_route_name(route), fd, (long)fsize);
+    if (out_size) *out_size = (long)fsize;
+
+    if (extract_cert_der(fd, &der, &der_len) != 0) {
+        if (fd_from_sys) close(fd); else nc_close_fd(fd);
+        /*LSG:ROUTE_NO_CERT|【流程】该路证书提取失败(记日志后跳过)*/
+        LSGE(LSG_ROUTE_NO_CERT, "route=%s", sig_route_name(route));
+        return -1;
+    }
+    sha256(der, der_len, out_fp);
+    nc_free_ptr(der);
+    if (fd_from_sys) close(fd); else nc_close_fd(fd);
+    /* 不在每路里打印指纹 —— 统一由调用方的汇总表输出，
+     * 避免同一份数据打两遍（原来那样日志里每路出现两次，很难读）。 */
+    return 0;
+}
+
 /* 采集 APK 证书指纹：定位 → 打开 → 提取证书 → SHA256。
  * 成功返回 0 并把 32 字节指纹写进 actual；失败返回该走的 killvar 变体（≥0）
  * 或 -1 表示"环境异常类，走 variant 0"。 */
@@ -1428,24 +1654,149 @@ static int sig_collect_fp(unsigned char actual[32]) {
     /*LSG:OPEN_OK|【成功】APK 已打开*/
     LSGI(LSG_OPEN_OK, "%s", apk_path);
 
-    if (extract_cert_der(fd, &der, &der_len) != 0) {
-        nc_close_fd(fd);
-        /* LSGS 密文化(2026-10-16):原文案暴露"这是签名校验"+教会攻击者怎么重签。 */
-        {
-            char m[128];
-            const char *mm = lsg_s(LSGS_ERR_NO_SIGN_BLOCK, m, sizeof(m));
-            /* 两参数 → 同上 */
-            { char _b[256]; snprintf(_b, sizeof(_b), "%s: %s", mm, apk_path); LOGE_S(_b); }
+    /* ── 多路交叉采集（2026-11-24）──────────────────────────────────
+     * 路 A 用 fd（上面已打开的 open 句柄）拿指纹；再依次用 B/C/D 各拿一次。
+     * 只有「成功 ≥2 路 且 指纹不一致」才判定被劫持 —— 单路失败（seccomp /
+     * 平台不支持）只记日志跳过，不冤杀正常包。 */
+    {
+        unsigned char route_fp[SIG_ROUTE_NUM][32];
+        int route_ok[SIG_ROUTE_NUM];
+        long route_size[SIG_ROUTE_NUM];
+        long size_a = 0;
+        int nr, first_ok = -1, mismatch = 0;
+
+        for (nr = 0; nr < SIG_ROUTE_NUM; nr++) { route_ok[nr] = 0; route_size[nr] = 0; }
+
+        for (nr = 0; nr < SIG_ROUTE_NUM; nr++) route_ok[nr] = 0;
+
+        /* 路 A：复用已打开的 fd（避免重复 open，也保持原有行为不变）。
+         * 先记下文件大小 —— 这是识别诱饵的最快判据（诱饵包体积必然不同）。 */
+        size_a = (long)lseek(fd, 0, SEEK_END);
+        lseek(fd, 0, SEEK_SET);
+        if (extract_cert_der(fd, &der, &der_len) != 0) {
+            nc_close_fd(fd);
+            /* LSGS 密文化(2026-10-16):原文案暴露"这是签名校验"+教会攻击者怎么重签。 */
+            {
+                char m[128];
+                const char *mm = lsg_s(LSGS_ERR_NO_SIGN_BLOCK, m, sizeof(m));
+                /* 两参数 → 同上 */
+                { char _b[256]; snprintf(_b, sizeof(_b), "%s: %s", mm, apk_path); LOGE_S(_b); }
+            }
+            /*LSG:BLK_FAIL|【失败】签名块解析失败(无 v2/v3 或结构异常)*/
+            LSGE(LSG_BLK_FAIL, "%s", apk_path);
+            return -1;
         }
-        /*LSG:BLK_FAIL|【失败】签名块解析失败(无 v2/v3 或结构异常)*/
-        LSGE(LSG_BLK_FAIL, "%s", apk_path);
+        sha256(der, der_len, route_fp[SIG_ROUTE_OPEN]);
+        nc_free_ptr(der);
+        nc_close_fd(fd);
+        route_ok[SIG_ROUTE_OPEN] = 1;
+        first_ok = SIG_ROUTE_OPEN;
+        route_size[SIG_ROUTE_OPEN] = (long)size_a;
+
+        /* 路 B/C/D/E/F（openat / openat64 / syscall / svc / sysfd） */
+        for (nr = SIG_ROUTE_OPENAT; nr < SIG_ROUTE_NUM; nr++) {
+            if (sig_collect_fp_route(nr, apk_path, route_fp[nr], &route_size[nr]) == 0) {
+                route_ok[nr] = 1;
+                if (first_ok < 0) first_ok = nr;
+                else {
+                    int k, diff = 0;
+                    for (k = 0; k < 32; k++)
+                        diff |= route_fp[nr][k] ^ route_fp[first_ok][k];
+                    if (diff) mismatch = 1;
+                }
+            }
+        }
+
+        /* ── 汇总表（排障用，一次看清 6 路各自拿到什么）──────────────
+         *
+         * 输出形如：
+         *   ┌─ 多路证书采集 ─────────────────────────────
+         *   │ open       size=5071296    fp=d82e48da…  <== 不一致（疑似诱饵）
+         *   │ openat     size=10169286   fp=93622a73…
+         *   │ …
+         *   └─ ok=6/6 mismatch=1  ← 被劫持
+         *
+         * ⚠️ "哪一路是诱饵"按【多数派】判定，不能按"第一个成功的"：
+         *    被劫持的那一路往往正是最先成功的 open()，若以它为基准，
+         *    会把 5 路真货全标成"不一致"（2026-11-24 实测踩过）。 */
+        {
+            /* 选多数派：与最多其他路相同的那个指纹下标 */
+            int base_idx = -1, base_votes = -1;
+            for (nr = 0; nr < SIG_ROUTE_NUM; nr++) {
+                int m, votes = 0;
+                if (!route_ok[nr]) continue;
+                for (m = 0; m < SIG_ROUTE_NUM; m++) {
+                    int k, d2 = 0;
+                    if (!route_ok[m]) continue;
+                    for (k = 0; k < 32; k++)
+                        d2 |= route_fp[nr][k] ^ route_fp[m][k];
+                    if (d2 == 0) votes++;
+                }
+                if (votes > base_votes) { base_votes = votes; base_idx = nr; }
+            }
+            if (base_idx >= 0) first_ok = base_idx;
+        }
+
+        /*LSG:ROUTE_TBL_HEAD|【数据】多路证书采集表头*/
+        LSGI0(LSG_ROUTE_TBL_HEAD);
+        for (nr = 0; nr < SIG_ROUTE_NUM; nr++) {
+            char hex[65];
+            int k;
+            static const char dd[] = "0123456789abcdef";
+            int is_outlier = 0;
+
+            if (!route_ok[nr]) {
+                /*LSG:ROUTE_TBL_SKIP|【数据】该路未采到(失败/不支持)*/
+                LSGI(LSG_ROUTE_TBL_SKIP, "| %-9s (未采到)",
+                     sig_route_name(nr));
+                continue;
+            }
+            for (k = 0; k < 32; k++) {
+                hex[k*2]   = dd[route_fp[nr][k] >> 4];
+                hex[k*2+1] = dd[route_fp[nr][k] & 15];
+            }
+            hex[64] = '\0';
+            hex[16] = '\0';
+            /* 与 first_ok 比对，标出不同的那一路 */
+            {
+                int d2 = 0;
+                for (k = 0; k < 32; k++)
+                    d2 |= route_fp[nr][k] ^ route_fp[first_ok][k];
+                is_outlier = (nr != first_ok) && (d2 != 0);
+            }
+            if (is_outlier) {
+                /*LSG:ROUTE_TBL_ODD|【数据】表中偏离的一路(疑似诱饵)*/
+                LSGI(LSG_ROUTE_TBL_ODD, "| %-9s size=%-10ld fp=%s  <== 不一致",
+                     sig_route_name(nr), route_size[nr], hex);
+            } else {
+                /*LSG:ROUTE_TBL_ROW|【数据】表中正常的一路*/
+                LSGI(LSG_ROUTE_TBL_ROW, "| %-9s size=%-10ld fp=%s",
+                     sig_route_name(nr), route_size[nr], hex);
+            }
+        }
+        {
+            int ok = 0;
+            for (nr = 0; nr < SIG_ROUTE_NUM; nr++) ok += route_ok[nr];
+            /*LSG:ROUTE_SUM|【数据】多路采集汇总(成功路数/是否不一致)*/
+            LSGI(LSG_ROUTE_SUM, "ok=%d/%d mismatch=%d",
+                 ok, SIG_ROUTE_NUM, mismatch);
+        }
+
+        /* 至少两路成功且不一致 → 被劫持。这是本机制的核心判据：
+         * 单一取文件路径被重定向时，只有被动过的那一路会给诱饵证书。 */
+        if (mismatch) {
+            /*LSG:ROUTE_SPLIT|【失败】多路证书指纹不一致(疑似 APK 读取被劫持)*/
+            LSGE0(LSG_ROUTE_SPLIT);
+            return -2;        /* 独立语义：劫持，走最重处置 */
+        }
+
+        if (first_ok >= 0) {
+            memcpy(actual, route_fp[first_ok], 32);
+            return 0;
+        }
+        /* 所有路都失败：退回"环境异常"语义 */
         return -1;
     }
-
-    sha256(der, der_len, actual);
-    nc_free_ptr(der);
-    nc_close_fd(fd);
-    return 0;
 }
 
 /* 打印实际指纹（排障用）并做双轮派生比对。
