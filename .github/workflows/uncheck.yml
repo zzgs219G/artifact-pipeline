@@ -74,15 +74,38 @@ jobs:
       # build-tools 提供 zipalign（对齐）与 apksigner（sign=true 时用）。
       #
       # ⚠️ 2026-11-23 修：此前只装 NDK(nttld/setup-ndk)，而 runner 上
-      # **没有 zipalign** → run.py 打印「⚠️ 未对齐」后继续，中间包未对齐 →
+      # **没有 zipalign** → run.py 找不到工具 → 中间包未对齐 →
       # 数据复用平移后 resources.arsc 落在 mod4=3 →
       # 装机被拒：Targeting R+ requires the resources.arsc ... aligned on a
       # 4-byte boundary。这一步是必需依赖，不是可选优化。
       #
       # NDK 实际用不到：libusign.so 是 git 内已编好的产物，workflow 从不
       # 调用 build-native.sh（native 层改代码时需本地重编并提交 so）。
-      - name: Setup Android SDK (zipalign / apksigner)
+      #
+      # ⚠️ 必须带 packages 参数：不带时 setup-android 会去装 'tools' 包并
+      #    报 `Failed to find package 'tools'`（2026-11-23 run 45204829613）。
+      - name: 安装 Android build-tools（zipalign 对齐必需）
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;34.0.0'
+
+      - name: 把 build-tools 加进 PATH（zipalign / apksigner）
+        run: |
+          set -o pipefail
+          # setup-android 把工具装在 $ANDROID_HOME/build-tools/<ver>/ 下，
+          # 但默认不在 PATH 里；run.py 的 shutil.which('zipalign') 找不到即失败。
+          BT=""
+          for cand in "$ANDROID_HOME"/build-tools/*/; do
+            if [[ -x "${cand}zipalign" ]]; then BT="$cand"; break; fi
+          done
+          if [[ -z "$BT" ]]; then
+            echo "❌ build-tools 里找不到 zipalign —— 数值对齐无法保证，产物会装不上"
+            ls "$ANDROID_HOME"/build-tools/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "$BT" >> "$GITHUB_PATH"
+          echo "build-tools: $BT"
+          "$BT/zipalign" 2>&1 | head -1 || true
 
       - name: 校验卡片与解释器
         run: |
