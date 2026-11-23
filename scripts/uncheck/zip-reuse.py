@@ -66,12 +66,49 @@ EOCD_SIG = b'PK\x05\x06'
 ORIGIN_NAME = 'assets/nc_sigfix/origin.apk'
 
 
-def _lfh_len(name):
-    """local header 长度（固定 30 + 文件名，不含 extra）"""
-    return 30 + len(name.encode('utf-8'))
+def _lfh_len(name, extra_len=0):
+    """local header 长度（固定 30 + 文件名 + extra）"""
+    return 30 + len(name.encode('utf-8')) + extra_len
 
 
-def _make_lfh(name, method, crc, csize, fsize, mtime=0, mdate=0x0021):
+# origin.apk 的数据起点必须 4 字节对齐。
+#
+# ==== 为什么（2026-11-23 真机实证）====
+# 数据复用把 origin.apk 的 local header 放在文件最前面，**其后所有条目的
+# offset 都整体平移这个 header 的长度**。
+#   原实现 header = 30 + 24 = 54...（实际 57），平移 57 → 57 mod 4 = 1
+#   → resources.arsc 落在 mod4=3 → 装机直接失败：
+#     Failed parse during installPackageLI: Targeting R+ (version 30 and above)
+#     requires the resources.arsc of installed APKs to be stored uncompressed
+#     and aligned on a 4-byte boundary
+#
+# 对齐要求来自 Android R+：resources.arsc 必须 STORED 且 4 字节对齐。
+# 这是硬性检查，装机期就拒，跟签名工具无关。
+#
+# 修法：把 header 补齐到 4096（4 的倍数）—— 平移量是 4 的倍数时，
+# 原包里本来就对齐的条目平移后依然对齐，不需要重排整个 ZIP。
+# 用 4096 而不是 4，是为了同时满足未压缩 .so 的页对齐（extractNativeLibs=false 时）。
+ALIGN = 4096
+_EXTRA_ID = b'\x00\x00'          # extra field header ID（0x0000 占位，解析器跳过）
+
+
+def _align_extra(base_len, align=ALIGN):
+    """生成 extra field，使 (base_len + len(extra)) 是 align 的倍数。
+
+    ⚠️ local header 与 central directory 的 extra 必须**长度一致**
+    （2026-11-23 踩过：只给 LFH 加、CD 没加 → zipfile 读 CD 得到 extra_len=0
+     → 实际平移量还是 57，等于没修，但单测因为只查 LFH 而误判成功）。
+    """
+    need = (-base_len) % align
+    if need == 0:
+        return b''
+    if need < 4:
+        need += align           # 一个 extra field 至少 4 字节（ID 2 + Size 2）
+    body = need - 4
+    return _EXTRA_ID + struct.pack('<H', body) + b'\x00' * body
+
+
+def _make_lfh(name, method, crc, csize, fsize, mtime=0, mdate=0x0021, extra=b''):
     """构造 local file header。mdate 默认 1980-01-01（ZIP 最小合法值）。"""
     nb = name.encode('utf-8')
     return (LFH_SIG
@@ -83,12 +120,14 @@ def _make_lfh(name, method, crc, csize, fsize, mtime=0, mdate=0x0021):
             + struct.pack('<I', csize)
             + struct.pack('<I', fsize)
             + struct.pack('<H', len(nb))
-            + struct.pack('<H', 0)                            # extra len
-            + nb)
+            + struct.pack('<H', len(extra))                   # extra len
+            + nb
+            + extra)
 
 
-def _make_cd(name, method, crc, csize, fsize, offset, mtime=0, mdate=0x0021):
-    """构造中央目录条目。"""
+def _make_cd(name, method, crc, csize, fsize, offset, mtime=0, mdate=0x0021,
+             extra=b''):
+    """构造中央目录条目。extra 需与同名 LFH 的 extra 长度一致。"""
     nb = name.encode('utf-8')
     return (b'PK\x01\x02'
             + struct.pack('<H', 20)          # version made by
@@ -100,13 +139,14 @@ def _make_cd(name, method, crc, csize, fsize, offset, mtime=0, mdate=0x0021):
             + struct.pack('<I', csize)
             + struct.pack('<I', fsize)
             + struct.pack('<H', len(nb))
-            + struct.pack('<H', 0)           # extra len
+            + struct.pack('<H', len(extra))  # extra len
             + struct.pack('<H', 0)           # comment len
             + struct.pack('<H', 0)           # disk start
             + struct.pack('<H', 0)           # internal attr
             + struct.pack('<I', 0)           # external attr
             + struct.pack('<I', offset)
-            + nb)
+            + nb
+            + extra)
 
 
 def build(src_apk, out_apk, extra_entries=None,
@@ -135,13 +175,19 @@ def build(src_apk, out_apk, extra_entries=None,
     origin_crc = zlib.crc32(src) & 0xFFFFFFFF
     origin_csize = len(src)      # STORED，压缩前后相同
     origin_fsize = len(src)
-    hdr_len = _lfh_len(origin_name)
+
+    # header 补齐到 4096：让 origin.apk 的数据起点是 4 的倍数，
+    # 从而"整体平移"不破坏其后所有条目的 4 字节对齐（见 _align_extra 注释）。
+    origin_extra = _align_extra(_lfh_len(origin_name))
+    hdr_len = _lfh_len(origin_name, len(origin_extra))
     origin_data_start = hdr_len
+    assert origin_data_start % 4 == 0, origin_data_start
 
     # ── 3. 拼装 ─────────────────────────────────────────────────────
     out = bytearray()
-    out += _make_lfh(origin_name, 0, origin_crc, origin_csize, origin_fsize)
-    assert len(out) == origin_data_start
+    out += _make_lfh(origin_name, 0, origin_crc, origin_csize, origin_fsize,
+                     extra=origin_extra)
+    assert len(out) == origin_data_start, (len(out), origin_data_start)
 
     out += src          # ← 数据复用：origin.apk 的数据就是这一段
     origin_data_end = len(out)
@@ -167,7 +213,11 @@ def build(src_apk, out_apk, extra_entries=None,
     cd = bytearray()
 
     # origin.apk 本身
-    cd += _make_cd(origin_name, 0, origin_crc, origin_csize, origin_fsize, 0)
+    # ⚠️ CD 的 extra 必须与 LFH 一致：ZIP 规范要求两处 extra 长度相同。
+    # 只写 LFH 时 zipfile/Android 读 CD 得到 extra_len=0，实际平移量不变 →
+    # 等于没修（2026-11-23 踩过，单测只看 LFH 会误判成功）。
+    cd += _make_cd(origin_name, 0, origin_crc, origin_csize, origin_fsize, 0,
+                   extra=origin_extra)
 
     # 原 APK 的所有条目：offset 整体平移 origin_data_start
     for i in infos:
@@ -298,6 +348,28 @@ def verify(out_apk, origin_name=ORIGIN_NAME):
                     problems.append(f'{name} magic 非法')
             except Exception as e:
                 problems.append(f'{name} 读取失败: {e}')
+
+    # ④ resources.arsc 必须 STORED 且 4 字节对齐
+    #
+    # Android R+ 的硬性检查（装机期就拒，跟签名工具无关）：
+    #   Failed parse during installPackageLI: Targeting R+ (version 30 and above)
+    #   requires the resources.arsc of installed APKs to be stored uncompressed
+    #   and aligned on a 4-byte boundary
+    # 数据复用会整体平移所有条目 offset，平移量不是 4 的倍数时这条必挂
+    # ——这就是 origin.apk header 要补齐到 4096 的原因。
+    if 'resources.arsc' in entries:
+        method, csize, fsize, off = entries['resources.arsc']
+        nl = struct.unpack('<H', data[off + 26:off + 28])[0]
+        el = struct.unpack('<H', data[off + 28:off + 30])[0]
+        data_off = off + 30 + nl + el
+        if method != 0:
+            problems.append(f'resources.arsc 未压缩（method={method}），Android R+ 要求 STORED')
+        if data_off % 4 != 0:
+            problems.append(
+                f'resources.arsc 未 4 字节对齐（data_off={data_off}, '
+                f'mod4={data_off % 4}）—— 装机会被拒')
+    else:
+        problems.append('缺少 resources.arsc')
 
     return problems
 
