@@ -113,8 +113,13 @@ _Static_assert(SG2_HASH_LEN <= SG2_SHA256_LEN,
  * 标记格式见 make-sig-log.py（此处不写其字面形态，防嵌套注释）。
  * ⚠️ 需同步 make-sig-log.py 的扫描清单与 protect.sh 的传参。 */
 
-/* ── 日志:纯 logcat,零文件 I/O(与第一线解耦,也不受其哨兵开关影响) ── */
-#ifdef __ANDROID__
+/* ── 日志:纯 logcat,零文件 I/O(与第一线解耦,也不受其哨兵开关影响) ──
+ * ⚠️ 2026-11-24 补 SIGGUARD2_HOST_TEST 豁免：多路化后 g2_collect_fp /
+ *    g2_verify 里有 G2LOG 调用，而 test-sig-guard2.sh 会在宿主【链接并
+ *    运行】本文件 —— Termux 的 clang 定义 __ANDROID__，G2LOG 变成真调用，
+ *    链接报 undefined symbol: __android_log_print（宿主没有 liblog）。
+ *    宿主测试只验证派生公式，不需要 logcat，退化为空操作。 */
+#if defined(__ANDROID__) && !defined(SIGGUARD2_HOST_TEST)
 #include <android/log.h>
 #define G2LOG(...) __android_log_print(ANDROID_LOG_INFO, "nc", __VA_ARGS__)
 #else
@@ -686,6 +691,265 @@ static int g2_open_ro(const char *path) {
     return open(path, O_RDONLY);
 }
 
+/* ═══════════════════ 多路取证书（2026-11-24，与第一线对等）═══════════════════
+ *
+ * ==== 为什么第二线也要多路 ====
+ * 第一线（sig_check.c）2026-11-24 已升级为 6 路取证书 + 交叉比对，而本线
+ * 仍只用 g2_open_ro()（= open()）一次。交接文档 §6.2 指出：攻击者要骗过
+ * 第一线必须逐路逆向加密段，但**第二线只要一次 open hook 就能骗过** ——
+ * 双线互备的设计在「读 APK」这一步上是共享单点：open() 被重定向到诱饵包，
+ * 两线同时读到假证书，第二线的独立性只剩派生公式与处置路径。
+ *
+ * 本轮把本线也对齐为 6 路交叉采集。
+ *
+ * ==== ⚠️ 与第一线【零代码共享】（AGENTS.md §1.0 硬约束）====
+ * 本文件自带上报 syscall / fd 扫描 / 路线调度，【不复用】sig_check.c 的任何
+ * 函数 —— 两线共享任何代码 = 一处 patch 两线同废。实现形态与第一线相似
+ * 是平台约束所致（armv7 r7 必须 push/pop、fd 复用必须 readlinkat 直投），
+ * 不是复制：任何一方单独演化不会破坏另一方。
+ *
+ * ==== 判定语义（与第一线一致，保持本线「绝不误伤」的既有底线）====
+ *   成功 ≥2 路且指纹不一致 → 劫持 → g2_fail()
+ *   单路失败（seccomp / 平台不支持 / fd 不存在）→ 记日志跳过
+ *   全部失败 → 环境异常 → 静默返回（未检出）
+ *
+ * ==== 三条纪律（第一线 2026-11-24 实测踩过的坑，直接沿用结论）====
+ *  ① 新增读 APK 的路径一律走 g2_raw_syscall（内联 svc），不得用 libc 的
+ *     syscall() —— syscall@plt 是软目标，改 4 字节即废（交接文档 §5.2）。
+ *  ② 「哪一路是诱饵」按多数派判定，不能按「第一个成功的」—— 被劫持的
+ *     往往正是最先成功的 open()（交接文档 §5.4，实测踩过）。
+ *  ③ armv7 的 r7 是保留寄存器，内联 svc 必须 push/pop 保存恢复
+ *     （交接文档 §5.3，clang 拒绝 register r7）。
+ */
+
+/* 路线 ID：语义与第一线对齐，编号是本线自己的（日志用 g2_route_name）。
+ * ⚠️ 新增路线请【追加到末尾】并把 G2_ROUTE_NUM 加一 —— 中间插入会让
+ *    历史日志里的路线位置含义漂移，排障时对不上。 */
+#define G2_ROUTE_OPEN      0   /* open()               —— 最易被 hook，作诱饵探针 */
+#define G2_ROUTE_OPENAT    1   /* openat()             —— 独立符号 */
+#define G2_ROUTE_OPENAT64  2   /* openat64()           —— 又一个独立符号 */
+#define G2_ROUTE_SYSCALL   3   /* g2_raw_syscall(__NR_openat) —— 不经 libc 封装 */
+#define G2_ROUTE_SVC       4   /* 内联 svc #0          —— 连 syscall() 都不经 */
+#define G2_ROUTE_FD        5   /* /proc/self/fd/N 复用系统已开的 fd */
+#define G2_ROUTE_NUM       6
+
+/* 独立的内联 svc（与第一线的 sig_raw_syscall 同形态、零共享）：
+ * 不经 libc，产物里没有 syscall@plt 可 patch。
+ * ⚠️ armv7 的 r7 是保留寄存器（Thumb frame pointer），clang 拒绝
+ *    `register long r7 __asm__("r7")`，必须在内联汇编里显式 push/pop。
+ * noinline：保持独立函数实体，让 G2_ROUTE_SYSCALL 与 G2_ROUTE_SVC
+ * 的代码形态可区分（一个走函数调用、一个写在本函数体内）。 */
+#if defined(__aarch64__) || defined(__arm__)
+__attribute__((noinline))
+static long g2_raw_syscall(long n, long a0, long a1, long a2,
+                           long a3, long a4, long a5) {
+#if defined(__aarch64__)
+    register long x8 __asm__("x8") = n;
+    register long x0 __asm__("x0") = a0;
+    register long x1 __asm__("x1") = a1;
+    register long x2 __asm__("x2") = a2;
+    register long x3 __asm__("x3") = a3;
+    register long x4 __asm__("x4") = a4;
+    register long x5 __asm__("x5") = a5;
+    __asm__ volatile("svc #0"
+                     : "+r"(x0)
+                     : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
+                     : "memory");
+    return x0;
+#else
+    register long r0 __asm__("r0") = a0;
+    __asm__ volatile(
+        "push {r7}\n\t"
+        "mov  r7, %[nr]\n\t"
+        "svc  #0\n\t"
+        "pop  {r7}"
+        : "+r"(r0)
+        : [nr] "r"(n), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5)
+        : "memory");
+    return r0;
+#endif
+}
+#endif
+
+/* 用指定路线打开 path。成功返回 fd，失败 -1。
+ * ⚠️ G2_ROUTE_FD 不在此处理（它不 open，而是返回「已存在的 fd」），
+ *    见 g2_find_apk_fd()。 */
+G2_SEC_MARKED_NOVMP
+static int g2_open_route(int route, const char *path) {
+    if (route == G2_ROUTE_OPEN) {
+        return g2_open_ro(path);   /* 既有隔离层：让 amice 看不到 __open_2 */
+    }
+    if (route == G2_ROUTE_OPENAT) {
+        /* 不走 g2_open_ro：那个是 open()，会被同一处 hook 命中。
+         * openat 是独立符号，常规路径重定向工具未必覆盖。 */
+        return openat(AT_FDCWD, path, O_RDONLY);
+    }
+    if (route == G2_ROUTE_OPENAT64) {
+        return openat64(AT_FDCWD, path, O_RDONLY);
+    }
+#if defined(__aarch64__) || defined(__arm__)
+    if (route == G2_ROUTE_SYSCALL) {
+        /* 内联 svc（经函数调用）：不走 libc 的 syscall()，见纪律① */
+        long r = g2_raw_syscall(__NR_openat, (long)AT_FDCWD, (long)path,
+                                (long)O_RDONLY, 0L, 0L, 0L);
+        return (int)r;
+    }
+    if (route == G2_ROUTE_SVC) {
+        /* 内联 svc 写进本函数体：连 g2_raw_syscall 的调用都省掉。
+         * 与 G2_ROUTE_SYSCALL 的区别是【代码形态】（独立展开 vs 函数调用），
+         * 对「按代码形态定位」的攻击者表现不同，交叉比对仍有意义。 */
+        long r;
+#if defined(__aarch64__)
+        register long x8 __asm__("x8") = __NR_openat;
+        register long x0 __asm__("x0") = (long)AT_FDCWD;
+        register long x1 __asm__("x1") = (long)path;
+        register long x2 __asm__("x2") = (long)O_RDONLY;
+        register long x3 __asm__("x3") = 0L;
+        __asm__ volatile("svc #0"
+                         : "+r"(x0)
+                         : "r"(x8), "r"(x1), "r"(x2), "r"(x3)
+                         : "memory");
+        r = x0;
+#else
+        register long r0 __asm__("r0") = (long)AT_FDCWD;
+        register long r1 __asm__("r1") = (long)path;
+        __asm__ volatile(
+            "push {r7}\n\t"
+            "mov  r7, %[nr]\n\t"
+            "mov  r2, %[flags]\n\t"
+            "svc  #0\n\t"
+            "pop  {r7}"
+            : "+r"(r0)
+            : [nr] "r"((long)__NR_openat), [flags] "r"((long)O_RDONLY),
+              "r"(r1)
+            : "memory");
+        r = r0;
+#endif
+        return (int)r;
+    }
+#endif
+    return -1;
+}
+
+/* 路线名（仅日志用；不含敏感语义，与第一线同一豁免口径，不走 LSGS） */
+static const char *g2_route_name(int route) {
+    switch (route) {
+        case G2_ROUTE_OPEN:     return "open";
+        case G2_ROUTE_OPENAT:   return "openat";
+        case G2_ROUTE_OPENAT64: return "openat64";
+        case G2_ROUTE_SYSCALL:  return "syscall";
+        case G2_ROUTE_SVC:      return "svc";
+        case G2_ROUTE_FD:       return "sysfd";
+        default:                return "?";
+    }
+}
+
+/* ── 路线 FD：复用内核里已打开的 base.apk 句柄 ──────────────────────
+ *
+ * 前 5 条都是「自己发起一次 open」。攻击者只要把所有发起 open 的入口
+ * 都挂上，就能统一重定向。本路线不发起 open：ART 启动时为了加载
+ * dex/res 通常已持有 base.apk 的 fd，直接借用，读到的是安装包本体。
+ *
+ * ⚠️ 解析 /proc/self/fd/N 必须用 g2_raw_syscall(__NR_readlinkat) 直投
+ *    内核：libc 的 readlink / readlinkat 已被去校验工具 hook
+ *    （proxy_readlinkat 会把 origin.apk 谎报成 base.apk），走 libc
+ *    反而被诱骗到假路径上。
+ * ⚠️ 返回的是 openat(dfd, name) 新开的 fd（指向同一文件），用完要关。
+ *    独立实现，与第一线的 sig_find_apk_fd 同目的、零共享。 */
+G2_SEC_MARKED_NOVMP
+static int g2_find_apk_fd(void) {
+#if defined(__aarch64__) || defined(__arm__)
+    int dfd, fd, found = -1;
+    char link[256];
+    const char *suffix = G2_APK_SUFFIX();
+    size_t suffix_len = suffix ? strlen(suffix) : 0;
+
+    if (suffix_len == 0 || suffix_len >= sizeof(link)) return -1;
+
+    /* 目录本身不是攻击目标：svc 被拦时回退 openat，风险可接受 */
+    dfd = g2_open_route(G2_ROUTE_SVC, "/proc/self/fd");
+    if (dfd < 0) {
+        dfd = openat(AT_FDCWD, "/proc/self/fd", O_RDONLY | O_DIRECTORY);
+    }
+    if (dfd < 0) return -1;
+
+    for (fd = 3; fd < 512 && found < 0; fd++) {
+        char name[16];
+        int nl = 0, v = fd;
+        long r;
+
+        /* 手工拼 "N"，避免 snprintf 拉入额外依赖 */
+        if (v >= 100) { name[nl++] = (char)('0' + v / 100); v %= 100; }
+        if (nl || v >= 10) { name[nl++] = (char)('0' + v / 10); }
+        name[nl++] = (char)('0' + v % 10);
+        name[nl] = '\0';
+
+        r = g2_raw_syscall(__NR_readlinkat, (long)dfd, (long)name,
+                           (long)link, (long)(sizeof(link) - 1), 0L, 0L);
+        if (r <= 0) continue;
+        link[r] = '\0';
+        {
+            size_t L = (size_t)r;
+            int probe;
+            off_t sz;
+            if (L < suffix_len) continue;
+            if (strcmp(link + L - suffix_len, suffix) != 0) continue;
+            /* 命中：确认是普通文件（能 seek 到尾部且 > 1MB） */
+            probe = openat(dfd, name, O_RDONLY);
+            if (probe < 0) continue;
+            sz = lseek(probe, 0, SEEK_END);
+            close(probe);            /* probe 是自己打开的，要关 */
+            if (sz <= (off_t)(1024 * 1024)) continue;
+            found = openat(dfd, name, O_RDONLY);
+        }
+    }
+    close(dfd);
+    return found;
+#else
+    return -1;
+#endif
+}
+
+/* 用某一路线采集证书指纹。成功 0（out_fp 写入 32 字节），失败 -1。
+ * 每路一次简报（路线名 / fsize），失败只跳过不处置 —— 处置权在调用方。 */
+G2_SEC_MARKED_NOVMP
+static int g2_collect_fp_route(int route, const char *apk_path,
+                               unsigned char out_fp[SG2_SHA256_LEN],
+                               long *out_size) {
+    int fd;
+    unsigned char *der = NULL;
+    size_t der_len = 0;
+    off_t fsize;
+    g2_sha_ctx c;
+
+    if (route == G2_ROUTE_FD) {
+        fd = g2_find_apk_fd();
+    } else {
+        fd = g2_open_route(route, apk_path);
+    }
+    if (fd < 0) {
+        G2LOG("g2 route=%s open fail, skip", g2_route_name(route));
+        return -1;
+    }
+
+    /* fsize 是识别诱饵的最快判据：路径看着对，诱饵包体积必然不同 */
+    fsize = lseek(fd, 0, SEEK_END);
+    lseek(fd, 0, SEEK_SET);
+    if (out_size) *out_size = (long)fsize;
+
+    if (g2_extract_cert(fd, &der, &der_len) != 0) {
+        close(fd);
+        G2LOG("g2 route=%s cert extract fail, skip", g2_route_name(route));
+        return -1;
+    }
+    g2_sha_init(&c);
+    g2_sha_update(&c, der, der_len);
+    g2_sha_final(&c, out_fp);
+    free(der);
+    close(fd);
+    return 0;
+}
+
 /* 独立派生(与 make-sig-hash.sh 生成侧逐字节一致):
  *   t2 = SHA256(b"G2" || fp)
  *   expected[i] = t2[i] ^ salt2[(i*7)%16] ^ ((i*0x5B+0x3D)&0xFF)  */
@@ -724,25 +988,97 @@ static void g2_derive(const unsigned char fp[SG2_SHA256_LEN],
  *    （文档 §7.2 拆分纪律②：拆完要先看 values 有没有真的降）。
  * ⚠️ 不带 G2_SEC_MARKED：这段是支撑逻辑，让它吃 Flatten+Mba 即可。
  *
- * 返回：0 = 成功拿到指纹；非 0 = 环境异常（调用方静默返回，不误伤）。 */
+ * ── 2026-11-24：单路改多路（见文件内「多路取证书」总注释）──────────
+ *
+ * 原：g2_find_apk → g2_open_ro(单路 open) → g2_extract_cert → SHA256。
+ * 现：g2_find_apk 拿到路径后，6 条互不依赖的路线各采一次指纹，交叉比对。
+ * 判据与第一线一致：成功 ≥2 路且指纹不一致 = 劫持。
+ *
+ * 返回：0 = 成功且各路一致（fp 写入多数派指纹）；
+ *      -2 = ≥2 路成功但指纹不一致（APK 读取被劫持，调用方必须处置）；
+ *      -1 = 环境异常（调用方按「未检出」静默返回，绝不误伤）。 */
 __attribute__((noinline))
 static int g2_collect_fp(unsigned char fp[SG2_SHA256_LEN]) {
     char apk[1024];
-    int fd;
-    unsigned char *der = NULL;
-    size_t der_len = 0;
-    g2_sha_ctx c;
+    unsigned char route_fp[G2_ROUTE_NUM][SG2_SHA256_LEN];
+    int route_ok[G2_ROUTE_NUM];
+    long route_size[G2_ROUTE_NUM];
+    int nr, m, k, ok_cnt = 0, mismatch = 0;
+    int base_idx = -1, base_votes = -1;
+    static const char dd[] = "0123456789abcdef";
 
     if (g2_find_apk(apk, sizeof(apk)) != 0) return -1;   /* 定位失败 → 未检出 */
-    fd = g2_open_ro(apk);   /* 隔离层：见 g2_open_ro 注释 */
-    if (fd < 0) return -1;
-    if (g2_extract_cert(fd, &der, &der_len) != 0) { close(fd); return -1; }
-    close(fd);
 
-    g2_sha_init(&c);
-    g2_sha_update(&c, der, der_len);
-    g2_sha_final(&c, fp);
-    free(der);
+    for (nr = 0; nr < G2_ROUTE_NUM; nr++) {
+        route_ok[nr] = 0;
+        route_size[nr] = 0;
+    }
+    for (nr = 0; nr < G2_ROUTE_NUM; nr++) {
+        if (g2_collect_fp_route(nr, apk, route_fp[nr], &route_size[nr]) == 0) {
+            route_ok[nr] = 1;
+            ok_cnt++;
+        }
+    }
+    if (ok_cnt == 0) return -1;   /* 全部失败 → 环境异常，不误伤 */
+
+    /* 交叉比对：任意两路成功且指纹不同 → 劫持。
+     * 这是本机制的核心判据：单一取文件路径被重定向时，只有被动过的
+     * 那一路会给诱饵证书，其余路线仍读到真实 APK。 */
+    for (nr = 0; nr < G2_ROUTE_NUM && !mismatch; nr++) {
+        if (!route_ok[nr]) continue;
+        for (m = nr + 1; m < G2_ROUTE_NUM; m++) {
+            int d = 0;
+            if (!route_ok[m]) continue;
+            for (k = 0; k < SG2_SHA256_LEN; k++)
+                d |= route_fp[nr][k] ^ route_fp[m][k];
+            if (d) { mismatch = 1; break; }
+        }
+    }
+
+    /* 多数派：与最多其他路相同的那个指纹下标。
+     * ⚠️ 不能按「第一个成功的」取基准 —— 被劫持的往往正是最先成功的
+     *    open()，以它为基准会把 5 路真货全标成「不一致」（第一线实测踩过）。
+     *    诱饵判给谁只影响日志的 <== 标记，不影响 mismatch 判定本身。 */
+    for (nr = 0; nr < G2_ROUTE_NUM; nr++) {
+        int votes = 0;
+        if (!route_ok[nr]) continue;
+        for (m = 0; m < G2_ROUTE_NUM; m++) {
+            int d = 0;
+            if (!route_ok[m]) continue;
+            for (k = 0; k < SG2_SHA256_LEN; k++)
+                d |= route_fp[nr][k] ^ route_fp[m][k];
+            if (d == 0) votes++;
+        }
+        if (votes > base_votes) { base_votes = votes; base_idx = nr; }
+    }
+
+    /* 汇总表（排障用，一次看清各路拿到什么；指纹只打前 8 字节） */
+    for (nr = 0; nr < G2_ROUTE_NUM; nr++) {
+        char hex[SG2_SHA256_LEN * 2 + 1];
+        int is_outlier;
+        if (!route_ok[nr]) {
+            G2LOG("g2 | %-9s (未采到)", g2_route_name(nr));
+            continue;
+        }
+        for (k = 0; k < SG2_SHA256_LEN; k++) {
+            hex[k * 2]     = dd[route_fp[nr][k] >> 4];
+            hex[k * 2 + 1] = dd[route_fp[nr][k] & 15];
+        }
+        hex[16] = '\0';
+        {
+            int d = 0;
+            for (k = 0; k < SG2_SHA256_LEN; k++)
+                d |= route_fp[nr][k] ^ route_fp[base_idx][k];
+            is_outlier = (nr != base_idx) && (d != 0);
+        }
+        G2LOG("g2 | %-9s size=%-10ld fp=%s%s", g2_route_name(nr),
+              route_size[nr], hex, is_outlier ? "  <== 不一致" : "");
+    }
+    G2LOG("g2 ok=%d/%d mismatch=%d", ok_cnt, G2_ROUTE_NUM, mismatch);
+
+    if (mismatch) return -2;   /* 劫持：走本线独立处置 */
+
+    memcpy(fp, route_fp[base_idx], SG2_SHA256_LEN);
     return 0;
 }
 
@@ -750,6 +1086,7 @@ G2_SEC_MARKED
 static void g2_verify(void) {
     unsigned char fp[SG2_SHA256_LEN], expected[SG2_SHA256_LEN];
     int i, mismatch = 0, slot_configured = 0;
+    int rc;
 
     /* 调试模式:标准答案全零(流水线未注入) → 跳过,不误伤 */
     for (i = 0; i < SG2_HASH_LEN; i++) {
@@ -757,7 +1094,17 @@ static void g2_verify(void) {
     }
     if (!slot_configured) return;
 
-    if (g2_collect_fp(fp) != 0) return;   /* 环境异常 → 未检出 */
+    /* 2026-11-24 多路化：-2 = APK 读取被劫持（≥2 路指纹不一致）。
+     * 这是新增的独立失败类别，走本线自己的处置路径（g2_fail），
+     * 与「环境异常」（rc != 0，静默未检出）严格区分 —— 后者绝不误伤，
+     * 前者是确凿的对抗行为，必须杀。 */
+    rc = g2_collect_fp(fp);
+    if (rc == -2) {
+        G2LOG("g2 multi-route fp mismatch (apk read hijacked?)");
+        g2_fail();
+        return;
+    }
+    if (rc != 0) return;   /* 环境异常 → 未检出，绝不误伤 */
 
     g2_derive(fp, expected);
     for (i = 0; i < SG2_HASH_LEN; i++) mismatch |= expected[i] ^ SG2_STORED[i];

@@ -35,6 +35,13 @@ inline hook 把 `open(base.apk)` 重定向到诱饵包（内含官方证书）�
 判定：**成功 ≥2 路且指纹不一致 → fail-closed**（`return -2`）。
 单路失败（seccomp / 平台不支持）只记日志跳过，不冤杀正常包。
 
+**第二独立线（`sig_guard2.c`）同日已对齐多路化**（2026-11-24）：
+`g2_collect_fp()` 同样 6 路交叉采集，但全部函数在第二线文件内**独立实现**
+（`g2_raw_syscall` / `g2_open_route` / `g2_find_apk_fd`），与第一线零代码
+共享——形态相似是平台约束（armv7 r7 / readlinkat 直投），不是复制。
+不一致 → 走第二线自己的处置 `g2_fail()`。测试：`test-sig-guard2.sh`
+第 4 项（宿主多路不误伤 + 指纹与 extract-cert-fp.py 对拍）。
+
 ### 日志（排障用）
 
 每路一次简报 + 末尾一张对齐表，少数派标 `<== 不一致`：

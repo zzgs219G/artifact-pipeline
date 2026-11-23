@@ -73,8 +73,18 @@ PY
 # ── ② 校验侧:把 C 文件编成可测(去 static 改名 + 注入固定 salt) ──
 # 做法:不用 sig_guard2.h(避免 static const 重定义冲突),
 #      直接把源文件里的 #include "sig_guard2.h" 替换成内联的测试定义。
+# 2026-11-24 追加：同时暴露 g2_collect_fp（多路采集入口），
+#   供第 4 项在宿主端跑【生产实现】的多路采集与指纹对拍。
+# 2026-11-24 再追加：摘除 g2_entry 的 constructor 属性 —— 第 4 项设置了
+#   SIGGUARD2_TEST_APK 后，constructor 的 g2_verify 也会定位到真 APK、
+#   与本测试注入的假 SG2_STORED 比对 → mismatch → g2_fail() → 进程在
+#   main 之前就被 SIGKILL（实测 exit=137，表现为"输出为空"）。
+#   原先没暴露是因为旧测试从不设该环境变量（定位失败 → 静默 return）。
 sed -e 's/static void g2_derive(/void g2_derive_test(/' \
     -e 's/g2_derive(fp, expected)/g2_derive_test(fp, expected)/' \
+    -e 's/static int g2_collect_fp(/int g2_collect_fp_test(/' \
+    -e 's/rc = g2_collect_fp(fp)/rc = g2_collect_fp_test(fp)/' \
+    -e 's/^__attribute__((constructor))$/\/* 测试副本:摘除 constructor,防 g2_verify 在 main 前误杀 *\//' \
     -e 's|#include "sig_guard2.h"|#include "guard2_test.h"|' \
     "$SRC" > "$T/guard2_test.c"
 
@@ -170,6 +180,79 @@ if [[ -x "$T/tn" ]]; then
     fi
 else
     bad "第 3 项编译失败(见下)"; head -5 "$T/neg.log"
+fi
+
+# ── ④ 多路采集不误伤 + 指纹端到端对拍（2026-11-24，宿主端）─────────────
+#
+# 覆盖：g2_collect_fp 的【生产实现】（非测试复制品，§2.2 纪律）：
+#   · 6 路里宿主只有 open/openat/openat64 三路可用（svc/syscall/sysfd
+#     是 ARM 内联汇编，宿主 x86 下整体不编译 → 各自失败并跳过）；
+#   · 断言 rc=0（多路循环在「部分路线失败」时不误伤 —— 这正是
+#     "单路失败只跳过" 的判定语义）；
+#   · 断言多数派指纹与 extract-cert-fp.py（官方提取器）逐字节一致。
+#
+# 反向验证（做过的）：把 g2_collect_fp 里多数派选取的 `votes > base_votes`
+#   改成 `votes >= base_votes` → 本项仍绿（正常包每路指纹都相同，
+#   多数派怎么选都一样）。它的定位是【不误伤 + 指纹正确】，"检出劫持"
+#   的判定在宿主上测不了（没有第二路线可制造分歧），由真机的
+#   "陌生签名" 场景覆盖（交接文档 §6.1）。
+#
+# APK 发现逻辑与 test-so-lock.sh 同源（TEST_APK > 样本 > 简盒目录）。
+G2_APK=""
+if [[ -n "${TEST_APK:-}" && -f "$TEST_APK" ]]; then
+    G2_APK="$TEST_APK"
+elif [[ -f "$ROOT/scripts/样本.apk" ]]; then
+    G2_APK="$ROOT/scripts/样本.apk"
+elif ls /storage/emulated/0/简盒/*_sign.apk >/dev/null 2>&1; then
+    G2_APK=$(ls -t /storage/emulated/0/简盒/*_sign.apk 2>/dev/null | head -1)
+fi
+if [[ -z "$G2_APK" ]]; then
+    echo "  ⚠ 缺已签名 APK，多路对拍项跳过（用 TEST_APK=<已签名.apk> 指定）"
+else
+    cat > "$T/multi.c" <<'C'
+#include <stdio.h>
+#include <string.h>
+#include "guard2_test.h"
+/* SG2_SHA256_LEN 是 sig_guard2.c 内部定义（算法固有 32），
+ * 测试端只有 guard2_test.h 的 SG2_HASH_LEN（业务摘要长度）——
+ * 指纹就是 SHA-256 输出，两者当前相等；用业务长度对拍即可。 */
+int g2_collect_fp_test(unsigned char fp[SG2_HASH_LEN]);
+int main(int argc, char **argv) {
+    unsigned char fp[SG2_HASH_LEN];
+    static const char dd[] = "0123456789abcdef";
+    char hex[SG2_HASH_LEN * 2 + 1];
+    const char *expect;
+    int i, rc, d = 0;
+    if (argc < 2) { printf("NOEXPECT\n"); return 2; }
+    expect = argv[1];
+    rc = g2_collect_fp_test(fp);
+    if (rc != 0) { printf("RC=%d\n", rc); return 1; }
+    for (i = 0; i < SG2_HASH_LEN; i++) {
+        hex[i * 2]     = dd[fp[i] >> 4];
+        hex[i * 2 + 1] = dd[fp[i] & 15];
+    }
+    hex[SG2_HASH_LEN * 2] = '\0';
+    for (i = 0; i < SG2_HASH_LEN * 2; i++)
+        if (hex[i] != expect[i]) d = 1;
+    printf(d ? "FP_DIFF %s\n" : "FP_MATCH\n", hex);
+    return d;
+}
+C
+    # 期望指纹：官方提取器（冻结资产）从同一个 APK 提取
+    FP_EXPECT=$(python3 "$ROOT/scripts/guard/hash/extract-cert-fp.py" "$G2_APK" 2>/dev/null || true)
+    if [[ ! "$FP_EXPECT" =~ ^[0-9a-f]{64}$ ]]; then
+        bad "extract-cert-fp.py 提取指纹失败（输出: ${FP_EXPECT:-空}）"
+    elif $CC -O1 -D_GNU_SOURCE -DSIGGUARD2_HOST_TEST -I"$T" -I"$GUARD_SRC" \
+            "$T/guard2_test.c" "$T/multi.c" -o "$T/tm" -ldl 2>"$T/multi.log"; then
+        RM_="$(SIGGUARD2_TEST_APK="$G2_APK" timeout 30 "$T/tm" "$FP_EXPECT" 2>&1 || true)"
+        if [[ "$RM_" == "FP_MATCH" ]]; then
+            ok "多路采集不误伤且指纹对拍一致(宿主 3/6 路, rc=0, fp==官方提取)"
+        else
+            bad "多路采集异常: $RM_"
+        fi
+    else
+        bad "第 4 项编译失败(见下)"; head -8 "$T/multi.log"
+    fi
 fi
 
 echo "══════════════════════════════════════════════════"
