@@ -172,7 +172,8 @@ def rebuild_apk(src_apk, dst_apk, replace_entries):
 
 def zipalign(src, dst):
     """对齐。找不到 zipalign 就原样拷，并明确告知（不静默当作已对齐）。"""
-    for cand in (shutil.which('zipalign'),
+    for cand in (os.environ.get('SIGFIX_ZIPALIGN'),
+                 shutil.which('zipalign'),
                  os.path.expanduser('~/逆向工具/bin/zipalign'),
                  os.path.expanduser('~/逆向工具/android-tools/zipalign')):
         if cand and os.path.isfile(cand):
@@ -427,7 +428,14 @@ def run(in_apk, out_apk, keep_work=None, api=30, full_origin=False):
                 print(f'==> zipalign（复用前）: {used}')
                 tmp_apk = aligned_in
             else:
-                print('⚠️ 未对齐（找不到 zipalign），产物可能未 4 字节对齐')
+                # ⚠️ 不能"警告后继续"：未对齐的中间包 + 数据复用平移，
+                # resources.arsc 必然落在非 4 倍数 → 装机被拒。
+                # 这是必需依赖，缺了就该在构建期失败，不要产出一个装不上的包。
+                raise RuntimeError(
+                    '找不到 zipalign —— 无法保证 resources.arsc 的 4 字节对齐。\n'
+                    '  Android R+ 装机要求：resources.arsc 必须 STORED 且 4 字节对齐。\n'
+                    '  修复：安装 Android build-tools 并确保 zipalign 在 PATH，\n'
+                    '        或用 SIGFIX_ZIPALIGN=<path> 指定。')
 
             print('==> 数据复用打包（origin.apk 与整包共享字节）')
             reuse_mod = _load_module('zip_reuse', ('scripts', 'uncheck', 'zip-reuse.py'))

@@ -71,13 +71,18 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # native 层（APK 路径重定向）需要 NDK 交叉编译 libusign.so
-      # 2026-11-23 新增：覆盖「App 自己读 APK 文件解析签名」这条路径
-      - name: Setup Android NDK
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-          add-to-path: true
+      # build-tools 提供 zipalign（对齐）与 apksigner（sign=true 时用）。
+      #
+      # ⚠️ 2026-11-23 修：此前只装 NDK(nttld/setup-ndk)，而 runner 上
+      # **没有 zipalign** → run.py 打印「⚠️ 未对齐」后继续，中间包未对齐 →
+      # 数据复用平移后 resources.arsc 落在 mod4=3 →
+      # 装机被拒：Targeting R+ requires the resources.arsc ... aligned on a
+      # 4-byte boundary。这一步是必需依赖，不是可选优化。
+      #
+      # NDK 实际用不到：libusign.so 是 git 内已编好的产物，workflow 从不
+      # 调用 build-native.sh（native 层改代码时需本地重编并提交 so）。
+      - name: Setup Android SDK (zipalign / apksigner)
+        uses: android-actions/setup-android@v3
 
       - name: 校验卡片与解释器
         run: |
