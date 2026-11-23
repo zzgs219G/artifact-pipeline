@@ -58,6 +58,10 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/tso.XXXXXX" 2>/dev/null \
 # 2026-10-31 消费方化：设施源码不再存放在本仓库，统一从 tools/nox.zip 解压
 # （上游 nox 仓库是唯一真相源）。require/source 公共库以复用 ensure_nox。
 source "$ROOT/scripts/lib/common.sh"
+# 宿主编译器：必须选「能在本机执行」的那个（CI 的裸 clang 被转发到 NDK
+# 交叉编译器，编出 ARM 产物在 x86_64 runner 上跑不了）。
+source "$ROOT/scripts/lib/host-cc.sh"
+HOST_CC="$(nc_pick_host_cc || command -v clang || command -v gcc || echo clang)"
 GUARD_SRC="$(ensure_nox_src)"   # 回归测试必须源码形态（要解析/编译 .c）
 SRC="$ROOT/scripts/guard/src"
 LOCK="$GUARD_SRC/so-section-lock.py"
@@ -1263,9 +1267,17 @@ PYC32MAIN
     if ! grep -q 'NC_CTR_DOM_HEADRO' "$PARITY_DIR/parity.c" \
        || ! grep -q 'msg\[17\]' "$PARITY_DIR/parity.c"; then
         bad "T32 无法从 nc_guard_boot.c 抽取 ncg_ctr_xor 函数体（函数被改名/改签名？）"
-    elif clang -O2 -I"$WORK" "$PARITY_DIR/parity.c" "$WORK/nc_guard_key.c" \
+    elif "$HOST_CC" -O2 -I"$WORK" "$PARITY_DIR/parity.c" "$WORK/nc_guard_key.c" \
             -o "$PARITY_DIR/parity" 2>"$PARITY_DIR/build.log"; then
-        if ( cd "$PARITY_DIR" && ./parity > c_out.txt ); then
+        # ⚠️ 判据必须是「能不能在本机执行」，不是「编译器名叫什么」：
+        #    CI 的裸 clang 被转发到 NDK aarch64 包装器（为了让 jni.h 可达），
+        #    编出的是 ARM 二进制，在 x86_64 runner 上跑不了 —— 症状是
+        #    `./parity: cannot execute binary file: Exec format error`
+        #    （实测 run 45239303047）。这里用可执行性提前判，跑不了就明确
+        #    skip 并打印原因，不让它假红。
+        if ! ( cd "$PARITY_DIR" && ./parity >/dev/null 2>&1 ); then
+            skip "T32 宿主编译器产出无法在本机执行（CI 的 clang 被转发到 NDK 交叉编译器）"
+        elif ( cd "$PARITY_DIR" && ./parity > c_out.txt ); then
             if python3 - "$LOCK" "$PARITY_DIR/c_out.txt" <<'PYT32A'
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location('lock', sys.argv[1])

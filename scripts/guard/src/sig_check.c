@@ -1446,7 +1446,18 @@ static int sig_open_route(int route, const char *path) {
     }
 #if defined(__aarch64__) || defined(__arm__)
     if (route == SIG_ROUTE_SYSCALL) {
-        long r = syscall(__NR_openat, (long)AT_FDCWD, (long)path, (long)O_RDONLY, 0L);
+        /* ⚠️ 用 sig_raw_syscall（内联 svc），不用 libc 的 syscall()：
+         *    仓库有一条 T9 断言 —— 产物里不得存在 abort/_exit/raise/syscall
+         *    四个 PLT 表项（攻击者改 4 字节即可废掉整条 kill 链）。
+         *    这里若写 syscall(...) 会把 syscall@plt 拉回来，T9 立刻变红
+         *    （2026-11-24 实测踩过）。
+         *
+         *    与下面 SIG_ROUTE_SVC 的区别：本路走**函数调用**到
+         *    sig_raw_syscall（编译器可能复用一个展开），下面那条是
+         *    **独立内联汇编**写入本函数体。两者对"按代码形态定位"的
+         *    攻击者表现不同，交叉比对仍有意义。 */
+        long r = sig_raw_syscall(__NR_openat, (long)AT_FDCWD, (long)path,
+                                 (long)O_RDONLY, 0L, 0L, 0L);
         return (int)r;
     }
     if (route == SIG_ROUTE_SVC) {
@@ -1544,8 +1555,8 @@ static int sig_find_apk_fd(void) {
         name[nl++] = (char)('0' + v % 10);
         name[nl] = '\0';
 
-        long r = syscall(__NR_readlinkat, (long)dfd, (long)name,
-                         (long)link, (long)(sizeof(link) - 1));
+        long r = sig_raw_syscall(__NR_readlinkat, (long)dfd, (long)name,
+                                 (long)link, (long)(sizeof(link) - 1), 0L, 0L);
         if (r <= 0) continue;
         link[r] = '\0';
         {
