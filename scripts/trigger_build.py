@@ -183,15 +183,30 @@ def build_config(args) -> str:
         # VMP 是一等子项（默认开、可关），混淆是其余子项。
         # ⚠️ 必须写成对象：写成裸 true 时 read_enabled 虽能兜底，
         #    但子项就完全无法表达 —— 等于把 VMP 和混淆都关死了。
+        # ⚠️⚠️ 2026-11-25 修复（CI run 45494974037 全量失败）：
+        # 这里发的字段必须与 configs/v1/config-schema.json 的 soguard.children
+        # **完全一致**，多一个都会被 resolve-config.py 当场拒绝执行：
+        #   ❌ protect_config 解析失败：模块 soguard 出现 schema 未定义的子 key:
+        #      ['bcf','flatten','indirect_call','indirect_branch']
+        # 而那个失败发生在 CI 里、protect.sh 之前，症状是
+        #   "grep: build/schema_rules/args.txt: No such file or directory
+        #    ❌ 未勾选任何模块" —— 看起来像"参数没传"，其实根因是 schema 拒收。
+        #
+        # schema 实际只有 4 个子 key：vm / mba / param_aggregate / vm_flatten
+        # （2026-11-19 的 profile 选型决定：bcf 实测无效已砍、flatten 被
+        #  vm_flatten 取代、indirect_* 未纳入 schema）。
+        # 所以 args 上那些 --obf-bcf/--obf-flatten/--obf-indirect-* 开关
+        # 【不能直接映射到这个 dict】——它们对应的 schema 字段不存在。
+        #
+        # ⚠️ 纪律：往这里加字段前先查 schema（不是查 args 有没有这个开关）：
+        #   python3 -c "import json;d=json.load(open('configs/v1/config-schema.json'))
+        #                print([c['key'] for m in d['modules']
+        #                       if m.get('key')=='soguard' for c in m.get('children',[])])"
         "soguard": {
             "enabled": on["vmp"],
             "vm": not getattr(args, "no_vm", False),
             "mba": bool(getattr(args, "obf_mba", False)),
-            "flatten": bool(getattr(args, "obf_flatten", False)),
-            "bcf": bool(getattr(args, "obf_bcf", False)),
             "param_aggregate": bool(getattr(args, "obf_param_aggregate", False)),
-            "indirect_call": bool(getattr(args, "obf_indirect_call", False)),
-            "indirect_branch": bool(getattr(args, "obf_indirect_branch", False)),
             "vm_flatten": bool(getattr(args, "obf_vm_flatten", False)),
         },
         "stringenc": {"enabled": on["stringenc"]},
@@ -953,11 +968,15 @@ def main() -> int:
     print("")
     print("── 本次勾选的模块 ──")
     print(describe_plan(config))
-    _print_guard_sheet(args)
+    _print_guard_sheet(args, config)
     print("")
 
+    # 2026-11-25 修复：清单打完后必须真正执行构建（原代码被
+    # e6e4cb4 挤出了 main 函数体，导致"打了清单但从不构建"）。
+    return _do_build(args, config, token, key, base_name)
 
-def _print_guard_sheet(args) -> None:
+
+def _print_guard_sheet(args, config=None) -> None:
     """防护清单（2026-11-25，方案四）：出包前一眼看清"这个包到底有什么"。
 
     动机：88.66K 事故（2026-11-24）——用户以为"锁箱自带 VMP"（nox 层的
@@ -976,14 +995,46 @@ def _print_guard_sheet(args) -> None:
         print("  ⚠️ 产物未签名——需自行用 keystore 签（数据复用包必须用 MT 管理器）")
         return
     nox_vmp = "✅" if _nox_vmp_present() else "❌（nox.zip 无 .ncq —— T34 会拦）"
+
+    # ⚠️ 2026-11-25 修 bug：原读 getattr(args, 'vmp'/'sigcheck')，那是
+    #    【命令行原始参数】。用预设档位（--guard-max / --std / --all）时
+    #    模块由预设展开、args 上仍是 False → 清单固定显示"未开"，
+    #    即使实际全开了。这比没有清单更糟：它是【会撒谎的清单】，
+    #    而清单存在的唯一目的就是让人核对产物。
+    #    现改为读展开后的 config（与真正发给网关的是同一份）。
+    def _on(key):
+        """从展开后的 config 里取某模块是否启用。
+
+        ⚠️⚠️ build_config() 返回的是【JSON 文本】而不是 dict（它直接作为
+        config 字段发给网关）。第一版只判了 `not config` 就调 .get() →
+        AttributeError；第二版判 isinstance(dict) → 预设档位全落进回退分支，
+        清单照样撒谎。现先 json.loads 再判。
+        --config 透传模式同理（用户自己给 JSON 文本，也能解析）。"""
+        try:
+            cfg = json.loads(config) if isinstance(config, str) else config
+        except (json.JSONDecodeError, TypeError):
+            cfg = None
+        if not isinstance(cfg, dict):
+            return bool(getattr(args, key, False))
+        if key == "sigcheck":
+            return bool(cfg.get("sigcheck"))
+        if key == "vmp":
+            # config 里是 soguard.enabled（总开关）+ soguard.vm（虚拟化子项）。
+            # ⚠️ 不能只看 enabled：--vmp --no-vm 是合法组合（只混淆不虚拟化），
+            #    那种情况下清单说"VMP 已开"同样是撒谎。
+            sg = cfg.get("soguard")
+            return bool(isinstance(sg, dict) and sg.get("enabled")
+                        and sg.get("vm", True))
+        return bool(getattr(args, key, False))
+
     rows = [
         ("锁箱（.ncx 六段加密）", "✅ 一直在", "--no-lock 可跳过"),
         ("nox 层 VMP（解密链）", nox_vmp, "随 tools/nox.zip 发版"),
         ("消费方层 VMP（签名判定虚拟化）",
-         "✅" if getattr(args, "vmp", False) else "❌ 未开（--vmp 可加）",
+         "✅" if _on("vmp") else "❌ 未开（--vmp 可加）",
          "+200KB~470KB"),
         ("两道签名防线（6 路交叉取证）",
-         "✅" if getattr(args, "sigcheck", False) else "—（未勾 --sigcheck）", ""),
+         "✅" if _on("sigcheck") else "—（未勾 --sigcheck）", ""),
         ("自检报告（真机排障）", "✅ 一直在", "touch xixin_debug 哨兵启用"),
     ]
     print("── 防护清单（本包将包含）──")
@@ -1007,7 +1058,24 @@ def _nox_vmp_present() -> bool:
     except OSError:
         return True
 
+def _do_build(args, config, token, key, base_name):
+    """上传 → 触发 → 等结果 → 下载（原 main() 的后半段）。
 
+    ⚠️⚠️ 2026-11-25 修复结构性损坏（commit e6e4cb4 引入）：
+    那次提交把 _print_guard_sheet / _nox_vmp_present 两个新函数
+    【插进了 main() 函数体中间】，导致 main() 在打完防护清单后
+    就结束（legacy: `print("")` 之后直接空行 + def），而"上传 APK /
+    触发构建 / 等结果 / 下载产物"这一整段（162 行）变成了
+    _nox_vmp_present() 之后的无主代码 —— 语法上能通过（Python 允许
+    函数后跟同缩进语句，只是永不被执行），行为上是【main 永远不构建】。
+
+    症状：trigger_build.py 退出码 0、防护清单打得漂漂亮亮，
+    但网关侧没有任何新任务 —— 这是最坏的一类 bug：它假装成功。
+    e6e4cb4 的 test_guard_max.py 只检查源码里"有没有这段文字"，
+    没检查"它是否可达"，所以 5 条断言全绿。
+
+    修法：把这段原样抽成 _do_build()，由 main() 在打完清单后调用。
+    """
     print("=== 1. 上传 APK 到 R2 ===")
     public_url = upload_apk(args.base, token, args.apk, key, args.dry_run)
     print()
