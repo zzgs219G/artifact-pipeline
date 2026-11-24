@@ -550,7 +550,7 @@ def do_inject(decompiled_dir, so_name, wrapper_override=None, apk_path=None):
         json.dump({'bridge': BRIDGE_DESC, 'wrapper': wrapper, 'so_name': so_name,
                    'marker': MARKER, 'call_marker': CALL_MARKER,
                    'sites': sites,
-                   'generated': [bridge_path, wrapper_path]},
+                   'generated': [bridge_path, wrapper_path, hb_path]},
                   fp, ensure_ascii=False, indent=1)
 
     for n in notes:

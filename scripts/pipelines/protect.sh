@@ -2448,6 +2448,40 @@ if [[ $WANT_STRINGENC -eq 1 ]]; then
   # 残留清理(幂等):上一轮若留下解密桩但本次一条都没加密,不能把旧桩带进产物
   python3 "$ROOT/scripts/string-enc/encrypt-strings.py" clean "$WORK/decompiled"
 
+  # ── 注入类排除（2026-11-25，修架构级死锁）──────────────────────────
+  #
+  # 背景（用户发现的死锁，实测于加固+去校验组合包）：
+  #   SigFixApp.attachBaseContext() → SigFix.install()（装去校验的 native hook）
+  #     → 要打日志 → 用 TAG 字段 → TAG 由 stringenc 桩 aw() 解密
+  #       → 桩类 static { loadLibrary("nc") }
+  #         → libnc.so constructor 立即跑 sig_verify（六路读证书）
+  #           → 此时 libusign 的 hook 还没装 → 六路全读真 base.apk → 诱饵失效
+  #
+  #   即：要装去校验 hook 必须先解密字符串；要解密字符串必须先加载 nc；
+  #       一加载 nc，签名校验就跑完了 —— 两个模块互相卡死。
+  #
+  # 修法：把【我们自己的注入类】排除出字符串加密。它们是排障用的日志文案，
+  # 不含业务逻辑，明文不影响防护强度（业务类照常加密）。
+  #
+  # ⚠️ 不硬编码白名单（用户明确要求）：类名三重动态 ——
+  #    javalink 包装类自适应命名(f5.aa)、stringenc 桩每包随机、
+  #    去校验载荷类将来也可能改。所以从【注入器自己写的清单】推导，
+  #    清单是注入时的真实产物，不是猜的。见 scripts/string-enc/inject-excludes.py
+  EFFECTIVE_STRING_RULES="$STRING_RULES"
+  python3 "$ROOT/scripts/string-enc/inject-excludes.py" "$WORK/decompiled" \
+    -o "$WORK/inject_excludes.txt" || {
+      log_err "注入类排除规则生成失败（它决定哪些类不加密，失败等于防护静默降级）"
+      exit 1
+    }
+  if [[ -s "$WORK/inject_excludes.txt" ]]; then
+    # 合并：用户规则原样保留在前，注入类排除追加在后。
+    # ⚠️ 不能覆盖用户规则文件（那是输入），必须写新文件再传参。
+    { cat "$STRING_RULES"; echo ""; cat "$WORK/inject_excludes.txt"; } \
+      > "$WORK/string_rules_effective.txt"
+    EFFECTIVE_STRING_RULES="$WORK/string_rules_effective.txt"
+    log_info "注入类已排除出字符串加密（防 sigfix 死锁）: $(tr '\n' ' ' < "$WORK/inject_excludes.txt")"
+  fi
+
   STRING_ENC_ARGS=()
   if [[ -f "$WORK/activity_classes.txt" ]]; then
     STRING_ENC_ARGS+=(--classes "$WORK/activity_classes.txt")
@@ -2494,7 +2528,7 @@ if [[ $WANT_STRINGENC -eq 1 ]]; then
       log_info "纯 C 桩种子将写入壳 config（供 ncg_strkey 返回）: $_cstub_seed_hex"
     fi
     python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
-      "$WORK/decompiled" "$STRING_RULES" "${STRING_ENC_ARGS[@]}" \
+      "$WORK/decompiled" "$EFFECTIVE_STRING_RULES" "${STRING_ENC_ARGS[@]}" \
       --apk "$STEP5_APK" \
       --stub-impl native \
       --algo "$_algo_name" \
@@ -2513,12 +2547,12 @@ if [[ $WANT_STRINGENC -eq 1 ]]; then
       _CM_ARG=(--compiled-methods "$WORK/project/jni/nc/compiled_methods.txt")
     fi
     python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
-      "$WORK/decompiled" "$STRING_RULES" "${STRING_ENC_ARGS[@]}" \
+      "$WORK/decompiled" "$EFFECTIVE_STRING_RULES" "${STRING_ENC_ARGS[@]}" \
       --apk "$STEP5_APK" \
       --emit-stub-dex "$WORK/stub.dex" ${_CM_ARG[@]+"${_CM_ARG[@]}"}
   else
     python3 "$ROOT/scripts/string-enc/encrypt-strings.py" \
-      "$WORK/decompiled" "$STRING_RULES" "${STRING_ENC_ARGS[@]}" \
+      "$WORK/decompiled" "$EFFECTIVE_STRING_RULES" "${STRING_ENC_ARGS[@]}" \
       --apk "$STEP5_APK"
   fi
 fi
