@@ -532,6 +532,10 @@ static void *env_watchdog(void *arg) {
     unsigned round = 0;   /* CRC 降频计数:指令检测每轮跑,CRC 每 5 轮跑一次 */
     for (;;) {
         int hit = 0;
+        /* 命中的探针名（2026-11-25）。NULL = 未命中或忘了赋值。
+         * ⚠️ 纯 const char*，不分配内存、无字符串字面量泄露语义
+         *    （这些短标识是英文代号，不含"检测/加固"这类路标词）。 */
+        const char *hit_name = NULL;
         /* 轮询间隔:20s(2026-10-21 修复——此前一直停在 2026-10-16 的调试值
          * sleep(2),注释写着"发布前必须改回"但从未改回,属漏改参数)。
          *
@@ -566,28 +570,60 @@ static void *env_watchdog(void *arg) {
 #endif
         round++;
         /* d4 指令打分(纳秒级)每轮先跑;命中才轮到重的 CRC(命中通常也意味着
-         * 下一轮 CRC 会确认;这里独立判定,两个探针抓的攻击面不同,见各自注释) */
-        if (!hit && libc_hook_probe())       hit = 1;
-        if (frida_port_probe())              hit = 1;
-        if (!hit && frida_maps_probe())      hit = 1;
-        if (!hit && frida_tcp_table_probe()) hit = 1;
-        if (!hit && frida_thread_probe())    hit = 1;
-        if (!hit && frida_unix_probe())      hit = 1;
-        if (!hit && xposed_maps_probe())     hit = 1;
-        if (!hit && xposed_file_probe())     hit = 1;
-        if (!hit && tracer_probe())          hit = 1;
+         * 下一轮 CRC 会确认;这里独立判定,两个探针抓的攻击面不同,见各自注释)
+         *
+         * ⚠️⚠️ 2026-11-25 加"探针归属"（hit_name）：原来 13 个探针全写
+         *    `hit = 1`，出货日志只有一句「常驻复查线程检出危险环境」——
+         *    既不知道是哪个探针，也就无法区分"真被 hook"与"误报"。
+         *    实测（Nivii 加固+去校验包）每次启动 5s 后必报，而真相是
+         *    libusign.so 用 shadowhook 改了 libc .text → libc_text_crc_probe
+         *    必然命中。不报探针名，这个误报就只能靠人猜。
+         *    命名用短标识（≤8 字符）而不是长句：日志一行放得下，
+         *    也不需要为每个探针新增一条 LSG 密文条目。 */
+        if (!hit && libc_hook_probe())       { hit = 1; hit_name = "libchook"; }
+        /* ⚠️ 2026-11-25 顺带修：本行原来缺 `!hit &&` —— frida_port_probe()
+         *    每轮无条件执行，白花一次端口表扫描（命中判定不受影响，
+         *    但和其他 12 行的写法不一致，是明显的抄漏）。 */
+        if (!hit && frida_port_probe())      { hit = 1; hit_name = "prt"; }
+        if (!hit && frida_maps_probe())      { hit = 1; hit_name = "mp"; }
+        if (!hit && frida_tcp_table_probe()) { hit = 1; hit_name = "tcp"; }
+        if (!hit && frida_thread_probe())    { hit = 1; hit_name = "thr"; }
+        if (!hit && frida_unix_probe())      { hit = 1; hit_name = "unix"; }
+        if (!hit && xposed_maps_probe())     { hit = 1; hit_name = "xpm"; }
+        if (!hit && xposed_file_probe())     { hit = 1; hit_name = "xpf"; }
+        if (!hit && tracer_probe())          { hit = 1; hit_name = "tracer"; }
         /* 2026-11-08 追加:全线程 TracerPid + stat state。两项都放在
          * tracer_probe 之后 —— 它们是同一目标(/proc 里的调试痕迹)的
          * 不同通道,主通道没命中才走补充通道,省 I/O。 */
-        if (!hit && tracer_all_threads_probe()) hit = 1;
-        if (!hit && stat_state_probe())         hit = 1;
+        if (!hit && tracer_all_threads_probe()) { hit = 1; hit_name = "tracer_all"; }
+        if (!hit && stat_state_probe())         { hit = 1; hit_name = "stat_state"; }
         /* 2026-11-08 追加：SIGTRAP 陷阱。返回三态 —— 只有 ==1 才判命中，
          * -1（skip）必须当"未检出"，绝不因"建不起线程"误报。 */
-        if (!hit && trap_probe() == 1)          hit = 1;
+        if (!hit && trap_probe() == 1)          { hit = 1; hit_name = "sigtrap"; }
         /* CRC 全量比对降频(2026-10):Inline hook 是"装完长期驻留"型攻击,
-         * 100s 检出延迟对效果无损,换来 80% 轮次的毫秒级开销归零 */
-        if (!hit && (round % 5 == 0) && libc_text_crc_probe()) hit = 1;
-        if (!hit && (round % 5 == 0) && self_text_crc_probe()) hit = 1;
+         * 100s 检出延迟对效果无损,换来 80% 轮次的毫秒级开销归零
+         *
+         * ⚠️ 2026-11-25：libc_crc 是最容易【误报】的一项。libusign.so
+         *    （去校验模块）用 shadowhook 做 inline hook，必然改写内存里
+         *    libc 的 .text → 磁盘 vs 内存 CRC 必然不等。这不是攻击，
+         *    是我们的另一个模块在正常工作。所以这里单独给一个可分辨的
+         *    名字 "libc_crc"，让排查时一眼看出"是它在报，不是 frida"。
+         *
+         * ⚠️⚠️ 而且 libc_crc 命中后要【检查自家工具是否在场】：
+         *    own_uncheck_lib_present() 在 maps 里找 libusign.so。
+         *    在场 → 降级为 "libc_crc_own"（只警告，不参与 hit 判定）；
+         *    不在场 → 保持 "libc_crc" 真命中。
+         *    这是"降噪"不是"免检"：真攻击者若也想靠改 libc 蒙混，
+         *    他不会有 libusign.so；而即便他有，frida/xposed 的那些
+         *    探针（maps/port/thread/unix）照常独立判定，不受本降级影响。 */
+        if (!hit && (round % 5 == 0) && libc_text_crc_probe()) {
+            if (own_uncheck_lib_present != NULL && own_uncheck_lib_present())
+                hit_name = "libc_crc_own";   /* 自家 hook，不算入侵 */
+            else
+                { hit = 1; hit_name = "libc_crc"; }
+        }
+        if (!hit && (round % 5 == 0) && self_text_crc_probe())
+            { hit = 1; hit_name = "self_crc"; }
         /* 代码页完整性(2026-10-30 提交二):解密后 .ncx/.ncxr 明文是否被改。
          * 这是当前唯一能抓 inline hook 的探针 —— 上面两个 CRC 探针比的是
          * 【磁盘 vs 内存】(抓"文件被改后加载"),而 .ncx 在磁盘上是密文,
@@ -596,7 +632,8 @@ static void *env_watchdog(void *arg) {
          * 同样降频到每 5 轮(~25s):全段 CRC 是重探针;inline hook 长期
          * 驻留,25s 内必然被看见,检出的早与晚不影响"能不能看见"。
          * ⚠️ weak 落空(NULL)时跳过,不误判 —— 组合自洽(同心跳的规则)。 */
-        if (!hit && (round % 5 == 0) && ncguard_code_check && !ncguard_code_check()) hit = 1;
+        if (!hit && (round % 5 == 0) && ncguard_code_check && !ncguard_code_check())
+            { hit = 1; hit_name = "ncx_code"; }
         /* 心跳超时(Java 层被删/被绕过)——独立于上面的环境探针,
          * 不占 hit 位:env_fail 路径相同,但语义上分两条日志便于排障
          * ⚠️ 2026-11-08: 加 NULL 检查。weak 符号缺失时直接调用会跳 0 崩溃
@@ -605,7 +642,15 @@ static void *env_watchdog(void *arg) {
         if (!hit && nc_heartbeat_expired && nc_heartbeat_expired())  hit = 2;
         if (hit == 1) {
             /*LSG:ENV_WATCHDOG_HIT|【失败】常驻复查线程检出危险环境*/
-            envlog_c(1, LSG_ENV_WATCHDOG_HIT, NULL);
+            /* ⚠️ 2026-11-25：带上探针名。envlog_c 的第三参数是 detail，
+             *    会拼在中文文案后成「... (probe=libc_crc)」。
+             *    hit_name 兜底 "?" —— 只可能是新增探针忘了赋值，
+             *    宁可显示问号也不要静默。 */
+            {
+                char _hb[32];
+                snprintf(_hb, sizeof(_hb), "probe=%s", hit_name ? hit_name : "?");
+                envlog_c(1, LSG_ENV_WATCHDOG_HIT, _hb);
+            }
             env_fail();
         } else if (hit == 2) {
             /*LSG:ENV_HB_LOST|【失败】Java 心跳丢失(壳被删或被绕过)*/
@@ -635,6 +680,14 @@ static void env_check_run(void) {
     int r;
 
     envlog_detect();
+
+    /* ⚠️ 2026-11-25 启动分隔线（与 sig_check.c 的同款，理由见那里的注释）：
+     * 两个 constructor 都会往同一批日志文件追加，多个安装包混合后
+     * 无法分辨哪段属于哪次启动。env_check 与 sig_verify 属于同一次
+     * 启动的相邻两段，各打一条分隔线，便于按段归属。 */
+    envlog("I", "---------------------------------------- "
+                "new launch (env_check) "
+                "----------------------------------------");
 
     /*LSG:ENV_START|【流程】so 已加载,进入环境检测 env_check_run*/
     envlog_c(0, LSG_ENV_START, NULL);

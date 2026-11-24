@@ -70,6 +70,12 @@ int frida_tcp_table_probe(void);
 int frida_thread_probe(void);
 int frida_unix_probe(void);
 int xposed_maps_probe(void);
+/* 自家工具在场识别（2026-11-25）：maps 里有 libusign.so = 去校验模块在跑。
+ * 用途见 env_check.c 里 libc_crc 分支 —— 把自家 hook 造成的 libc CRC
+ * 偏差降级为警告，不与真攻击混为一谈。
+ * ⚠️ weak：宿主测试与精简组合可能不编 env_probes.c 的这一段，
+ *    调用前必须判 NULL（与 nc_heartbeat_expired 同一纪律）。 */
+int own_uncheck_lib_present(void) __attribute__((weak));
 int xposed_file_probe(void);
 int tracer_probe(void);
 int tracer_all_threads_probe(void);

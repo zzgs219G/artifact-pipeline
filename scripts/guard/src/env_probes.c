@@ -226,6 +226,52 @@ int xposed_maps_probe(void) {
     return hit;
 }
 
+/* b1b. 自家工具在场识别（2026-11-25）—— 防"把自己的 hook 当入侵"
+ *
+ * ==== 解决什么 ====
+ * 本仓库的两条流水线会同时作用于同一个包：
+ *   · 加固（protect.sh）    → 提供本 so，含 env_check 的 libc_crc 探针
+ *   · 去校验（uncheck.sh）  → 注入 libusign.so，用 shadowhook 做 inline hook
+ *
+ * shadowhook 会【改写内存里 libc 函数的机器码】（那是 inline hook 的定义），
+ * 于是 libc_text_crc_probe 比出「磁盘 vs 内存不一致」→ 判危险环境 → env_fail。
+ * 实测（Nivii 加固+去校验包）：每次启动 5s 后必报，而那是主人自己装的工具
+ * 在正常工作，不是攻击。
+ *
+ * ==== 判据为什么用 maps 而不是别处 ====
+ * libusign.so 必然被 dlopen 进本进程（否则 hook 装不上），maps 里必然有它。
+ * 读 maps 是既有探针的成熟路径（frida_maps / xposed_maps 同构），
+ * 不需要新机制、不需要新权限。
+ *
+ * ==== ⚠️ 这是"降噪"不是"免检" ====
+ * 返回 1 时调用方【只降级为警告日志，不改变 hit 判定以外的任何处置】——
+ * 具体见 env_check.c 里 libc_crc 分支。绝不因为"可能是自己人"就放行
+ * 真正的 frida/xposed（那些走各自的探针，与本函数无关）。
+ *
+ * ⚠️ 特征串走 LSGS 密文（"libusign" 是去校验模块的库名，明文进 so 等于
+ *    告诉逆向者"这个加固包被自家工具改过"，属信息泄露）。 */
+/*LSGS:OWN_UNCHECK_LIB|libusign.so*/
+#if defined(__GNUC__)
+__attribute__((section(NC_SEC_CODE), retain))
+#endif
+int own_uncheck_lib_present(void) {
+    safe_lines_t it;
+    char *line;
+    char s1[24];
+    int hit = 0;
+    const char *k1 = lsg_s(LSGS_OWN_UNCHECK_LIB, s1, sizeof(s1));
+    char _pb[24];
+    const char *_p;
+    if (!k1) return 0;                      /* 解码失败 → 当作"不在场"（保守） */
+    _p = lsg_s(LSGS_PATH_MAPS, _pb, sizeof(_pb));
+    if (!_p || safe_lines_open(&it, _p) != 0) return 0;
+    while ((line = safe_lines_next(&it)) != NULL) {
+        if (strstr(line, k1)) { hit = 1; break; }
+    }
+    safe_lines_close(&it);
+    return hit;
+}
+
 /* b2. 已加载类特征:Xposed 环境 Java 栈里常有 XposedBridge(读自身进程 oatatmp 不可靠,
  * 改为探测 Xposed 安装痕迹文件——仅命中高置信路径)
  * 5 个路径全走 LSGS 密文(路径本身也是检测特征,不明文进 so)。 */
