@@ -186,6 +186,10 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/repack/tests/test_mark_native.py
 
+      - name: guard-max 预设契约（5 断言，含反向验证回归）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/actions/tests/test_guard_max.py
+
       # ── 第二批（2026-11-01）：中等耗时，仍【不需要 nox / NDK】──────
       # 这些套件只依赖 JDK + 仓库内已入库的工具（apktool.jar / d8.jar），
       # 本地实测合计约 4 分钟。放进来能覆盖 dex 层与加壳层的回归，

@@ -151,6 +151,18 @@ def build_config(args) -> str:
         #    误以为默认强度就该这样，且体积代价不透明）。要 VMP 请显式 --vmp。
         on = dict(sigcheck=True, dex2c=True, stringenc=True,
                   antidiff=True, envcheck=True, packer=True, vmp=False)
+    elif args.guard_max:
+        # --guard-max（2026-11-25，方案四）：重防护预设【起点】——
+        # 预填 std 全集 + envcheck + 消费方 VMP，随后用户可用逐个开关
+        # 【覆写】（store_true 的缺省 False 不覆写；显式给的模块在本组
+        # only_explicit 里为 True 才覆盖预填——"预设起点+自由覆写"，
+        # 不是互斥档位，2026-11-25 用户定调）。
+        # 含 vmp 是与 --all 的关键差异（--all 不含 vmp 是 2026-11-10 用户决定）。
+        on = dict(sigcheck=True, dex2c=True, stringenc=True,
+                  antidiff=True, envcheck=True, packer=False, vmp=True)
+        for k in ("dex2c", "stringenc", "antidiff", "envcheck", "packer", "vmp"):
+            if getattr(args, k, False):
+                on[k] = True
     elif args.std:
         on = dict(sigcheck=True, dex2c=True, stringenc=True,
                   antidiff=False, envcheck=False, packer=False, vmp=False)
@@ -789,9 +801,13 @@ def main() -> int:
     g.add_argument("--antidiff", action="store_true", help="防对比混淆")
     g.add_argument("--envcheck", action="store_true", help="环境检测")
     g.add_argument("--packer", action="store_true", help="基础加壳")
+    # ── 两层防护的命名（2026-11-25，用户指导："nox obf 我就知道是锁箱加
+    #    vmp，单独 vmp 我就知道是消费方的"）—— help 文案必须让这个区分
+    #    一眼可见，不能再出现"以为有实际没有"的 88.66K 式认知错位。
     g.add_argument("--vmp", action="store_true",
-                   help="so层保护总开关：VMP 虚拟化（核心）+ 可选附加混淆。"
-                        "本轮不勾任何 --obf-* 时只有 VMP")
+                   help="【消费方层 VMP】把签名校验判定逻辑虚拟化（默认不开；"
+                        "开了 so 大 200KB+）。⚠️ 与 --nox-obf 是两个独立层："
+                        "nox 层的锁箱+VMP 一直在，不靠本参数")
     # 附加混淆（vmp 的子项）。不指定时只做 VMP —— 与 schema 的
     # 「结构性混淆默认开」不同，CLI 走显式路径，避免 --vmp 意外带来体积变化。
     g.add_argument("--obf-mba", action="store_true",
@@ -819,6 +835,10 @@ def main() -> int:
                    help="快速档：只 sigcheck（默认，约 1-2 分钟）")
     p.add_argument("--std", action="store_true",
                    help="标准档：sigcheck + dex2c + stringenc（约 5-10 分钟）")
+    p.add_argument("--guard-max", action="store_true",
+                   help="重防护档：std + vmp + envcheck + antidiff（预设【起点】，"
+                        "仍可用后面的逐个开关覆写——例如再 --no-vm 关掉消费方 "
+                        "VMP。⚠️ 这是快捷预填不是互斥档位：自由选配永远是王）")
 
     r = ap.add_argument_group("规则文件（不给则用默认）")
     r.add_argument("--dex2c-rules", default="",
@@ -933,7 +953,50 @@ def main() -> int:
     print("")
     print("── 本次勾选的模块 ──")
     print(describe_plan(config))
+    _print_guard_sheet(args)
     print("")
+
+
+def _print_guard_sheet(args) -> None:
+    """防护清单（2026-11-25，方案四）：出包前一眼看清"这个包到底有什么"。
+
+    动机：88.66K 事故（2026-11-24）——用户以为"锁箱自带 VMP"（nox 层的
+    确自带），但消费方层 VMP 需要 --vmp 且当时没开，两层全缺只靠锁箱，
+    so 仅 88.66K 无人体感异常。这份清单把两层防护的存在性变成构建输出的
+    固定内容，"以为有实际没有"从人记变成机器报。
+    """
+    nox_vmp = "✅" if _nox_vmp_present() else "❌（nox.zip 无 .ncq —— T34 会拦）"
+    rows = [
+        ("锁箱（.ncx 六段加密）", "✅ 一直在", "--no-lock 可跳过"),
+        ("nox 层 VMP（解密链）", nox_vmp, "随 tools/nox.zip 发版"),
+        ("消费方层 VMP（签名判定虚拟化）",
+         "✅" if getattr(args, "vmp", False) else "❌ 未开（--vmp 可加）",
+         "+200KB~470KB"),
+        ("两道签名防线（6 路交叉取证）",
+         "✅" if getattr(args, "sigcheck", False) else "—（未勾 --sigcheck）", ""),
+        ("自检报告（真机排障）", "✅ 一直在", "touch xixin_debug 哨兵启用"),
+    ]
+    print("── 防护清单（本包将包含）──")
+    for name, state, note in rows:
+        print(f"  {state:<12} {name}  {note}")
+    print("  （装机后核对：touch xixin_debug → ncguard_log.md 的 VMP/段表）")
+
+
+def _nox_vmp_present() -> bool:
+    """tools/nox/so-guard 的 .a 里有没有 .ncq（VMP 字节码段）。
+    与 test-so-lock.sh T34 同判据；读不到返回 True（不阻断，T34 兜底）。"""
+    import glob as _glob
+    libs = _glob.glob(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "tools", "nox", "so-guard", "lib", "arm64-v8a", "libnox.a"))
+    if not libs:
+        return True
+    try:
+        with open(libs[0], "rb") as f:
+            return b".ncq" in f.read()
+    except OSError:
+        return True
+
 
     print("=== 1. 上传 APK 到 R2 ===")
     public_url = upload_apk(args.base, token, args.apk, key, args.dry_run)
