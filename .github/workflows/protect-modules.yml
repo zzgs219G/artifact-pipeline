@@ -190,6 +190,15 @@ jobs:
       # 这些套件只依赖 JDK + 仓库内已入库的工具（apktool.jar / d8.jar），
       # 本地实测合计约 4 分钟。放进来能覆盖 dex 层与加壳层的回归，
       # 而 Bug 1/Bug 2 那类"构建绿装机崩"的事故面主要在 stringenc/packer。
+      - name: uncheck 端到端（注入链路产物断言，含反向验证回归）
+        if: steps.scope.outputs.code == 'true'
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;34.0.0'
+      - name: uncheck 端到端（run.py 全链路产物断言）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/uncheck/tests/test-e2e.py
+
       - name: anti-diff 冒烟（含报错三十一~四十一回归）
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/anti-diff/tests/test-smoke.sh
