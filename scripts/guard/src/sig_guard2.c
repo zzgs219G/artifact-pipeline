@@ -1109,7 +1109,11 @@ static void g2_verify(void) {
      * 前者是确凿的对抗行为，必须杀。 */
     rc = g2_collect_fp(fp);
     if (rc == -2) {
-        G2LOG("g2 multi-route fp mismatch (apk read hijacked?)");
+        /* 死亡通告（2026-11-24）：带防线标识。此前这里只有一句
+         * "g2 multi-route fp mismatch"，真机上 SIGKILL 后 logcat 缓冲常被
+         * 冲掉，用户/排查者看到第一线的 sigcheck_log 会把死因错归到
+         * 第一线 —— 两线独立处置，归因错 = 修错方向。 */
+        G2LOG("【防线2·sig_guard2】多路证书指纹不一致(疑似 APK 读取被劫持) → SIGKILL");
         g2_fail();
         return;
     }
@@ -1118,7 +1122,10 @@ static void g2_verify(void) {
     g2_derive(fp, expected);
     for (i = 0; i < SG2_HASH_LEN; i++) mismatch |= expected[i] ^ SG2_STORED[i];
 
-    if (mismatch != 0) g2_fail();
+    if (mismatch != 0) {
+        G2LOG("【防线2·sig_guard2】指纹比对不一致(证书与构建期标准答案不符) → SIGKILL");
+        g2_fail();
+    }
 }
 
 /* so 加载即检(与第一线的 constructor 并存,顺序无关、互不依赖) */

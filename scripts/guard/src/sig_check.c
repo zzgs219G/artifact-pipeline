@@ -1238,7 +1238,7 @@ static void *delayed_kill_0(void *arg) {
     unsigned int seed = (unsigned int)(time(NULL) ^ getpid() ^ 0x51u);
     int delay = 1 + (int)(rand_r(&seed) % 2);
     LOGD("v");
-    /*LSG:KILL|【流程】延时退出线程启动:随机延时后 abort(校验失败后的反应)*/
+    /*LSG:KILL|【流程】【防线1·sig_check】延时退出线程启动:随机延时后 abort(校验失败后的反应)*/
     LSGD(LSG_KILL, "%s", "delay=1~3s");
     /* [so加固 2026-10 追加] 延时堆破坏:校验失败除延时 abort 外,先在后台
      * 以随机间隔持续 malloc/free 不同尺寸的块(不写入,不崩溃),使攻击者
@@ -1796,7 +1796,7 @@ static int sig_collect_fp(unsigned char actual[32]) {
         /* 至少两路成功且不一致 → 被劫持。这是本机制的核心判据：
          * 单一取文件路径被重定向时，只有被动过的那一路会给诱饵证书。 */
         if (mismatch) {
-            /*LSG:ROUTE_SPLIT|【失败】多路证书指纹不一致(疑似 APK 读取被劫持)*/
+            /*LSG:ROUTE_SPLIT|【失败】【防线1·sig_check】多路证书指纹不一致(疑似 APK 读取被劫持)*/
             LSGE0(LSG_ROUTE_SPLIT);
             return -2;        /* 独立语义：劫持，走最重处置 */
         }
@@ -1874,7 +1874,7 @@ static void sig_verify(void) {
         return;
     }
     LOGE_S("nc: mm");   /* so加固2026-10: 原文 "signature mismatch (actual vs expected...)",排障走上方 fp 行 */
-    /*LSG:VERIFY_MM|【失败】指纹比对不一致 → 校验失败,延时退出已安排*/
+    /*LSG:VERIFY_MM|【失败】【防线1·sig_check】指纹比对不一致 → 校验失败,延时退出已安排*/
     LSGE0(LSG_VERIFY_MM);
 
 fail:
