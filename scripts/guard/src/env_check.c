@@ -580,7 +580,17 @@ static void *env_watchdog(void *arg) {
          *    必然命中。不报探针名，这个误报就只能靠人猜。
          *    命名用短标识（≤8 字符）而不是长句：日志一行放得下，
          *    也不需要为每个探针新增一条 LSG 密文条目。 */
-        if (!hit && libc_hook_probe())       { hit = 1; hit_name = "libchook"; }
+        if (!hit && libc_hook_probe()) {
+            /* ⚠️ 2026-11-25：与 libc_crc 同源误报，一并降级。
+             * 实测（真机 06:33）报的就是这一项，不是 libc_crc ——
+             * libc_hook_probe 判的是"libc 函数开头指令被改写"（inline hook
+             * 特征），而 shadowhook 做的正是这件事。
+             * 判据相同：libusign.so 在场 → 自家去校验工具 → 降为警告。 */
+            if (own_uncheck_lib_present != NULL && own_uncheck_lib_present())
+                hit_name = "libchook_own";   /* 自家 hook，不算入侵 */
+            else
+                { hit = 1; hit_name = "libchook"; }
+        }
         /* ⚠️ 2026-11-25 顺带修：本行原来缺 `!hit &&` —— frida_port_probe()
          *    每轮无条件执行，白花一次端口表扫描（命中判定不受影响，
          *    但和其他 12 行的写法不一致，是明显的抄漏）。 */
