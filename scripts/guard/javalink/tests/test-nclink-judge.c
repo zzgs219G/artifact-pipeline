@@ -12,16 +12,19 @@
  *   真实 base.apk，把 t1 发布给 nc_link.c；ncVerify 优先用它判定，Java 入参
  *   降级为风控对照数据。
  *
- * 【本测试钉住哪四条（漏一条就会退回误杀或退回漏洞）】
- *   J1 Java 值可信、可信槽未就绪     → 通过（旧语义，envcheck-only 环境）
- *   J2 Java 值不可信、可信槽未就绪   → 拒（旧语义 fail-closed）
- *   J3 可信槽=基准、Java 值=诱饵     → 【通过】← 本次修复的核心场景
- *   J4 可信槽=诱饵、Java 值=基准     → 【拒】← 反作弊：不能靠 PM 申辩通关
+ * 【本测试钉住哪六条（漏一条就会退回误杀或退回漏洞）】
+ *   J1 Java 值可信、可信槽未就绪     → NC_JUDGE_OK_NO_TRUSTED（旧语义）
+ *   J2 Java 值不可信、可信槽未就绪   → NC_JUDGE_DENY（旧语义 fail-closed）
+ *   J3 可信槽=基准、Java 值=诱饵     → NC_JUDGE_OK_PM_TAINTED ← 修复点
+ *   J4 可信槽=诱饵、Java 值=基准     → NC_JUDGE_DENY ← 反作弊
+ *   J5 可信槽=基准、Java 入参异形    → NC_JUDGE_OK_PM_TAINTED（不被入参拖走）
+ *   J6 两源一致且等于基准            → NC_JUDGE_OK（正常包）
  *
- * 【为什么 J4 是关键】
- *   如果实现写成"可信值不符时再看 Java 报的值"，J4 就会通过 —— 攻击者只需
- *   让 PackageManager 报基准值即可绕整道门。J4 存在的唯一目的就是拦住那种
- *   写法，它是本测试的反向验证（改坏实现必红）。
+ * 【J3 与 J4 互为反向验证】
+ *   J3 是修复点：去校验环境下必须放行（否则就是这次的真机闪退）。
+ *   J4 是反作弊：真被重签时不能靠 PM 申辩通关。
+ *   把实现改成"可信不符时采信 PM"→ J4 红；
+ *   把实现改成"永远只看 Java 值"  → J3 红。
  *
  * ⚠️ 链接的是 scripts/guard/src/nc_link.c【本身】，不在本文件里复制实现
  *    （AGENTS.md §2.2：测试替生产保密的测试等于没测）。
@@ -37,12 +40,14 @@
 int nc_verify_t1(const unsigned char *t1, int len);
 int nc_link_judge(const unsigned char *java_t1, int java_len);
 
-/* 被测文件里的弱符号声明 —— 宿主测试里我们用强定义覆盖它，
- * 从而可以在同一个可执行文件里模拟"真实测到了什么"。
- * ⚠️ 必须与 nc_link.c 的声明签名逐字一致（含 weak 属性）：
- *    被 nc_link.c 以 weak 方式引用，测试侧改用强定义即可覆盖 GNU 的
- *    弱/强同名解析规则。 */
-int nc_trusted_t1_test_install(const unsigned char t1[32]);
+/* 断言用的结果码。⚠️ 不 include nc_link.c 的宏 —— 它是 .c 不是头文件；
+ *    这里重抄一份值必须与生产一致，由下方 _Static_assert 无法跨文件校验，
+ *    故改用"用哪条断言失败就打印名字"的方式让漂移可见：
+ *    若生产把 OK_PM_TAINTED 改成 5，则 J3 会失败并打印实得值。 */
+#define JUDGE_DENY          0
+#define JUDGE_OK            1
+#define JUDGE_OK_PM_TAINTED 2
+#define JUDGE_OK_NO_TRUSTED 3
 
 /* ── 用强定义顶掉 nc_link.c 的弱符号出口 ────────────────────────────────
  * nc_link.c 里 nc_trusted_t1_get 是 weak 声明（extern weak），没有定义；
@@ -84,11 +89,22 @@ static unsigned char *slurp(const char *path)
     return buf;
 }
 
+static int g_fail = 0;
+
+/* 断言辅助：失败时打印期望/实得，便于分辨"实现漂移"与"逻辑错" */
+static void expect(const char *id, const char *what, int got, int want)
+{
+    if (got != want) {
+        printf("FAIL %s: %s（期望 %d，实得 %d）\n", id, what, want, got);
+        g_fail = 1;
+    }
+}
+
 int main(int argc, char **argv)
 {
     unsigned char *good;    /* t1 = SHA256(基准指纹) → 应通过 */
     unsigned char *bait;    /* t1 = SHA256(诱饵指纹) → 应拒 */
-    int fail = 0;
+    int got;
 
     if (argc < 3) {
         fprintf(stderr, "usage: test-nclink-judge <good.bin> <bait.bin>\n");
@@ -98,55 +114,48 @@ int main(int argc, char **argv)
     bait = slurp(argv[2]);
 
     /* J1：可信槽未就绪 → 按 Java 值判（旧语义）。
-     * envcheck-only 构建、或 seccomp 把三条可信路线全拦掉时走这条。 */
+     * seccomp 把三条可信路线全拦掉时走这条。 */
     install_trusted(NULL);
-    if (nc_link_judge(good, 32) != 1) {
-        printf("FAIL J1: 可信槽未就绪时，Java 正确值应通过（旧语义回归）\n");
-        fail = 1;
-    }
+    got = nc_link_judge(good, 32);
+    expect("J1", "可信槽未就绪时，Java 正确值应走旧语义通过", got,
+           JUDGE_OK_NO_TRUSTED);
 
     /* J2：可信槽未就绪 + Java 值错 → 必须拒（fail-closed 不退化） */
-    if (nc_link_judge(bait, 32) != 0) {
-        printf("FAIL J2: 可信槽未就绪时，Java 错误值必须拒\n");
-        fail = 1;
-    }
+    install_trusted(NULL);
+    got = nc_link_judge(bait, 32);
+    expect("J2", "可信槽未就绪时，Java 错误值必须拒", got, JUDGE_DENY);
 
     /* J3：核心修复场景 —— 可信=基准、Java=诱饵（去校验环境）
-     * 期望通过。这就是真机上闪退的那个组合包。 */
+     * 期望放行，且上报码标出"PM 被污染"。这就是真机上闪退的那个组合包。 */
     install_trusted(good);
-    if (nc_link_judge(bait, 32) != 1) {
-        printf("FAIL J3: 可信实测=基准、PackageManager 报诱饵 → 应放行（本次修复点）\n");
-        fail = 1;
-    }
+    got = nc_link_judge(bait, 32);
+    expect("J3", "可信实测=基准、PackageManager 报诱饵 → 应放行并标 PM 污染",
+           got, JUDGE_OK_PM_TAINTED);
 
     /* J4：反作弊 —— 可信=诱饵（真被重签）、Java 报基准值
      * 必须拒。若实现"可信不符时参考 Java 申辩"，这条会红。 */
     install_trusted(bait);
-    if (nc_link_judge(good, 32) != 0) {
-        printf("FAIL J4: 可信实测≠基准时，不能采信 PackageManager 的申辩（漏洞回归）\n");
-        fail = 1;
-    }
+    got = nc_link_judge(good, 32);
+    expect("J4", "可信实测≠基准时，不能采信 PackageManager 的申辩（漏洞回归）",
+           got, JUDGE_DENY);
 
     /* J5：可信槽就绪 + Java 入参为 NULL/异形 → 有可信值时不该受影响。
      * 防止实现把 Java 入参的合法性检查放在可信分支之前（那会让攻击者
      * 传个 NULL 就把判定拖进回退路径）。 */
     install_trusted(good);
-    if (nc_link_judge(NULL, 0) != 1) {
-        printf("FAIL J5: 可信值就绪时，Java 入参异形不应影响裁决\n");
-        fail = 1;
-    }
+    got = nc_link_judge(NULL, 0);
+    expect("J5", "可信值就绪时，Java 入参异形不应影响裁决", got,
+           JUDGE_OK_PM_TAINTED);
 
-    /* J6：可信值与 Java 值一致（正常包）→ 通过 */
+    /* J6：可信值与 Java 值一致（正常包）→ 通过且不标污染 */
     install_trusted(good);
-    if (nc_link_judge(good, 32) != 1) {
-        printf("FAIL J6: 正常包（两源一致且等于基准）应通过\n");
-        fail = 1;
-    }
+    got = nc_link_judge(good, 32);
+    expect("J6", "正常包（两源一致且等于基准）应通过且不标污染", got, JUDGE_OK);
 
     free(good);
     free(bait);
-    printf(fail ? "❌ nc_link_judge 三角裁决测试失败\n"
-                : "✅ nc_link_judge 三角裁决测试通过"
-                  "(J1/J2 旧语义 · J3 修复点 · J4 反作弊 · J5 异形 · J6 正常)\n");
-    return fail;
+    printf(g_fail ? "❌ nc_link_judge 三角裁决测试失败\n"
+                  : "✅ nc_link_judge 三角裁决测试通过"
+                    "(J1/J2 旧语义 · J3 修复点 · J4 反作弊 · J5 异形 · J6 正常)\n");
+    return g_fail;
 }

@@ -224,7 +224,30 @@ int nc_verify_t1(const unsigned char *t1, int len)
 extern int nc_trusted_t1_get(unsigned char out[SIG_HASH_LEN])
     __attribute__((weak));      /* 由 sig_check.c 强定义；单独编本文件时为 NULL */
 
-/* 三角比对裁决。纯逻辑，宿主可测（test-nclink.c 链接本文件直接调）。
+/* ── 裁决结果码（2026-11-25 风控上报）─────────────────────────────────
+ *
+ * 为什么要上报：Java 侧用 PackageManager 测证书，而那是去校验撒谎的地方。
+ * 改用可信实测值裁决后，主人自己的包不再闪退，但**"PM 报的和实测不一致"
+ * 这个事实被丢掉了** —— 排障时只能从 C 层六路表反推"Java 大概被污染了"，
+ * 看不到确切值。
+ *
+ * 本组常量把三角比对的结果编码成返回码，供：
+ *   · 宿主测试断言分支走向（不必解析日志）
+ *   · 将来若新增 int 版 JNI 入口（如 lastJudge()），Java 侧据此打日志
+ *
+ * ⚠️ 为什么不在本文件打日志：nc_link.c 有硬纪律 ——【零字符串常量】
+ *    （strings 扫 so 零语义泄露，见文件头注）。要打日志就得写文案，写文案
+ *    就破纪律。文案留给 Java 侧（它本来就有字符串）。
+ * ⚠️ 当前 ncVerify 仍返回 jboolean，所以只外露 DENY / OK 两个值；
+ *    OK_PM_TAINTED / OK_NO_TRUSTED 在内部分辨，宿主可断言。 */
+#define NC_JUDGE_DENY          0   /* 否决（Java 侧执行 kill） */
+#define NC_JUDGE_OK            1   /* 通过，且 PM 与可信实测一致（正常包） */
+#define NC_JUDGE_OK_PM_TAINTED 2   /* 通过，但 PM 与可信实测不一致（去校验环境） */
+#define NC_JUDGE_OK_NO_TRUSTED 3   /* 通过，走旧语义（可信路线不可用） */
+
+/* 三角比对裁决。纯逻辑，宿主可测（test-nclink-judge.c 链接本文件直接调）。
+ *
+ * 返回值见上方 NC_JUDGE_* 常量。
  *
  * ⚠️ 纯被调方，可以进 .ncx（同 nc_verify_t1）；调用它的 ncVerify 是
  *    JNI 入口，绝不能标段 —— 那是 unlock 调用方，标了即死锁。 */
@@ -239,19 +262,31 @@ int nc_link_judge(const unsigned char *java_t1, int java_len)
         have_trusted = nc_trusted_t1_get(trusted);
 
     if (have_trusted) {
-        /* 有可信实测值 → 它说了算。
-         * ⚠️ 刻意【不】参考 Java 入参：若"可信值不符时再看 Java 报的值"，
+        int java_ok = 0;
+
+        /* 可信实测值说了算。
+         * ⚠️ 判定【不】参考 Java 入参：若"可信值不符时再看 Java 报的值"，
          *    攻击者只需让 PackageManager 报基准值就能通关 —— 那正是本次
-         *    要修的洞（去校验模块就在那层撒谎）。
-         *    Java 入参在本分支只是风控对照数据，不参与裁决。 */
-        return nc_verify_t1(trusted, SIG_HASH_LEN);
+         *    要修的洞（去校验模块就在那层撒谎）。 */
+        if (!nc_verify_t1(trusted, SIG_HASH_LEN))
+            return NC_JUDGE_DENY;
+
+        /* 裁决已定（放行）。下面这一段【只用于区分上报码】，不参与判定：
+         *   java_ok=1 → PM 与实测一致（正常包）
+         *   java_ok=0 → PM 与实测不一致 或 Java 没传（去校验环境 / 测量失败）
+         * 这个区分是纯观测：无论哪个分支都返回"放行"。 */
+        if (java_t1 != NULL && java_len == SIG_HASH_LEN)
+            java_ok = nc_verify_t1(java_t1, SIG_HASH_LEN);
+
+        return java_ok ? NC_JUDGE_OK : NC_JUDGE_OK_PM_TAINTED;
     }
 
-    /* 可信路线不可用（sig_check.c 未编入 / seccomp 把三条可信路线全拦掉）
+    /* 可信路线不可用（seccomp 拦掉 openat 系 / 平台不支持 /proc/self/fd）
      * → 保持改动前的语义：Java 传什么就按什么判（fail-closed）。 */
     if (java_t1 == NULL || java_len != SIG_HASH_LEN)
-        return 0;
-    return nc_verify_t1(java_t1, java_len);
+        return NC_JUDGE_DENY;
+    return nc_verify_t1(java_t1, java_len) ? NC_JUDGE_OK_NO_TRUSTED
+                                           : NC_JUDGE_DENY;
 }
 
 #ifndef NCLINK_HOST_TEST
@@ -289,7 +324,8 @@ jboolean nc_link_jni_ncVerify(JNIEnv *env, jclass clazz, jbyteArray measured)
     buf = (*env)->GetByteArrayElements(env, measured, NULL);
     if (buf == NULL)
         return JNI_FALSE;
-    ok = nc_link_judge((const unsigned char *)buf, (int)len) ? JNI_TRUE : JNI_FALSE;
+    ok = (nc_link_judge((const unsigned char *)buf, (int)len) != NC_JUDGE_DENY)
+         ? JNI_TRUE : JNI_FALSE;
     (*env)->ReleaseByteArrayElements(env, measured, buf, JNI_ABORT);
     return ok;
 }

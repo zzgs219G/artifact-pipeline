@@ -192,6 +192,20 @@ static void siglog(const char *prio, const char *fmt, ...) {
 /*LSGS:PATH_CMDLINE2|/proc/self/cmdline*/
 /*LSGS:PATH_MAPS2|/proc/self/maps*/
 
+/* ── 签名块 magic 的密文（2026-11-25 从使用点搬到这里）───────────────
+ *
+ * ⚠️ 为什么必须保留这条标记：它不是日志文案，是 sig_block_magic() 的
+ *    **数据来源**。该函数用 lsg_s(LSGS_BLK_MAGIC2,...) 解码出 16 字节
+ *    "APK Sig Block 42" 再 memcmp —— 删掉标记 = 删掉解析器依赖的常量
+ *    → 编译期 "use of undeclared identifier"，且若侥幸编译通过则
+ *    所有正常包被判"无签名块"而全量闪退（2026-10-20 踩过同款）。
+ *
+ * 为什么搬离使用点：make-sig-log.py 扫的是**全文件的标记注释**，
+ *   与位置无关；而放在使用点会让"去重日志"这类改动容易误删。
+ *   集中到本标记区后，本区块只承载"数据类"密文，日志类标记另在
+ *   各自调用点（便于"改文案就看得到上下文"）。 */
+/*LSGS:BLK_MAGIC2|APK Sig Block 42*/
+
 /* env_check.c 侧(e2e 同哨兵/同日志名,复用上面两条;哨兵路径共用 SIGLOG_SENTINEL) */
 
 /* ─────────────────────────── 中文流程日志(用户 2026-11 需求) ───────────────────────────
@@ -958,9 +972,13 @@ static int sig_check_block_magic(int fd, off_t cd_off, unsigned char out_magic[1
     wm = sig_block_magic(want);
     if (wm == NULL || memcmp(out_magic, wm, 16) != 0) return -1; /* 无 v2/v3 签名 */
 
-    /*LSG:BLK_MAGIC_OK|【成功】找到 APK Signing Block magic*/
-/*LSGS:BLK_MAGIC2|APK Sig Block 42*/
-    LSGI0(LSG_BLK_MAGIC_OK);
+    /* ⚠️ 2026-11-25 去重：原先此处打 LSG_BLK_MAGIC_OK，而本函数被 6 条路线
+     *    各调用一次 → 6 行完全相同的「找到 APK Signing Block magic」，
+     *    且无路线归属。现静默 —— 失败原因由 sig_collect_fp_route 的
+     *    route= 日志体现，成功则由汇总表体现。
+     *    对应日志标记已从本文件删除（连同 BLK_START / CERT_OK，见
+     *    extract_cert_der 头注）；LSGS_BLK_MAGIC2 必须保留 —— 它是
+     *    sig_block_magic() 的**数据来源**，不是日志文案。 */
     return 0;
 }
 
@@ -1072,8 +1090,21 @@ static int extract_cert_der(int fd, unsigned char **out_der, size_t *out_len) {
     fsize = lseek(fd, 0, SEEK_END);
     if (fsize < 22) return -1;
 
-    /*LSG:BLK_START|【流程】开始解析 APK Signing Block(找 EOCD)*/
-    LSGD(LSG_BLK_START, "fsize=%ld", (long)fsize);
+    /* ⚠️ 2026-11-25 去重（用户反馈"日志一直在重复文本"）：
+     *    本函数被 6 条路线各调用一次，原先内部打 3 条日志
+     *    （BLK_START / BLK_MAGIC_OK / CERT_OK），叠加起来就是
+     *    3 × 6 = 18 行，外加 sig_check_block_magic 的 6 行 = 24 行，
+     *    占单次启动日志的 27%，而且**不带路线归属**，6 条路混在一起
+     *    完全无法定位"是哪个 route 出的问题"。
+     *
+     *    现在本函数静默：每路的结果统一由 sig_collect_fp_route() 打
+     *    一条带 route= 前缀的日志（那才是排障需要的粒度），
+     *    6 路汇总由 sig_collect_fp() 的表格呈现。
+     *    净效果：24 行 → 0 行（信息量不减，归属反而更清楚）。
+     *
+     *    BLK_START / CERT_OK 两个标记已随之删除（无代码引用）。
+     *    LSGS_BLK_MAGIC2 必须保留 —— 见下方标记区的说明，它是数据不是文案。 */
+    (void)0;
 
     if (sig_find_eocd(fd, fsize, eocd) != 0) return -1;
 
@@ -1090,8 +1121,7 @@ static int extract_cert_der(int fd, unsigned char **out_der, size_t *out_len) {
     }
 
     free(value);
-    /*LSG:CERT_OK|【成功】证书 DER 提取成功*/
-    LSGI(LSG_CERT_OK, "der_len=%zu", *out_len);
+    /* 证书 DER 长度改由调用方（sig_collect_fp_route）随 route 一起打 —— 见本函数头的去重说明 */
     return 0;
 }
 
@@ -1604,6 +1634,18 @@ static const char *sig_route_name(int route) {
  * ⚠️ readlink 已被去校验 hook（proxy_readlink 会谎报成 base.apk），
  *    所以这里 **必须** 用 syscall(SYS_readlinkat) 直投内核。
  *    否则本路线反而会被诱骗到假路径上。
+ *
+ * ⚠️⚠️ 2026-11-25 补漏（本路线此前只有"一半"抗 hook）：
+ *    上面找路用内联 svc 是对的，但"确认大小"和"真正拿 fd"两步原本写的是
+ *    `openat(dfd, name, O_RDONLY)` —— 反汇编里就是 `bl openat@plt`，可被 hook。
+ *    当时没被利用仅因去校验的 proxy_openat 判据是「dirfd==AT_FDCWD 且 path
+ *    完全等于 base.apk 路径」，而这里传的是 dirfd=/proc/self/fd、path="1234"，
+ *    两个条件都不满足 → 巧合性安全，不是结构性安全。
+ *    攻击者只要把判断改成"解析真实路径再比"，这条号称最抗 hook 的路线就废。
+ *
+ *    现改为全程内联 svc（sig_raw_syscall），与 sig_open_route 的 SVC 路线同源。
+ *    验收：反汇编本函数体内不得出现 openat@plt / open@plt 调用。
+ *
  * ⚠️ 不关闭返回的 fd：它属于系统，不是我们打开的。
  *    调用方只能 pread/lseek，不能 close。 */
 SIG_SEC_MARKED_NOVMP
@@ -1614,8 +1656,13 @@ static int sig_find_apk_fd(void) {
 
     dfd = sig_open_route(SIG_ROUTE_SVC, "/proc/self/fd");
     if (dfd < 0) {
-        /* svc 被拦时退回 openat —— 目录本身不是攻击目标，风险可接受 */
-        dfd = openat(AT_FDCWD, "/proc/self/fd", O_RDONLY | O_DIRECTORY);
+        /* ⚠️ 2026-11-25：原退回 openat —— 本函数的存在意义就是"抗 hook"，
+         *    退回可被 hook 的入口等于自废。现直接用内联 svc 再试一次
+         *    （sig_open_route 的 SVC 分支与本行同源，此处是显式兜底，
+         *    刻意不复用那个函数以免它将来改动影响本路线）。 */
+        dfd = (int)sig_raw_syscall(__NR_openat, (long)AT_FDCWD,
+                                   (long)"/proc/self/fd",
+                                   (long)(O_RDONLY | O_DIRECTORY), 0L, 0L, 0L);
     }
     if (dfd < 0) return -1;
 
@@ -1637,20 +1684,29 @@ static int sig_find_apk_fd(void) {
             size_t L = (size_t)r;
             if (L < 8) continue;
             if (strcmp(link + L - 8, "base.apk") != 0) continue;
-            /* 命中：确认是普通文件（能 seek 到尾部且长度 > 1MB） */
+            /* 命中：确认是普通文件（能 seek 到尾部且长度 > 1MB）
+             *
+             * ⚠️ 2026-11-25：原为 openat(dfd, name, O_RDONLY) —— 可被 hook。
+             *    改走内联 svc。注意 fd 语义完全一致（openat 返回新 fd，
+             *    close 由我们自己负责），后续 pread/lseek 用法不变。 */
             {
-                int probe = openat(dfd, name, O_RDONLY);
-                off_t sz;
+                long probe = sig_raw_syscall(__NR_openat, (long)dfd,
+                                             (long)name, (long)O_RDONLY,
+                                             0L, 0L, 0L);
+                long sz;
                 if (probe < 0) continue;
-                sz = lseek(probe, 0, SEEK_END);
-                close(probe);            /* probe 是自己打开的，要关 */
-                if (sz <= (off_t)(1024 * 1024)) continue;
+                sz = sig_raw_syscall(__NR_lseek, probe, 0L, 2L /* SEEK_END */,
+                                     0L, 0L, 0L);
+                sig_raw_syscall(__NR_close, probe, 0L, 0L, 0L, 0L, 0L);
+                if (sz <= (long)(1024 * 1024)) continue;
             }
-            /* 真正使用时要 dup 一份，避免调用方误关 */
-            found = openat(dfd, name, O_RDONLY);
+            /* 真正使用时要 dup 一份，避免调用方误关。
+             * ⚠️ 仍用内联 svc：这里若退回 openat，等于前面全部白做。 */
+            found = (int)sig_raw_syscall(__NR_openat, (long)dfd, (long)name,
+                                         (long)O_RDONLY, 0L, 0L, 0L);
         }
     }
-    close(dfd);
+    sig_raw_syscall(__NR_close, (long)dfd, 0L, 0L, 0L, 0L, 0L);
     return found;
 #else
     return -1;
