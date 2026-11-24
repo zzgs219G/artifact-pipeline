@@ -192,6 +192,10 @@ jobs:
 
       # 签名块保留（2026-11-25）：加固产物曾「未签名」→ 去校验提不到证书。
       # 本项含与 uncheck 实现的逐字节对拍 + zipalign 丢块行为钉住。
+      - name: 多路取证书判据（可信路线优先，6 断言 + 反向验证回归）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/guard/tests/test-trusted-route.py
+
       - name: 签名块保留（7 断言，含跨模块对拍）
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/repack/tests/test-keep-sig-block.py

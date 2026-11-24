@@ -840,6 +840,16 @@ static int g2_open_route(int route, const char *path) {
     return -1;
 }
 
+/* 可信路线判定（2026-11-25）：与第一线同一策略、独立实现。
+ * svc/syscall/sysfd 不经过 libc 的路径类函数 —— inline hook 够不到它们，
+ * 所以读到的必然是当前安装包（"房间里真正坐着的人"）。
+ * 详见 docs/多路取证书判定逻辑.md。 */
+static int g2_route_is_trusted(int route) {
+    return route == G2_ROUTE_SYSCALL
+        || route == G2_ROUTE_SVC
+        || route == G2_ROUTE_FD;
+}
+
 /* 路线名（仅日志用；不含敏感语义，与第一线同一豁免口径，不走 LSGS） */
 static const char *g2_route_name(int route) {
     switch (route) {
@@ -1085,10 +1095,39 @@ static int g2_collect_fp(unsigned char fp[SG2_SHA256_LEN]) {
     }
     G2LOG("g2 ok=%d/%d mismatch=%d", ok_cnt, G2_ROUTE_NUM, mismatch);
 
-    if (mismatch) return -2;   /* 劫持：走本线独立处置 */
-
-    memcpy(fp, route_fp[base_idx], SG2_SHA256_LEN);
-    return 0;
+    /* ── 判定（2026-11-25 重写，与第一线同一策略但独立实现）──────────
+     *
+     * 旧判据「任意两路不一致 → -2」的盲区（见 第一线 sig_check.c 的
+     * 同名注释与 docs/多路取证书判定逻辑.md）：
+     *   加固 + 去校验组合包里，3 路 libc 被重定向到 origin.apk（诱饵）、
+     *   3 路内联 svc 读到真 base.apk → 3:3 分裂 → 主人自己签的包也闪退。
+     *
+     * 新判据：可信路线（svc/syscall/sysfd —— hook 够不到）优先。
+     *   · 可信路线有结果 → 把它的指纹交给调用方（g2_verify）与基准比对，
+     *     由那边决定放行还是杀。**本函数不再因 mismatch 直接 -2**。
+     *   · 可信路线全失败 → 退回旧判据（mismatch → -2，保底）。
+     *
+     * ⚠️ 为什么把"比对基准"留给 g2_verify：本函数是数据采集，
+     *    比对本属 g2_verify 的职责（它才是判定点、才吃 VMP）。
+     *    这样也让两线的分工与第一线对齐。 */
+    {
+        int t, trusted_from = -1;
+        for (t = 0; t < G2_ROUTE_NUM; t++) {
+            if (route_ok[t] && g2_route_is_trusted(t)) { trusted_from = t; break; }
+        }
+        if (trusted_from >= 0) {
+            G2LOG("g2 可信路线(%s)可用，以其指纹为准（忽略 libc 路线差异）",
+                  g2_route_name(trusted_from));
+            memcpy(fp, route_fp[trusted_from], SG2_SHA256_LEN);
+            return 0;
+        }
+        /* 可信路线全失败 → 保守：退回旧判据 */
+        G2LOG("g2 可信路线均不可用，退回多路一致性判据");
+        if (mismatch) return -2;   /* 劫持：走本线独立处置 */
+        if (base_idx < 0) return -1;
+        memcpy(fp, route_fp[base_idx], SG2_SHA256_LEN);
+        return 0;
+    }
 }
 
 G2_SEC_MARKED

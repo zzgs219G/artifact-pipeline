@@ -1427,6 +1427,33 @@ static int nc_open_ro(const char *path) {
 #define SIG_ROUTE_FD        5   /* /proc/self/fd/N 复用系统已开的 fd */
 #define SIG_ROUTE_NUM       6
 
+/* ── 可信路线（2026-11-25，见 docs/多路取证书判定逻辑.md）─────────────
+ *
+ * 判据变化的核心：从「检查有没有陌生人」改成「检查主人在不在场」。
+ *
+ * 为什么 3/4/5 是可信的：
+ *   它们都不经过 libc 的路径类函数 —— syscall 是内联 svc、svc 更是直接
+ *   写在本函数体里、sysfd 复用内核已开的 fd（压根不 open）。inline hook
+ *   只能改 libc 里的函数体，够不到这三条。所以它们读到的必然是
+ *   **当前安装的 base.apk**，即"房间里真正坐着的人"。
+ *
+ * 为什么 0/1/2 不可信：
+ *   去签名校验工具（本仓库 scripts/uncheck 的 libusign.so）正是 hook
+ *   这三个函数，把 open(base.apk) 重定向到 origin.apk（内含原开发者
+ *   证书）。对**逆向者自己**的包来说，这是设计功能不是入侵 ——
+ *   但加固若不区分，就会把主人的替身当成敌人。
+ *
+ * 判定优先级（sig_collect_fp 里实现）：
+ *   ① 可信路线有结果 → 用它与基准比对（一致=放行，不一致=杀）
+ *   ② 可信路线全失败（seccomp 拦/平台不支持）→ 退回旧逻辑
+ *      「任意两路不一致就杀」（保底，宁可误杀不可漏防）
+ */
+static int sig_route_is_trusted(int route) {
+    return route == SIG_ROUTE_SYSCALL
+        || route == SIG_ROUTE_SVC
+        || route == SIG_ROUTE_FD;
+}
+
 /* 用指定路线打开 path。成功返回 fd，失败 -1（errno 不强求准确）。
  *
  * ⚠️ SIG_ROUTE_FD 不在此处理（它不 open，而是返回"已存在的 fd"），
@@ -1793,17 +1820,77 @@ static int sig_collect_fp(unsigned char actual[32]) {
                  ok, SIG_ROUTE_NUM, mismatch);
         }
 
-        /* 至少两路成功且不一致 → 被劫持。这是本机制的核心判据：
-         * 单一取文件路径被重定向时，只有被动过的那一路会给诱饵证书。 */
-        if (mismatch) {
-            /*LSG:ROUTE_SPLIT|【失败】【防线1·sig_check】多路证书指纹不一致(疑似 APK 读取被劫持)*/
-            LSGE0(LSG_ROUTE_SPLIT);
-            return -2;        /* 独立语义：劫持，走最重处置 */
-        }
+        /* ── 判定（2026-11-25 重写）──────────────────────────────────
+         *
+         * ⚠️⚠️ 旧的判据是「任意两路不一致 → 杀」，它有个致命盲区：
+         *   加固 + 去校验组合包里，3 路 libc 被重定向到 origin.apk（诱饵）、
+         *   3 路内联 svc 读到真 base.apk → 3:3 分裂 → 一律判"被劫持" →
+         *   主人自己签的包也闪退。
+         *
+         *   类比：门卫只清点"陌生面孔"，不看"主人是否在场"。
+         *   主人（逆向者自己的证书）明明坐在这里，却被当成入侵者。
+         *   更糟的是这反过来成了攻击面：攻击者只要让任意一路读错文件，
+         *   就能触发 fail-closed 让正常包崩溃，不必伪造任何证书。
+         *
+         * 新判据（详见 scripts/guard/docs/多路取证书判定逻辑.md）：
+         *   ① 可信路线（svc/syscall/sysfd）有结果 → 拿它和基准比对
+         *        与 SIG_HASH_STORED 一致 → 主人自己在场 → 放行（ignore 诱饵）
+         *        不一致               → 主人真被换了 → 杀
+         *   ② 可信路线全失败 → 退回旧逻辑「任意不一致就杀」（保底）
+         *
+         * ⚠️ 为什么①仍然安全：svc 路线读的是真实安装包，重签/改包必然
+         *    让它与基准不符；而 inline hook 改不了内联 svc 指令。
+         *    唯一的"放行"场景是"真身 == 基准"，那正是主人的定义。 */
+        {
+            int trusted_fp[32];
+            int trusted_from = -1;
+            int t;
 
-        if (first_ok >= 0) {
-            memcpy(actual, route_fp[first_ok], 32);
-            return 0;
+            /* 找第一条成功的可信路线（3/4/5 中任一） */
+            for (t = 0; t < SIG_ROUTE_NUM; t++) {
+                if (route_ok[t] && sig_route_is_trusted(t)) {
+                    memcpy(trusted_fp, route_fp[t], 32);
+                    trusted_from = t;
+                    break;
+                }
+            }
+
+            if (trusted_from >= 0) {
+                unsigned char expect[32];
+                int i2, diff = 0;
+                derive_expected((const unsigned char *)trusted_fp, expect);
+                for (i2 = 0; i2 < 32; i2++)
+                    diff |= expect[i2] ^ SIG_HASH_STORED[i2];
+
+                if (diff == 0) {
+                    /* 主人在场 → 放行。故意继续走 sig_compare_fp：
+                     * 它会把指纹打出来（排障需要），且会再比一次（冗余但
+                     * 无副作用 —— 这里已经确认一致了）。 */
+                    /*LSG:ROUTE_TRUSTED_OK|【通过】可信路线(内联svc)与基准一致,主人自己在场,放行*/
+                    LSGI(LSG_ROUTE_TRUSTED_OK, "route=%s",
+                         sig_route_name(trusted_from));
+                    memcpy(actual, trusted_fp, 32);
+                    return 0;
+                }
+                /* 可信路线也不符基准 → 真被重签了 → 走最重处置 */
+                /*LSG:ROUTE_TRUSTED_NG|【失败】可信路线(内联svc)也与基准不符,确认被重签*/
+                LSGE0(LSG_ROUTE_TRUSTED_NG);
+                return -2;
+            }
+
+            /* ② 可信路线全失败：退回旧判据（保底） */
+            /*LSG:ROUTE_NO_TRUSTED|【流程】可信路线均不可用,退回多路一致性判据*/
+            LSGI0(LSG_ROUTE_NO_TRUSTED);
+            if (mismatch) {
+                /*LSG:ROUTE_SPLIT|【失败】【防线1·sig_check】多路证书指纹不一致(疑似 APK 读取被劫持)*/
+                LSGE0(LSG_ROUTE_SPLIT);
+                return -2;        /* 独立语义：劫持，走最重处置 */
+            }
+
+            if (first_ok >= 0) {
+                memcpy(actual, route_fp[first_ok], 32);
+                return 0;
+            }
         }
         /* 所有路都失败：退回"环境异常"语义 */
         return -1;
