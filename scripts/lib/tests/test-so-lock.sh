@@ -163,6 +163,9 @@ cp "$GUARD_SRC"/nc_guard_boot.c "$GUARD_SRC"/nc_guard_probe.c \
 #    判据以 nox 的 LIB_SRCS 为准（make-zip-lib.sh:91，当前 8 个 .c）。
 cp "$SRC"/nc_link.c "$SRC"/env_check.c "$SRC"/env_probes.c \
    "$SRC"/env_internal.h "$SRC"/sig_check.c "$WORK/"
+# ⚠️ 2026-11-25：日志抽取到 nc_log 模块后，sig_check.c 与 env_check.c 都
+#    include 它 —— 漏拷 = 编译期 'nc_log.h' file not found（CI 实测踩到）。
+cp "$SRC"/nc_log.c "$SRC"/nc_log.h "$WORK/"
 
 # sig_hash.h 是构建期生成的（含两张签名表），必须先生成再编译
 bash "$ROOT/scripts/guard/hash/make-sig-hash.sh" "$APK" "$WORK/sig_hash.h" \
@@ -190,7 +193,7 @@ CFLAGS="-fPIC -shared -fvisibility=hidden -fno-ident -Oz \
 LDFLAGS="-Wl,--gc-sections -Wl,--build-id=none -Wl,--version-script=hide.map"
 # sig_log_data.h 依赖 sig_check.c + env_check.c 的 LSG 标记，必须先跑生成器
 python3 "$ROOT/scripts/guard/log/make-sig-log.py" \
-     sig_check.c env_check.c env_probes.c sig_log_data.h >siglog.log 2>&1 || true
+     sig_check.c env_check.c env_probes.c nc_log.c sig_log_data.h >siglog.log 2>&1 || true
 # ⚠️ 清单必须与 nox 的 LIB_SRCS 一致（2026-11-22）：
 #   nc_guard_boot probe key paths jni xor crypto **report**
 #   漏了 report 会导致 ncg_trace / ncg_report_* 未定义 → dlopen 报
@@ -199,7 +202,7 @@ python3 "$ROOT/scripts/guard/log/make-sig-log.py" \
 if clang $CFLAGS -I. nc_guard_boot.c nc_guard_probe.c nc_guard_jni.c \
         nc_guard_key.c nc_guard_paths.c nc_guard_xor.c nc_guard_crypto.c \
         nc_guard_report.c \
-        nc_link.c env_check.c env_probes.c sig_check.c \
+        nc_link.c env_check.c env_probes.c sig_check.c nc_log.c \
         $LDFLAGS -o libnc.so 2>build.log; then
     ok "T1 编译通过（$(stat -c%s libnc.so) B）"
 else
