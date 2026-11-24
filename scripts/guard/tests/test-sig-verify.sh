@@ -51,11 +51,15 @@ command -v "$HOST_CC" >/dev/null || { skip "无可用宿主编译器"; exit 0; }
 SRC="$ROOT/scripts/guard/src"
 cp "$SRC/sig_check.c" "$SRC/env_check.c" "$SRC/env_probes.c" \
    "$SRC/env_internal.h" "$GUARD_SRC/nc_guard_layout.h" "$WORK/"
+# ⚠️ 2026-11-25：sig_check.c 的日志已委托 nc_log 模块，漏拷 = 编译期
+#    'nc_log.h' file not found（本测试曾因此变红，属漏改而非代码错）。
+cp "$SRC/nc_log.c" "$SRC/nc_log.h" "$WORK/"
 # sig_hash.h 由生成器产出（两张表含真值），本测试同时充当"生成器→C 侧"对拍
 bash "$ROOT/scripts/guard/hash/make-sig-hash.sh" "$TEST_APK" "$WORK/sig_hash.h" \
     >"$WORK/sighash.log" 2>&1 || { bad "sig_hash.h 生成失败"; tail -3 "$WORK/sighash.log" >&2; exit 1; }
 python3 "$ROOT/scripts/guard/log/make-sig-log.py" \
-    "$SRC/sig_check.c" "$SRC/env_check.c" "$SRC/env_probes.c" "$WORK/sig_log_data.h" >/dev/null 2>&1 \
+    "$SRC/sig_check.c" "$SRC/env_check.c" "$SRC/env_probes.c" "$SRC/nc_log.c" \
+    "$WORK/sig_log_data.h" >/dev/null 2>&1 \
     || { bad "sig_log_data.h 生成失败"; exit 1; }
 
 cd "$WORK"
@@ -100,7 +104,7 @@ int main(int argc, char **argv) {
 }
 EOF
 if "$HOST_CC" -O1 -DSIGCHECK_HOST_TEST -I. \
-        driver.c sig_check.c -o verify 2>build.log; then
+        driver.c sig_check.c nc_log.c -o verify 2>build.log; then
     ok "T1 编译通过（含真实 sig_hash.h）"
 else
     bad "T1 编译失败"; head -10 build.log >&2; exit 1
@@ -147,7 +151,7 @@ assert s2 != s, "篡改正则未命中 SIG_HASH_STORED"
 open('sig_hash.h','w').write(s2)
 PY
 if "$HOST_CC" -O1 -DSIGCHECK_HOST_TEST -I. \
-        driver.c sig_check.c -o verify_bad 2>/dev/null; then
+        driver.c sig_check.c nc_log.c -o verify_bad 2>/dev/null; then
     # ⚠️ 失败路径是【异步杀】：sig_verify 判定失败 → 起杀线程（sleep 1~3s
     #    后 abort）→ 主线程照常返回 → main 退出码 0。所以不能只看退出码，
     #    必须等杀线程引爆（delayed_kill 的 abort 会让进程以 SIGABRT 终止，

@@ -56,7 +56,7 @@ else
 fi
 if ! python3 "$ROOT/scripts/guard/log/make-sig-log.py" \
       "$SRC/sig_check.c" "$SRC/env_check.c" "$SRC/env_probes.c" \
-      "$SRC/sig_guard2.c" "$T/sig_log_data.h" >"$T/gen2.log" 2>&1; then
+      "$SRC/sig_guard2.c" "$SRC/nc_log.c" "$T/sig_log_data.h" >"$T/gen2.log" 2>&1; then
   echo "❌ sig_log_data.h 生成失败"; tail -3 "$T/gen2.log"; exit 1
 fi
 

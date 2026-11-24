@@ -63,80 +63,26 @@ extern int ncguard_unlock(void);
 #include "nc_guard_layout.h"  /* 契约常数单一真相源：段名/尺寸/偏移 */
 #include "sig_log_data.h"
 #include "env_internal.h"   /* 2026-11-08: 探针声明（env_probes.c）*/
+#include "nc_log.h"         /* 文件日志通道（2026-11-25 抽取，唯一实现） */
 
 #define LOG_TAG "nc"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
-static char envlog_path[512];
-static int  envlog_ready = -1;
-
-static void envlog_detect(void) {
-    char pkg[256];
-    FILE *fp;
-    int fd;
-    if (envlog_ready >= 0) return;
-    envlog_ready = 0;
-#ifdef SIGCHECK_HOST_TEST
-    {
-        /* ⚠️ env 声明在 ifdef 内部：真机构建下这段不编译，
-         * 放外面会变成 unused variable（-Werror 会拦）。
-         * 2026-11-22：与 sig_check.c 的同名变量一起导致这两个文件
-         * 长期编不过 -Werror（而 CI 的 guard 测试都没开 -Werror）。 */
-        const char *env;
-        char ev[24];
-        const char *evn = lsg_s(LSGS_ENV_TESTLOG, ev, sizeof(ev));
-        if (!evn) return;
-        env = getenv(evn);
-        if (!env || !*env) return;
-        snprintf(envlog_path, sizeof(envlog_path), "%s", env);
-        envlog_ready = 1;
-        return;
-    }
-#endif
-    /* 哨兵与 sig_check 同一个(2026-10-16 LSGS 密文化):解码后比对,失败=关 */
-    {
-        char sb[48];
-        const char *sn = lsg_s(LSGS_SIGLOG_SENTINEL, sb, sizeof(sb));
-        if (!sn || access(sn, F_OK) != 0) return;
-    }
-    {
-        char _pb[24];
-        const char *_p = lsg_s(LSGS_PATH_CMDLINE, _pb, sizeof(_pb));
-        FILE *c = _p ? fopen(_p, "r") : NULL;
-        if (!c) return;
-        {
-            size_t n = fread(pkg, 1, sizeof(pkg) - 1, c);
-            fclose(c);
-            if (n == 0) return;
-            pkg[n] = '\0';
-        }
-    }
-    {
-        char ln2[48];
-        const char *ln = lsg_s(LSGS_LOGNAME, ln2, sizeof(ln2));
-        if (!ln) return;
-        snprintf(envlog_path, sizeof(envlog_path),
-                 "/storage/emulated/0/Android/data/%s/files/%s", pkg, ln);
-    }
-    /* 预检可写性(以追加方式打开一次即验证),失败则本次进程内放弃 */
-    fd = open(envlog_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
-    if (fd < 0) return;
-    close(fd);
-    (void)fp;
-    envlog_ready = 1;
-}
-
-static void envlog(const char *prio, const char *msg) {
-    FILE *fp;
-    struct timespec ts;
-    unsigned long ms;
-    if (envlog_ready != 1) return;
-    fp = fopen(envlog_path, "a");
-    if (!fp) { envlog_ready = 0; return; }
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ms = (unsigned long)ts.tv_sec * 1000UL + (unsigned long)(ts.tv_nsec / 1000000UL);
-    fprintf(fp, "[%lu][%s][pid %d] %s\n", ms, prio, (int)getpid(), msg);
-    fclose(fp);
+/* ── 文件日志：委托 nc_log 模块（2026-11-25 抽取）────────────────────
+ *
+ * 此前本文件自带一份 envlog_detect / envlog，与 sig_check.c 的 siglog_*
+ * 几乎逐行相同，两份写同一个文件 sigcheck_log.txt、各自探测、各自维护
+ * ready 状态。实测代价：修「首次启动没日志」时只改了 sig_check.c，
+ * 本文件的 `envlog_ready = 0` 让中文文案照样丢 —— 同一个 bug 存在两份。
+ *
+ * 现在统一到 scripts/guard/src/nc_log.c（唯一实现）。本文件只留薄封装，
+ * envlog / envlog_c 的调用点零改动。
+ *
+ * ⚠️ 不违反 AGENTS §1「零代码共享」：那条针对判定逻辑（sig_guard2 必须
+ *    独立）。日志是可观测性设施，共享不削弱防线。 */
+static void envlog(const char *prio, const char *msg)
+{
+    nc_log_line(prio, "%s", msg ? msg : "");
 }
 
 /* 解码 + 写文件 + logcat(prio: 0=I 1=E) */
@@ -689,7 +635,9 @@ static void env_check_run(void) {
     int hit = 0;
     int r;
 
-    envlog_detect();
+    /* 文件日志开关探测（2026-11-25：委托 nc_log，可重试非一次性）。
+     * 首次启动通常失败 —— 日志目录由 system_server 建立，晚于本 constructor。 */
+    nc_log_open();
 
     /* ⚠️ 2026-11-25 启动分隔线（与 sig_check.c 的同款，理由见那里的注释）：
      * 两个 constructor 都会往同一批日志文件追加，多个安装包混合后

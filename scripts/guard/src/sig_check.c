@@ -58,239 +58,50 @@
 #include <sys/stat.h>
 #include <dlfcn.h>     /* 报错十四: dladdr/dlsym 定位本 so 真实路径 */
 
-/* 调试哨兵路径(2026-10-16 LSGS 密文化):原明文 #define 是攻击者可读的
- * 「调试开关位置」泄露。明文唯一载体:本文件「外围串 LSGS 标记区」的标记
- * (在 sig_log_data.h include 之后,那里才有 lsg_s/LSGS_*)。
- * 此处只放前向声明,siglog_detect 里调用的辅助函数在标记区后实现。 */
-static const char *siglog_sentinel(char *buf, size_t buflen);
-#ifdef SIGCHECK_HOST_TEST
-static const char *siglog_testlog_env(char *buf, size_t buflen);
-static const char *siglog_testapk_env(char *buf, size_t buflen);
-#endif
-static const char *siglog_logname(char *buf, size_t buflen);
+/* ⚠️ 2026-11-25：nc_log.h 必须在这里（而非文件后半的 include 区）——
+ * 下面的 siglog/siglog_fmt1 薄封装立即要用它的声明。 */
+#include "nc_log.h"    /* 文件日志通道（唯一实现，见 nc_log.h 头注） */
 
-static char siglog_path[512];   /* 日志文件完整路径,'' = 未探测 */
-static int  siglog_ready = -1;  /* -1 未探测/待重试, 0 已放弃, 1 可写 */
-/* 探测次数上限（2026-11-25）。为什么需要上限：
- * 哨兵不存在是【常态】（用户没开日志），此时每次 siglog 调用都重试
- * access() 会白花系统调用。上限 6 次覆盖 constructor + 前几次运行时
- * 调用，足够等到 /storage 的 FUSE 挂载就绪，之后放弃、零开销。 */
-static int  siglog_tries = 0;
-#define SIGLOG_MAX_TRIES 6
-
-/* 前向声明:get_pkg_name 定义在本文件后部(§定位 base.apk),此处先用 */
-static int get_pkg_name(char *out, size_t outlen);
-
-/* ── 日志开关探测（2026-11-25 重写：从「一次性」改成「可重试」）─────────
+/* ── 文件日志：全部委托给 nc_log 模块（2026-11-25 抽取）──────────────
  *
- * ═══ 修的 bug（用户真机实测）═══
- * 症状：装完 App【第一次】打开，sigcheck_log.txt 永远不出现；
- *       关掉再打开【第二次】就有了。同包同哨兵同 uid，只差在"第二次"。
+ * 此前本文件自带一份 siglog_detect / siglog / siglog_fmt1，而 env_check.c
+ * 又自带一份几乎逐行相同的 envlog_* —— 两份写同一个文件、各自探测、
+ * 各自维护 ready 状态。代价已实测发生：修「首次启动没日志」时改了一处，
+ * 另一处的第 78 行仍是 `envlog_ready = 0`，中文文案照样丢。
  *
- * 根因：本函数原来第二行就 `siglog_ready = 0`（先假定失败），
- *       而 constructor 阶段 /storage/emulated/0 的 FUSE 可能还没为这个
- *       uid 挂载好 → access(sentinel) 因 EACCES 失败 → 直接 return
- *       → siglog_ready 永久留在 0 → 本次进程再也不会写文件日志。
- *       第二次启动时 FUSE 已就绪（首次启动间接促成了挂载）→ 正常。
+ * 现在统一到 scripts/guard/src/nc_log.c（唯一实现），本文件只留薄封装，
+ * 保持原有调用点（LOGI/LOGE/LOGD/LOGI_S/LOGE_S）零改动。
  *
- *       这不是猜测：本文件 53 行早就写着「constructor 早期 FUSE 可能未就绪」，
- *       变更历史 2026-11-24 条也记了「早期写 sdcard 靠不住（同一次启动
- *       早期失败、晚期成功）」。当时的选择是"静默忽略"，代价是用户在
- *       最想看的第一次启动里拿不到任何日志。
+ * ⚠️ 为什么不违反 AGENTS §1「零代码共享」：那条纪律针对【判定逻辑】
+ *    （sig_guard2 必须独立实现，否则改一处两线同废）。日志是可观测性设施，
+ *    共享不削弱任何防线 —— 攻击者改掉日志模块最多让日志消失，判定与处置
+ *    照常。判定链（sig_collect_fp / derive_expected / g2_verify）仍零共享。
  *
- * ═══ 现在怎么做 ═══
- *   ① 失败【不落 0】：保持 -1，下一次 siglog() 调用会再试（见 siglog 首行）。
- *   ② 探测上限 6 次：哨兵确实不存在时不能无限重试（常态，白花 syscall）。
- *   ③ 失败原因进 logcat（只在第 1 次打，避免 20s 复查把 logcat 刷满）：
- *      文件日志写不了，但 logcat 一定能写 —— 与 ncg_death_notice 同款理由。
- *   ④ 区分「不存在」与「存在但进不去」：前者是用户没开哨兵，后者是环境
- *      问题（权限/类型），修法完全不同。用户实测踩过一次：哨兵路径被建成
- *      【目录】且属主是别的 uid、权限 drwxrws--- → access 失败 →
- *      判成"不存在" → 无线索。现在会明说是目录。
- *
- * ⚠️ 用早期可用的 LOGI（logcat）而不是 LOGI_S（LSG 密文，定义在文件后部，
- *    此处不可见）；文案用英文短代号 —— 功能语义字符串必须走 LSG 才能过
- *    test-lsgs-strings.sh 的零泄漏断言，而这几句是【诊断元信息】，
- *    进 LSG 只会平添密文条目。 */
-static void siglog_detect(void) {
-    char pkg[256];
-    char sbuf[64];
-    int first_try;
+ * ⚠️ nc_log 自己带 LSG 密文标记（哨兵路径/日志名/cmdline），
+ *    protect.sh 已把 nc_log.c 加进 make-sig-log.py 入参；
+ *    本文件不再需要 SIGLOG_SENTINEL / LOGNAME 两条标记（已移除）。
+ */
 
-    if (siglog_ready >= 0) return;              /* 已成功或已放弃 */
-    if (siglog_tries >= SIGLOG_MAX_TRIES) {     /* 试够了，放弃（零开销） */
-        siglog_ready = 0;
-        return;
-    }
-    first_try = (siglog_tries == 0);
-    siglog_tries++;
-
-    /* 只在首次失败时说明原因；后续重试静默（否则 20s 复查会刷屏） */
-#define SIGLOG_FAIL(why) do {                                        \
-        if (first_try) LOGI("siglog: " why);                         \
-        return;                     /* 保持 -1 → 下次再试 */          \
-    } while (0)
-
-#ifdef SIGCHECK_HOST_TEST
-    /* 宿主测试:不碰 sdcard,开关用环境变量控制 */
-    {
-        /* ⚠️ env 声明在 ifdef 内部：真机构建下这段不编译，
-         * 放外面会变成 unused variable（-Werror 会拦）。
-         * 2026-11-22：本条与 env_check.c 的同名变量一起导致
-         * 这两个文件长期编不过 -Werror —— 而 CI 的所有 guard 测试
-         * 都没开 -Werror，所以告警存在但从未拦过任何东西。 */
-        const char *env;
-        char ev[24];
-        const char *evn = siglog_testlog_env(ev, sizeof(ev));
-        if (!evn) SIGLOG_FAIL("host: log-name env decode failed");
-        env = getenv(evn);
-        if (!env || !*env) {
-            /* 宿主端变量未设 = 用户明确不要日志 → 直接放弃，不重试 */
-            if (first_try) LOGI("siglog: host env %s unset (log off)", evn);
-            siglog_ready = 0;
-            return;
-        }
-        snprintf(siglog_path, sizeof(siglog_path), "%s", env);
-        siglog_ready = 1;
-        return;
-    }
-#endif
-    {
-        const char *sentinel = siglog_sentinel(sbuf, sizeof(sbuf));
-        if (!sentinel) SIGLOG_FAIL("sentinel name decode failed");
-        if (access(sentinel, F_OK) != 0) {
-            int e = errno;
-            if (first_try) {
-                LOGI("siglog: sentinel not accessible: %s errno=%d(%s) "
-                     "(retry up to %d; if this path is a directory, "
-                     "rmdir it and touch a file)",
-                     sentinel, e, strerror(e), SIGLOG_MAX_TRIES);
-            }
-            return;
-        }
-        /* access 过了但可能是目录：fopen("a") 会失败，那时更没线索。 */
-        {
-            struct stat st;
-            if (stat(sentinel, &st) == 0 && S_ISDIR(st.st_mode)) {
-                if (first_try) {
-                    LOGI("siglog: sentinel is a DIRECTORY (%s) — rmdir it "
-                         "and touch a file; retrying", sentinel);
-                }
-                return;
-            }
-        }
-    }
-    if (get_pkg_name(pkg, sizeof(pkg)) != 0)
-        SIGLOG_FAIL("cannot read own package name (/proc/self/cmdline)");
-    {
-        char logname[48];
-        const char *ln = siglog_logname(logname, sizeof(logname));
-        if (!ln) SIGLOG_FAIL("log file name decode failed");
-        snprintf(siglog_path, sizeof(siglog_path),
-                 "/storage/emulated/0/Android/data/%s/files/%s", pkg, ln);
-    }
-    {
-        /* 目标目录可写性：原来靠 fopen 失败再静默置 0，用户只看到
-         * "文件没出现"。这里提前探一次，失败就说明原因。
-         *
-         * ⚠️⚠️ 2026-11-25 实测补漏：首次启动时
-         * /storage/emulated/0/Android/data/<pkg>/files 【目录还不存在】
-         * （系统在 App 首次运行时才建），access(W_OK) 得 ENOENT →
-         * 判"不可写" → 日志关闭。而 nox 的报告模块能写出 ncguard_log.md，
-         * 是因为它自己 mkdir 了。这里同样补上逐级 mkdir。
-         *
-         * 三种情形分开处置：
-         *   目录不存在     → 逐级 mkdir 后复查（成功即继续）
-         *   目录在但不可写 → 真问题，报 errno 并留给下次重试
-         *   mkdir 也失败   → 不致命（可能别的进程刚建好），继续试 fopen
-         */
-        char dir[512];
-        const char *slash = strrchr(siglog_path, '/');
-        int dir_bad = 0;
-        if (slash != NULL) {
-            snprintf(dir, sizeof(dir), "%.*s",
-                     (int)(slash - siglog_path), siglog_path);
-            if (access(dir, W_OK) != 0) {
-                int e = errno;
-                if (e == ENOENT) {
-                    /* ⚠️ 2026-11-25 实测：与 nox 报告模块对齐 —— 它只 mkdir
-                     * 最后一层 files/，因为 /…/<pkg>/ 由系统在 App 启动早期
-                     * 就建好了（cache/ files/ 是它的子目录）。
-                     *
-                     * 第一版这里做了「逐级 mkdir」，但循环里没判 EEXIST，
-                     * 且路径中间层（/storage、/storage/emulated …）本来就
-                     * 存在或不可写 —— 逐级建会撞 EACCES 而干扰判断。
-                     * 现在只建 <pkg>/ 与 <pkg>/files 两层，并记录真实 errno
-                     * 到诊断日志（不再用 (void) 把错误吞掉）。 */
-                    char base[512];
-                    int rc1 = 0, rc2 = 0;
-                    size_t dl;
-                    snprintf(base, sizeof(base), "%s", dir);
-                    dl = strlen(base);
-                    /* 去掉末尾的 "/files" 得到 <pkg>/ */
-                    if (dl > 6 && strcmp(base + dl - 6, "/files") == 0) {
-                        base[dl - 6] = '\0';
-                        rc1 = mkdir(base, 0770);
-                        if (rc1 != 0 && errno != EEXIST) rc1 = errno; else rc1 = 0;
-                    }
-                    rc2 = mkdir(dir, 0770);
-                    if (rc2 != 0 && errno != EEXIST) rc2 = errno; else rc2 = 0;
-                    if (access(dir, W_OK) == 0) {
-                        if (first_try)
-                            LOGI("siglog: created log dir %s", dir);
-                        dir_bad = 0;
-                    } else {
-                        dir_bad = 1;
-                        if (first_try) {
-                            LOGI("siglog: mkdir %s failed (pkg_rc=%d files_rc=%d) "
-                                 "— parent is system-managed (drwxrws--x), "
-                                 "only the system can create it; will retry",
-                                 dir, rc1, rc2);
-                        }
-                    }
-                } else {
-                    dir_bad = 1;
-                }
-                if (dir_bad && first_try) {
-                    LOGI("siglog: log dir not writable: %s errno=%d(%s) "
-                         "(retrying)", dir, e, strerror(e));
-                }
-            }
-        }
-        if (dir_bad) return;      /* 保持 -1，下次再试 */
-    }
-#undef SIGLOG_FAIL
-    siglog_ready = 1;
-}
-
-static void siglog(const char *prio, const char *fmt, ...) {
-    FILE *fp;
-    struct timespec ts;
-    unsigned long ms;
+/* 薄封装：保留原函数名与签名，调用点零改动。 */
+static void siglog(const char *prio, const char *fmt, ...)
+{
+    char b[512];
     va_list ap;
-    /* ⚠️ 2026-11-25：未探测/待重试时先试一次。
-     * 这是「首次启动没日志」的第二半修法 —— 探测在 constructor 里失败后
-     * siglog_ready 停在 -1，后续任何一次日志调用（env_check 的 20s 复查、
-     * 心跳、g2 的判定）都会把它推进一步，等 FUSE 挂载就绪后自动恢复。
-     * 不这么做的话，即使 detect 保留了 -1，也没有任何调用点会再触发它。 */
-    if (siglog_ready < 0) siglog_detect();
-    if (siglog_ready != 1) return;
-    fp = fopen(siglog_path, "a");
-    if (!fp) {
-        /* 打开失败：不立刻放弃（可能是目录刚被建、FUSE 短暂不可用），
-         * 退回 -1 让下次再试；试够 SIGLOG_MAX_TRIES 次后 detect() 会落 0。 */
-        siglog_ready = -1;
-        return;
-    }
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ms = (unsigned long)ts.tv_sec * 1000UL + (unsigned long)(ts.tv_nsec / 1000000UL);
-    fprintf(fp, "[%lu][%s][pid %d] ", ms, prio, (int)getpid());
+    if (!fmt) { nc_log_line(prio, ""); return; }
     va_start(ap, fmt);
-    vfprintf(fp, fmt, ap);
+    vsnprintf(b, sizeof(b), fmt, ap);
     va_end(ap);
-    fputc('\n', fp);
-    fclose(fp);
+    nc_log_line(prio, "%s", b);
 }
+
+static void siglog_fmt1(const char *prio, const char *fmt, const char *a1)
+{
+    char b[512];
+    if (!fmt) { nc_log_line(prio, ""); return; }
+    snprintf(b, sizeof(b), fmt, a1 ? a1 : "");
+    nc_log_line(prio, "%s", b);
+}
+
 
 /* 重定义三个日志宏为"logcat + 文件"双写;所有调用点零改动(纯追加原则) */
 #undef LOGD
@@ -489,24 +300,14 @@ static void siglog(const char *prio, const char *fmt, ...) {
  *   sig_verify         主流程（判定 + 失败分支选择）
  * 注意 sig_verify 在 -Oz 下可能被内联，但标段后编译器会保留独立实体。 */
 
-/* LSGS 解码包装函数(2026-10-16):siglog_detect 定义在 sig_log_data.h
- * include 之前,直接调 lsg_s 不可见——通过这些包装在 include 后实现。
- * 解码失败统一返回 NULL,调用方按"开关关/宁漏勿误伤"处理。 */
-static const char *siglog_sentinel(char *buf, size_t buflen) {
-    return lsg_s(LSGS_SIGLOG_SENTINEL, buf, buflen);
-}
-static const char *siglog_logname(char *buf, size_t buflen) {
-    return lsg_s(LSGS_LOGNAME, buf, buflen);
-}
+/* ── 宿主测试用的 LSG 包装（2026-11-25：日志本身已移到 nc_log 模块，
+ *    这两个只剩宿主测试分支在用）──────────────────────────────────── */
 #ifdef SIGCHECK_HOST_TEST
-/* ⚠️ 这两个包装只在宿主测试分支里被调用。不加条件编译时，
- * 真机构建下它们是 unused function → -Werror 拦（2026-11-22 修）。
- * 注意：它们引用的 LSGS 标记仍然要保留 —— 标记的枚举位置由
- * 生成器按源码顺序编号，包在 ifdef 里不影响扫描顺序。 */
-static const char *siglog_testlog_env(char *buf, size_t buflen) {
-    return lsg_s(LSGS_ENV_TESTLOG, buf, buflen);
-}
-/* ⚠️ 2026-11-22：本包装【没有调用点】—— 调用处（apk_locate_hosttest）
+/* ⚠️ 2026-11-25：siglog_testlog_env 的调用方 siglog_detect 已移到 nc_log.c，
+ * 本包装随之移走（宿主的 SIGCHECK_TEST_LOG 支持在 nc_log.c 里）。
+ * 这里只留 testapk 那个（它服务于 apk_locate_hosttest，仍在本文）。
+ *
+ * ⚠️ 2026-11-22：本包装【没有调用点】—— 调用处（apk_locate_hosttest）
  * 一直直接用 lsg_s(LSGS_ENV_TESTAPK, ...)。
  * -Wunused-function 本该早就报出来，这正是"CI 没开 -Werror"的代价。
  * 这里保留函数而不是删除：它引用的 LSGS 标记要留在源码同一位置，
@@ -540,44 +341,11 @@ static const char *siglog_testapk_env(char *buf, size_t buflen) {
  * 那个调用才行 —— 即：把 logcat 写在外面这一层。
  *
  * 现在 VMP 目标函数只直接调 siglog_fmt1，logcat 由它内部负责。 */
-__attribute__((noinline))
-static void siglog_android(const char *prio, const char *text) {
-    int p = (prio && prio[0] == 'E') ? ANDROID_LOG_ERROR
-          : (prio && prio[0] == 'D') ? ANDROID_LOG_DEBUG
-                                     : ANDROID_LOG_INFO;
-    __android_log_write(p, LOG_TAG, text);
-}
-
-__attribute__((noinline))
-static void siglog_fmt1(const char *prio, const char *fmt, const char *a1) {
-    FILE *fp;
-    struct timespec ts;
-    unsigned long ms;
-    /* ⚠️ 2026-11-25：与 siglog() 同款两处修法 ——
-     *   ① 未探测时先试一次（否则 detect 保留的 -1 永远没人推进）；
-     *   ② fopen 失败退回 -1 而非 0（FUSE 短暂不可用时应下次再试）。
-     * 本函数是 LOGI_S / LOGE_S 的实现，签名校验的绝大多数中文文案走这里，
-     * 所以"首次启动没日志"的另一半就出在这个函数上。 */
-    if (siglog_ready < 0) siglog_detect();
-    if (siglog_ready != 1) return;
-    fp = fopen(siglog_path, "a");
-    if (!fp) { siglog_ready = -1; return; }
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ms = (unsigned long)ts.tv_sec * 1000UL + (unsigned long)(ts.tv_nsec / 1000000UL);
-    fprintf(fp, "[%lu][%s][pid %d] ", ms, prio, (int)getpid());
-    {
-        char line[512];
-        snprintf(line, sizeof(line), fmt, a1);
-        fputs(line, fp);
-    }
-    fputc('\n', fp);
-    /* 同时写 logcat（非 varargs 的 __android_log_write） */
-    {
-        char line[512];
-        snprintf(line, sizeof(line), fmt, a1);
-        siglog_android(prio, line);
-    }
-}
+/* siglog_android 已于 2026-11-25 删除：它原是 siglog_fmt1 的 VMP 隔离层
+ * （Amice 误判 __android_log_write 为 intrinsic → 含该调用的函数被跳过 VMP）。
+ * 日志实现移到 nc_log.c 后，VMP 目标函数只直接调 siglog_fmt1 → nc_log_line，
+ * 这层隔离已无意义。**若将来 nc_log.c 的 logcat 调用又踩同一个 VMP 坑，
+ * 应把隔离层加在 nc_log.c 里，而不是加回来**（否则又会变成两份实现）。 */
 
 static void siglog_c(int prio, lsg_id_t id, const char *detail) {
     char msg[512];
@@ -2118,6 +1886,8 @@ static int sig_collect_fp(unsigned char actual[32]) {
             /*LSG:ROUTE_SUM|【数据】多路采集汇总(成功路数/是否不一致)*/
             LSGI(LSG_ROUTE_SUM, "ok=%d/%d mismatch=%d",
                  ok, SIG_ROUTE_NUM, mismatch);
+            /* 记入首次启动摘要（纯整数，不存日志文本 —— 见 nc_log.h） */
+            nc_log_summary(-2, ok, -1);
         }
 
         /* ── 判定（2026-11-25 重写）──────────────────────────────────
@@ -2182,6 +1952,7 @@ static int sig_collect_fp(unsigned char actual[32]) {
                     /*LSG:ROUTE_TRUSTED_OK|【通过】可信路线(内联svc)与基准一致,主人自己在场,放行*/
                     LSGI(LSG_ROUTE_TRUSTED_OK, "route=%s",
                          sig_route_name(trusted_from));
+                    nc_log_summary(-2, -1, 1);   /* 摘要：裁决=放行(主人在场) */
                     memcpy(actual, trusted_fp, 32);
                     return 0;
                 }
@@ -2246,7 +2017,11 @@ static void sig_verify(void) {
      * 保证任何未显式设置的失败路径都不会被"轻处理"。 */
     int killvar = 2;
 
-    siglog_detect();   /* 文件日志开关探测(只做一次,失败静默) */
+    /* 文件日志开关探测（2026-11-25：委托 nc_log 模块，可重试非一次性）。
+     * ⚠️ 首次启动这里通常失败 —— 日志目录 /…/<pkg>/files 由 system_server
+     * 建立，晚于本 constructor。失败不落死，constructor 末尾的
+     * nc_log_late_flush() 会在 1~2 秒后补写一条结论摘要。 */
+    nc_log_open();
 
     /* ⚠️ 2026-11-25 启动分隔线（用户反馈：多个包的日志追加在同一文件里，
      *    只能靠 pid/size 自己分辨，同签名不同包完全分不清）。
@@ -2285,6 +2060,7 @@ static void sig_verify(void) {
         LOGI_S("nc: ok");   /* so加固2026-10: 原文 "signature verify ok",改中性 */
         /*LSG:VERIFY_OK|【通过】指纹比对一致,签名校验通过,放行*/
         LSGI0(LSG_VERIFY_OK);
+        nc_log_summary(-2, -1, 1);   /* 摘要：裁决=放行 */
         return;
     }
     LOGE_S("nc: mm");   /* so加固2026-10: 原文 "signature mismatch (actual vs expected...)",排障走上方 fp 行 */
@@ -2301,6 +2077,17 @@ fail:
 /* dlopen 后最先执行的入口（早于 JNI_OnLoad 与一切 Java 代码） */
 __attribute__((constructor)) static void sig_check_entry(void) {
     sig_verify();
+    /* ⚠️ 2026-11-25：首次启动的补写（用户明确要求"一两秒就出结果"）。
+     *
+     * 为什么需要：本 constructor 跑在 system_server 建 <pkg>/files 目录
+     * 之前，那几十毫秒的日志必然落不了盘（实测 mkdir 得 EACCES 13）。
+     * 已就绪时（第二次启动及之后）本调用直接返回，零成本；
+     * 未就绪时起一个 detached 线程，1~2 秒后重试探测并写一条摘要。
+     *
+     * ⚠️ 只补【摘要】不补全文：缓冲全文会让解密后的明文常驻 .bss，
+     *    Frida Memory.scan 可整块读走 —— 与"字符串必须密文化"的纪律冲突。
+     *    摘要只含 3 个整数（rc / 路数 / 裁决码），泄露面约 16 字节。 */
+    nc_log_late_flush();
 }
 
 /* ── 宿主端测试钩子（仅 SIGCHECK_HOST_TEST 编译时启用，Android 构建不受影响）── */

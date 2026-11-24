@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
-"""test-siglog-retry.py — 「首次启动没日志」bug 的结构契约
+"""test-siglog-retry.py — 「首次启动没日志」的结构契约
 
 ═══ 这个 bug 是什么（用户真机实测）═══
 装完 App【第一次】打开，sigcheck_log.txt 永远不出现；关掉再打开【第二次】
 就有了。同包、同哨兵、同 uid，唯一的差别是"第几次"。
 
-根因在 scripts/guard/src/sig_check.c 的 siglog_detect():
-  · 函数第二行就 `siglog_ready = 0`（先假定失败）
-  · 而 constructor 阶段 /storage/emulated/0 的 FUSE 可能还没为本 uid 挂载好
-    → access(sentinel) 因 EACCES 失败 → 直接 return
-    → siglog_ready 永久留在 0 → 本次进程再也不会写文件日志
-  · 第二次启动 FUSE 已就绪（首次启动间接促成了挂载）→ 正常
+═══ 根因（两层，都已实测确认）═══
+① 探测是"一次性"的：失败后 siglog_ready 永久留在 0，本次进程再也不写。
+   而 constructor 期 /storage/emulated/0 的 FUSE 可能还没为本 uid 就绪。
+② 日志目录 /…/<pkg>/files 由 system_server 在「应用数据目录初始化」时创建，
+   晚于本 so 的 constructor；且 <pkg>/ 这一层 App **无权自建**
+   （父目录 drwxrws--x，其他用户 --x）。真机实测：
+       nc_log: mkdir ... failed (pkg_rc=13 files_rc=2)
+   pkg_rc=13 = EACCES，证明是权限模型决定的，不是能靠 mkdir 绕过的。
+
+═══ 现在的设计（2026-11-25）═══
+日志实现已抽取到 scripts/guard/src/nc_log.c（唯一实现）：
+  · 失败保持 -1（可重试），落 0 只发生在「试够 NC_LOG_MAX_TRIES 次」
+  · 目录不存在时尝试 mkdir（<pkg>/ 与 files/ 两层）
+  · 仍失败则保持可重试，并由 sig_check.c constructor 末尾的
+    nc_log_late_flush() 起短延时线程（1~2 秒）补写一条【摘要】
+  · 摘要只存 3 个整数（rc / 路数 / 裁决码）——
+    缓冲全文会让解密后的明文常驻 .bss，Frida Memory.scan 可整块读走，
+    与"字符串必须密文化"的纪律冲突（用户提出后定下的取舍）
 
 ═══ 为什么用"读源码 + 断言结构"而不是运行时测试 ═══
-这个 bug 的触发条件是【FUSE 挂载未就绪】——只在真机首次启动那一瞬间存在，
-宿主端（Termux/CI）根本没有 FUSE 这个中间层，构造不出来。而真机测试
-无法进 CI（无 adb）。
-
-所以退而钉住【能让 bug 复现/修复的代码结构】，并配反向验证：
-改回原来的写法 → 本测试必红。这与 test-trusted-route.py 的做法同源
-（那里也钉 "return -2 的位置"，因为那个 bug 同样是时序性的）。
+这个 bug 的触发条件是【FUSE 挂载未就绪 / 系统目录尚未创建】——只在真机
+首次启动那一瞬间存在，宿主端（Termux/CI）没有这两个中间层，构造不出来；
+真机测试又进不了 CI。所以钉住"能让 bug 复现/修复的代码结构"，
+与 test-trusted-route.py 同源（那里钉的也是时序性 bug 的代码位置）。
 """
 import os
 import re
@@ -27,9 +36,19 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
-SRC = os.path.join(ROOT, "scripts", "guard", "src", "sig_check.c")
+NCLOG = os.path.join(ROOT, "scripts", "guard", "src", "nc_log.c")
+SIGCHK = os.path.join(ROOT, "scripts", "guard", "src", "sig_check.c")
+ENVCHK = os.path.join(ROOT, "scripts", "guard", "src", "env_check.c")
 
 fails = []
+
+
+def strip_comments(text):
+    """去掉 C 注释，只留代码 —— 本模块大量断言会被注释里的"历史说明"误判。
+    （实测踩过：T10 只因注释里写着 `envlog_ready = 0` 就报红。）"""
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+    text = re.sub(r'//[^\n]*', '', text)
+    return text
 
 
 def ok(m):
@@ -42,92 +61,87 @@ def bad(m):
 
 
 def main():
-    print("== siglog 重试语义（首次启动没日志的修法）==")
-    s = open(SRC, encoding="utf-8").read()
+    print("== 文件日志：首次启动可写性契约 ==")
+    s = open(NCLOG, encoding="utf-8").read()
 
-    # 取出 siglog_detect 的整个函数体
-    m = re.search(r"static void siglog_detect\(void\)\s*\{(.*?)\n\}", s, re.S)
+    m = re.search(r"int nc_log_open\(void\)\s*\{(.*?)\n\}", s, re.S)
     if not m:
-        bad("找不到 siglog_detect()")
+        bad("找不到 nc_log_open()")
         return 1
     body = m.group(1)
-    ok("定位到 siglog_detect()")
+    ok("定位到 nc_log_open()")
 
-    # ── T1 失败不得【无条件】落 0（原 bug 的核心）────────────────────
-    # 原写法：函数第二行 `siglog_ready = 0;` —— 一次失败即永久关闭。
-    # 现在的 0 只允许出现在「试够上限」那一支里，且必须受计数保护。
-    first_zero = re.search(r"siglog_ready\s*=\s*0", body)
+    # ── T1 失败不得【无条件】落 0（原 bug 的核心）──────────────────────
+    first_zero = re.search(r"nc_log_state\s*=\s*0", body)
     if first_zero:
         before = body[:first_zero.start()]
-        (ok if "SIGLOG_MAX_TRIES" in before
-         else bad)("T1 落 0 只在「试够上限」之后（不是函数开头无条件预设）")
+        (ok if "NC_LOG_MAX_TRIES" in before or "SIGCHECK_HOST_TEST" in before
+         else bad)("T1 落 0 有前置条件（不是函数开头无条件预设）")
     else:
         bad("T1 找不到任何落 0 的分支（应当有一条「试够了就放弃」）")
 
-    # ── T2 有重试上限计数 ───────────────────────────────────────────
-    (ok if "siglog_tries" in body and "SIGLOG_MAX_TRIES" in body
-     else bad)("T2 有重试计数上限（哨兵真不存在时不能无限 access）")
+    # ── T2 有重试上限 ─────────────────────────────────────────────────
+    (ok if "NC_LOG_MAX_TRIES" in s
+     else bad)("T2 有重试计数上限（哨兵真不存在时不能无限探测）")
 
-    # ── T3 失败分支保持 -1（即"不写 0"就 return）───────────────────
-    # 用 SIGLOG_FAIL 宏或裸 return，关键是失败路径里没有 siglog_ready = 0
-    fail_paths = re.findall(r"SIGLOG_FAIL\([^)]*\)", body)
-    (ok if fail_paths else bad)("T3 失败分支走统一出口（SIGLOG_FAIL/裸 return）")
-    # 「试够次数才落 0」这一支必须存在，否则永远不放弃
-    (ok if re.search(r"siglog_tries\s*>=\s*SIGLOG_MAX_TRIES", body)
-     else bad)("T3b 试够上限后落 0（不无限重试）")
+    # ── T3 目录不存在时自己 mkdir（首启 files/ 尚未创建）──────────────
+    code = strip_comments(s)
+    (ok if "mkdir(" in code and ("ENOENT" in code or "EEXIST" in code)
+     else bad)("T3 目录不存在时尝试 mkdir（首启 files/ 尚未创建）")
 
-    # ── T4 siglog() 在未探测时触发探测 ─────────────────────────────
-    # 这是修法的第二半：detect 保住 -1 之后，必须有人再触发它，
-    # 否则 constructor 那次失败就再也没人重试。
-    m2 = re.search(r"static void siglog\(const char \*prio.*?\n\}", s, re.S)
-    if not m2:
-        bad("找不到 siglog()")
-    else:
-        sbody = m2.group(0)
-        (ok if re.search(r"if \(siglog_ready < 0\)\s*siglog_detect\(\)", sbody)
-         else bad)("T4 siglog() 在 siglog_ready<0 时先调 siglog_detect()")
+    # ── T4 mkdir 失败不致命：保持可重试 ───────────────────────────────
+    # 真机实测 pkg_rc=13(EACCES) —— <pkg>/ 由系统托管，App 无权建。
+    # 此时必须"保持 -1 等下次"，而不是判死。
+    mm = re.search(r"static int nc_log_mkdir_target\(.*?\n\}", s, re.S)
+    mb = mm.group(0) if mm else ""
+    (ok if "EEXIST" in mb
+     else bad)("T4 mkdir 把 EEXIST 当正常（系统可能已建好）")
 
-    # ── T5 两个写日志函数都必须：未探测时触发探测 + fopen 失败退回 -1 ──
-    # ⚠️ 2026-11-25 实测踩到：本测试第一版只查 siglog()，而 LOGI_S/LOGE_S
-    # 走的是【另一个函数】siglog_fmt1()。只修前者等于修了一半 ——
-    # 中文文案（签名校验的绝大多数日志）仍然首次启动不可见。
-    # 所以两个函数都要断言，缺一个就红。
-    for fname in ("siglog", "siglog_fmt1"):
-        mf = re.search(rf"static void {fname}\(.*?\n\}}", s, re.S)
-        if not mf:
-            bad(f"T5 找不到 {fname}()")
-            continue
-        fb = mf.group(0)
-        (ok if re.search(r"if \(siglog_ready < 0\)\s*siglog_detect\(\)", fb)
-         else bad)(f"T5a {fname}() 未探测时先调 siglog_detect()")
-        fm = re.search(r'fp = fopen\(siglog_path, "a"\);(.{0,300}?)\n\s*clock_gettime',
-                       fb, re.S)
-        seg = fm.group(1) if fm else ""
-        (ok if "siglog_ready = -1" in seg and "siglog_ready = 0" not in seg
-         else bad)(f"T5b {fname}() fopen 失败退回 -1（可重试），不落 0")
+    # ── T5 目录不可写时 nc_log_open 返回 0 但【不落 0 状态】───────────
+    (ok if re.search(r"dir not ready yet", body)
+     else bad)("T5 目录未就绪时留诊断信息并保持可重试")
 
-    # ── T6 失败原因进 logcat（不能静默）─────────────────────────────
-    # 判据：siglog_detect 里出现 LOGI(...) 的身影。
-    # ⚠️ 必须用早期 LOGI（logcat only）：LOGI_S 定义在文件后部，此处不可见；
-    #    若有人"顺手统一"成 LOGI_S，编译会炸 —— 那也是对的（早发现）。
-    (ok if re.search(r'\bLOGI\(', body)
-     else bad)("T6 失败原因进 logcat（用户能看到「为什么没日志」）")
+    # ── T6 两个写日志函数都必须：未就绪时触发探测 + fopen 失败退回 -1 ──
+    # ⚠️ 2026-11-25 实测踩到：第一版只查 siglog()，而 LOGI_S/LOGE_S 走
+    #    的是另一个函数。只修前者等于修了一半 —— 中文文案仍然首启不可见。
+    #    抽取到 nc_log.c 后只剩一个 nc_log_line()，但仍要对它断言，
+    #    防止将来又被人拆成两份。
+    ml = re.search(r"void nc_log_line\(.*?\n\}", s, re.S)
+    lb = ml.group(0) if ml else ""
+    (ok if re.search(r"if \(nc_log_state < 0\)\s*nc_log_open\(\)", lb)
+     else bad)("T6a nc_log_line() 未探测时先调 nc_log_open()")
+    (ok if "nc_log_state = -1" in lb and "nc_log_state = 0" not in lb
+     else bad)("T6b nc_log_line() fopen 失败退回 -1（可重试），不落 0")
 
-    # ── T7 单独识别「哨兵被建成目录」这一独立成因 ───────────────────
-    (ok if "S_ISDIR" in body
-     else bad)("T7 单独识别「哨兵被建成目录」（与「不存在」区分开）")
+    # ── T7 摘要只存整数，不存日志文本（安全取舍的落实）────────────────
+    (ok if re.search(r"signed char nc_sum_\w+", s)
+     else bad)("T7 首启摘要用 signed char 存整数（不引入明文常驻）")
 
-    # ── T8 日志目录不存在时自己建（首次启动的第二个坑）──────────────
-    # 实测（2026-11-25 真机）：干净安装后第一次启动，
-    # /storage/emulated/0/Android/data/<pkg>/files 【目录还不存在】
-    # （系统在 App 首次运行时才建）→ access(W_OK) 得 ENOENT →
-    # 判"不可写" → 日志关闭。nox 的报告模块能写出 ncguard_log.md，
-    # 正是因为它自己 mkdir 了。
-    (ok if "ENOENT" in body and "mkdir(" in body
-     else bad)("T8 目录不存在时自己 mkdir（首启 files/ 尚未创建）")
-    # 反向：删掉 ENOENT 分支 → 这行红。
+    # ── T8 延时补写存在，且延时在 1~2 秒（用户明确要求"一两秒出结果"）──
+    mt = re.search(r"nc_log_late_thread\(.*?\n\}", s, re.S)
+    tb = mt.group(0) if mt else ""
+    delays = [int(x) for x in re.findall(r"sleep\((\d+)\)", tb)]
+    (ok if delays and all(1 <= d <= 2 for d in delays)
+     else bad)(f"T8 延时线程在 1~2 秒内重试（实得 sleep={delays}）")
 
-    print(f"\n=== 结果: {10 - len(fails)} 通过, {len(fails)} 失败 ===")
+    # ── T9 constructor 末尾必须触发延时补写 ───────────────────────────
+    sc = open(SIGCHK, encoding="utf-8").read()
+    # ⚠️ 不能写 `.*?\n\}` —— __attribute__((constructor)) 本身带括号，
+    #    非贪婪匹配会在那里提前收尾。改成锚定函数名。
+    me = re.search(r"sig_check_entry\(void\)\s*\{(.*?)\n\}", sc, re.S)
+    eb = me.group(1) if me else ""
+    (ok if "nc_log_late_flush" in strip_comments(eb)
+     else bad)("T9 sig_check constructor 末尾调 nc_log_late_flush()")
+
+    # ── T10 两份旧实现必须已消失（防止有人把它加回来）────────────────
+    ec = strip_comments(open(ENVCHK, encoding="utf-8").read())
+    (ok if "envlog_detect" not in ec and "envlog_ready" not in ec
+     else bad)("T10 env_check.c 不再自带 envlog 实现（已委托 nc_log）")
+    sc_code = strip_comments(sc)
+    (ok if "siglog_detect" not in sc_code and "siglog_ready" not in sc_code
+     else bad)("T10b sig_check.c 不再自带 siglog 实现（已委托 nc_log）")
+
+    print(f"\n=== 结果: {12 - len(fails)} 通过, {len(fails)} 失败 ===")
     return 1 if fails else 0
 
 

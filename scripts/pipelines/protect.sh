@@ -673,11 +673,15 @@ if [[ $WANT_SIGCHECK -eq 1 || $WANT_ENVCHECK -eq 1 || $WANT_TRANSPILE -eq 1 ]]; 
   #    （路径/线程名等标记在 env_check.c，特征串在 env_probes.c）。
   #    生成器必须两个都扫 —— 漏扫会让 sig_log_data.h 缺枚举
   #    → 编译期 "undeclared identifier"（fail-fast，比运行期静默好）。
+  # ⚠️ 2026-11-25：nc_log.c 也自带 LSGS 标记（哨兵路径/日志名/cmdline），
+  #    它成为日志目录/文件名的唯一来源后必须一并扫描，否则
+  #    LSGS_NC_LOG_* 缺失 → 编译期 undeclared。
   python3 "$ROOT/scripts/guard/log/make-sig-log.py" \
     "$ROOT/scripts/guard/src/sig_check.c" \
     "$ROOT/scripts/guard/src/env_check.c" \
     "$ROOT/scripts/guard/src/env_probes.c" \
     "$ROOT/scripts/guard/src/sig_guard2.c" \
+    "$ROOT/scripts/guard/src/nc_log.c" \
     "$WORK/sig_log_data.h"
 fi
 
@@ -716,6 +720,10 @@ if [[ $WANT_SIGCHECK -eq 1 ]]; then
   fi
 
   cp "$ROOT/scripts/guard/src/sig_check.c"    "$SIG_DST/"
+  # 文件日志通道（2026-11-25 抽取）：sig_check.c 与 env_check.c 共用唯一实现，
+  # 缺它两个文件的 nc_log_* 全部 undefined。
+  cp "$ROOT/scripts/guard/src/nc_log.c"       "$SIG_DST/"
+  cp "$ROOT/scripts/guard/src/nc_log.h"       "$SIG_DST/"
   cp "$ROOT/scripts/guard/src/nc_link.c"      "$SIG_DST/"
   cp "$ROOT/scripts/guard/src/nc_link_jni.c"  "$SIG_DST/"
   cp "$ROOT/scripts/guard/src/nc_link_jni.h"  "$SIG_DST/"
@@ -871,17 +879,25 @@ if [[ $WANT_ENVCHECK -eq 1 ]]; then
   #      env_check.c    基础设施（日志/syscall/IO/kill/watchdog/调度）
   #      env_probes.c   13 个探针（依赖 env_internal.h 的声明）
   #      env_internal.h 两侧的共享声明
+  # ⚠️ 2026-11-25：nc_log.c/.h 必须一起拷 —— env_check.c 的日志已委托给它。
+  #    注意 sigcheck 分支已经拷过同名文件，但那是【另一个目录】；两分支都可能
+  #    独立生效（envcheck-only 与 sigcheck+envcheck），所以这两个分支都要拷。
+  #    同目录重复 cp 无害（cp 覆盖），漏拷则是链接期 undefined symbol。
   if [[ $WANT_TRANSPILE -eq 1 ]]; then
     mkdir -p "$WORK/project/jni/nc"
     cp "$ROOT/scripts/guard/src/env_check.c" \
        "$ROOT/scripts/guard/src/env_probes.c" \
-       "$ROOT/scripts/guard/src/env_internal.h" "$WORK/project/jni/nc/"
+       "$ROOT/scripts/guard/src/env_internal.h" \
+       "$ROOT/scripts/guard/src/nc_log.c" \
+       "$ROOT/scripts/guard/src/nc_log.h" "$WORK/project/jni/nc/"
   cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/nc/"
   else
     mkdir -p "$WORK/project/jni"
     cp "$ROOT/scripts/guard/src/env_check.c" \
        "$ROOT/scripts/guard/src/env_probes.c" \
-       "$ROOT/scripts/guard/src/env_internal.h" "$WORK/project/jni/"
+       "$ROOT/scripts/guard/src/env_internal.h" \
+       "$ROOT/scripts/guard/src/nc_log.c" \
+       "$ROOT/scripts/guard/src/nc_log.h" "$WORK/project/jni/"
   cp "$GUARD_SRC/nc_guard_layout.h" "$WORK/project/jni/"
   fi
   # envcheck 未勾 sigcheck 时也要有文案表(仅勾 envcheck 的组合)
