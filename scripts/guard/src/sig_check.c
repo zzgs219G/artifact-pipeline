@@ -70,16 +70,67 @@ static const char *siglog_testapk_env(char *buf, size_t buflen);
 static const char *siglog_logname(char *buf, size_t buflen);
 
 static char siglog_path[512];   /* 日志文件完整路径,'' = 未探测 */
-static int  siglog_ready = -1;  /* -1 未探测, 0 开关关/不可用, 1 可写 */
+static int  siglog_ready = -1;  /* -1 未探测/待重试, 0 已放弃, 1 可写 */
+/* 探测次数上限（2026-11-25）。为什么需要上限：
+ * 哨兵不存在是【常态】（用户没开日志），此时每次 siglog 调用都重试
+ * access() 会白花系统调用。上限 6 次覆盖 constructor + 前几次运行时
+ * 调用，足够等到 /storage 的 FUSE 挂载就绪，之后放弃、零开销。 */
+static int  siglog_tries = 0;
+#define SIGLOG_MAX_TRIES 6
 
 /* 前向声明:get_pkg_name 定义在本文件后部(§定位 base.apk),此处先用 */
 static int get_pkg_name(char *out, size_t outlen);
 
+/* ── 日志开关探测（2026-11-25 重写：从「一次性」改成「可重试」）─────────
+ *
+ * ═══ 修的 bug（用户真机实测）═══
+ * 症状：装完 App【第一次】打开，sigcheck_log.txt 永远不出现；
+ *       关掉再打开【第二次】就有了。同包同哨兵同 uid，只差在"第二次"。
+ *
+ * 根因：本函数原来第二行就 `siglog_ready = 0`（先假定失败），
+ *       而 constructor 阶段 /storage/emulated/0 的 FUSE 可能还没为这个
+ *       uid 挂载好 → access(sentinel) 因 EACCES 失败 → 直接 return
+ *       → siglog_ready 永久留在 0 → 本次进程再也不会写文件日志。
+ *       第二次启动时 FUSE 已就绪（首次启动间接促成了挂载）→ 正常。
+ *
+ *       这不是猜测：本文件 53 行早就写着「constructor 早期 FUSE 可能未就绪」，
+ *       变更历史 2026-11-24 条也记了「早期写 sdcard 靠不住（同一次启动
+ *       早期失败、晚期成功）」。当时的选择是"静默忽略"，代价是用户在
+ *       最想看的第一次启动里拿不到任何日志。
+ *
+ * ═══ 现在怎么做 ═══
+ *   ① 失败【不落 0】：保持 -1，下一次 siglog() 调用会再试（见 siglog 首行）。
+ *   ② 探测上限 6 次：哨兵确实不存在时不能无限重试（常态，白花 syscall）。
+ *   ③ 失败原因进 logcat（只在第 1 次打，避免 20s 复查把 logcat 刷满）：
+ *      文件日志写不了，但 logcat 一定能写 —— 与 ncg_death_notice 同款理由。
+ *   ④ 区分「不存在」与「存在但进不去」：前者是用户没开哨兵，后者是环境
+ *      问题（权限/类型），修法完全不同。用户实测踩过一次：哨兵路径被建成
+ *      【目录】且属主是别的 uid、权限 drwxrws--- → access 失败 →
+ *      判成"不存在" → 无线索。现在会明说是目录。
+ *
+ * ⚠️ 用早期可用的 LOGI（logcat）而不是 LOGI_S（LSG 密文，定义在文件后部，
+ *    此处不可见）；文案用英文短代号 —— 功能语义字符串必须走 LSG 才能过
+ *    test-lsgs-strings.sh 的零泄漏断言，而这几句是【诊断元信息】，
+ *    进 LSG 只会平添密文条目。 */
 static void siglog_detect(void) {
     char pkg[256];
     char sbuf[64];
-    if (siglog_ready >= 0) return;
-    siglog_ready = 0;
+    int first_try;
+
+    if (siglog_ready >= 0) return;              /* 已成功或已放弃 */
+    if (siglog_tries >= SIGLOG_MAX_TRIES) {     /* 试够了，放弃（零开销） */
+        siglog_ready = 0;
+        return;
+    }
+    first_try = (siglog_tries == 0);
+    siglog_tries++;
+
+    /* 只在首次失败时说明原因；后续重试静默（否则 20s 复查会刷屏） */
+#define SIGLOG_FAIL(why) do {                                        \
+        if (first_try) LOGI("siglog: " why);                         \
+        return;                     /* 保持 -1 → 下次再试 */          \
+    } while (0)
+
 #ifdef SIGCHECK_HOST_TEST
     /* 宿主测试:不碰 sdcard,开关用环境变量控制 */
     {
@@ -91,9 +142,14 @@ static void siglog_detect(void) {
         const char *env;
         char ev[24];
         const char *evn = siglog_testlog_env(ev, sizeof(ev));
-        if (!evn) return;
+        if (!evn) SIGLOG_FAIL("host: log-name env decode failed");
         env = getenv(evn);
-        if (!env || !*env) return;   /* 变量未设/为空 → 关日志 */
+        if (!env || !*env) {
+            /* 宿主端变量未设 = 用户明确不要日志 → 直接放弃，不重试 */
+            if (first_try) LOGI("siglog: host env %s unset (log off)", evn);
+            siglog_ready = 0;
+            return;
+        }
         snprintf(siglog_path, sizeof(siglog_path), "%s", env);
         siglog_ready = 1;
         return;
@@ -101,18 +157,58 @@ static void siglog_detect(void) {
 #endif
     {
         const char *sentinel = siglog_sentinel(sbuf, sizeof(sbuf));
-        if (!sentinel) return;                            /* 解码失败 → 关(宁漏勿误伤) */
-        if (access(sentinel, F_OK) != 0) return;          /* 哨兵不存在 → 关 */
+        if (!sentinel) SIGLOG_FAIL("sentinel name decode failed");
+        if (access(sentinel, F_OK) != 0) {
+            int e = errno;
+            if (first_try) {
+                LOGI("siglog: sentinel not accessible: %s errno=%d(%s) "
+                     "(retry up to %d; if this path is a directory, "
+                     "rmdir it and touch a file)",
+                     sentinel, e, strerror(e), SIGLOG_MAX_TRIES);
+            }
+            return;
+        }
+        /* access 过了但可能是目录：fopen("a") 会失败，那时更没线索。 */
+        {
+            struct stat st;
+            if (stat(sentinel, &st) == 0 && S_ISDIR(st.st_mode)) {
+                if (first_try) {
+                    LOGI("siglog: sentinel is a DIRECTORY (%s) — rmdir it "
+                         "and touch a file; retrying", sentinel);
+                }
+                return;
+            }
+        }
     }
-    if (get_pkg_name(pkg, sizeof(pkg)) != 0) return;
+    if (get_pkg_name(pkg, sizeof(pkg)) != 0)
+        SIGLOG_FAIL("cannot read own package name (/proc/self/cmdline)");
     {
         char logname[48];
         const char *ln = siglog_logname(logname, sizeof(logname));
-        if (!ln) return;
+        if (!ln) SIGLOG_FAIL("log file name decode failed");
         snprintf(siglog_path, sizeof(siglog_path),
                  "/storage/emulated/0/Android/data/%s/files/%s", pkg, ln);
     }
-    siglog_ready = 1;   /* 真正可写性由 siglog 打开时判定,失败静默 */
+    {
+        /* 目标目录可写性：原来靠 fopen 失败再静默置 0，用户只看到
+         * "文件没出现"。这里提前探一次，失败就说明原因。 */
+        char dir[512];
+        const char *slash = strrchr(siglog_path, '/');
+        if (slash != NULL) {
+            snprintf(dir, sizeof(dir), "%.*s",
+                     (int)(slash - siglog_path), siglog_path);
+            if (access(dir, W_OK) != 0) {
+                int e = errno;
+                if (first_try) {
+                    LOGI("siglog: log dir not writable: %s errno=%d(%s) "
+                         "(retrying)", dir, e, strerror(e));
+                }
+                return;
+            }
+        }
+    }
+#undef SIGLOG_FAIL
+    siglog_ready = 1;
 }
 
 static void siglog(const char *prio, const char *fmt, ...) {
@@ -120,9 +216,20 @@ static void siglog(const char *prio, const char *fmt, ...) {
     struct timespec ts;
     unsigned long ms;
     va_list ap;
+    /* ⚠️ 2026-11-25：未探测/待重试时先试一次。
+     * 这是「首次启动没日志」的第二半修法 —— 探测在 constructor 里失败后
+     * siglog_ready 停在 -1，后续任何一次日志调用（env_check 的 20s 复查、
+     * 心跳、g2 的判定）都会把它推进一步，等 FUSE 挂载就绪后自动恢复。
+     * 不这么做的话，即使 detect 保留了 -1，也没有任何调用点会再触发它。 */
+    if (siglog_ready < 0) siglog_detect();
     if (siglog_ready != 1) return;
     fp = fopen(siglog_path, "a");
-    if (!fp) { siglog_ready = 0; return; }   /* 不可写 → 本次进程内放弃,不重试 */
+    if (!fp) {
+        /* 打开失败：不立刻放弃（可能是目录刚被建、FUSE 短暂不可用），
+         * 退回 -1 让下次再试；试够 SIGLOG_MAX_TRIES 次后 detect() 会落 0。 */
+        siglog_ready = -1;
+        return;
+    }
     clock_gettime(CLOCK_REALTIME, &ts);
     ms = (unsigned long)ts.tv_sec * 1000UL + (unsigned long)(ts.tv_nsec / 1000000UL);
     fprintf(fp, "[%lu][%s][pid %d] ", ms, prio, (int)getpid());
@@ -394,9 +501,15 @@ static void siglog_fmt1(const char *prio, const char *fmt, const char *a1) {
     FILE *fp;
     struct timespec ts;
     unsigned long ms;
+    /* ⚠️ 2026-11-25：与 siglog() 同款两处修法 ——
+     *   ① 未探测时先试一次（否则 detect 保留的 -1 永远没人推进）；
+     *   ② fopen 失败退回 -1 而非 0（FUSE 短暂不可用时应下次再试）。
+     * 本函数是 LOGI_S / LOGE_S 的实现，签名校验的绝大多数中文文案走这里，
+     * 所以"首次启动没日志"的另一半就出在这个函数上。 */
+    if (siglog_ready < 0) siglog_detect();
     if (siglog_ready != 1) return;
     fp = fopen(siglog_path, "a");
-    if (!fp) { siglog_ready = 0; return; }
+    if (!fp) { siglog_ready = -1; return; }
     clock_gettime(CLOCK_REALTIME, &ts);
     ms = (unsigned long)ts.tv_sec * 1000UL + (unsigned long)(ts.tv_nsec / 1000000UL);
     fprintf(fp, "[%lu][%s][pid %d] ", ms, prio, (int)getpid());

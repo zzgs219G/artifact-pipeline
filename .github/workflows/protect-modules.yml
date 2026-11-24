@@ -196,6 +196,20 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/guard/tests/test-trusted-route.py
 
+      # 首次启动没日志（2026-11-25）：FUSE 未就绪 → 探测失败 → 永久关闭。
+      # 这个 bug 只在真机首次启动那一瞬间可复现，宿主端构造不出来，
+      # 所以钉的是「能让 bug 复现/修复的代码结构」+ 反向验证。
+      - name: 日志开关可重试（9 断言，含"只修一半"的反向验证）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/guard/tests/test-siglog-retry.py
+
+      # 注入类排除（2026-11-25）：加固+去校验组合包里 SigFix 与 sig_verify
+      # 互相卡死（要装 hook 得先解密字符串 → 要解密得先加载 nc → 一加载
+      # 签名校验就跑完了）。本项钉住"从注入器清单动态推导排除集"。
+      - name: 注入类排除出字符串加密（13 断言 + 3 组反向验证）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/string-enc/tests/test-inject-excludes.py
+
       - name: 签名块保留（7 断言，含跨模块对拍）
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/repack/tests/test-keep-sig-block.py
