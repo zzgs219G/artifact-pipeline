@@ -1081,6 +1081,24 @@ static int sig_parse_first_cert(const unsigned char *value, int found,
     return 0;
 }
 
+/* extract_cert_der 的失败原因码（2026-11-25）
+ *
+ * ⚠️ 为什么需要它：清掉本函数内部的 3 条日志后，5 个失败返回点全部静默，
+ *    调用方只能打一条笼统的「证书提取失败」，分不清是"无 EOCD"还是
+ *    "无签名块 magic"还是"v2 块结构异常" —— 那是删日志带来的**信息损失**，
+ *    与"信息量不减"的初衷矛盾。
+ * 解法：函数返回原因码，调用方把它和 route 名一起打（一条日志同时有
+ *    「哪条路」+「什么原因」），既去重又不丢信息。
+ *
+ * 值沿用返回码约定：0 = 成功，负 = 失败（与 sig_collect_fp 的 -1/-2 同域
+ * 但不同变量，调用方只看 != 0）。 */
+#define EXTRACT_OK          0
+#define EXTRACT_E_TOO_SMALL  (-1)   /* 文件小于 22 字节（连 EOCD 都放不下） */
+#define EXTRACT_E_NO_EOCD    (-2)   /* 尾部找不到 PK\x05\x06 */
+#define EXTRACT_E_BAD_CDOFF  (-3)   /* EOCD 里的 CD offset 非法（0 或 zip64） */
+#define EXTRACT_E_NO_BLOCK   (-4)   /* 找不到 v2/v3 签名块（无 magic / 无 pair） */
+#define EXTRACT_E_BAD_CERT   (-5)   /* 签名块结构异常，取不出第一张证书 DER */
+
 SIG_SEC_MARKED_NOVMP
 static int extract_cert_der(int fd, unsigned char **out_der, size_t *out_len) {
     off_t fsize;
@@ -1090,7 +1108,7 @@ static int extract_cert_der(int fd, unsigned char **out_der, size_t *out_len) {
     int found;
 
     fsize = lseek(fd, 0, SEEK_END);
-    if (fsize < 22) return -1;
+    if (fsize < 22) return EXTRACT_E_TOO_SMALL;
 
     /* ⚠️ 2026-11-25 去重（用户反馈"日志一直在重复文本"）：
      *    本函数被 6 条路线各调用一次，原先内部打 3 条日志
@@ -1106,25 +1124,25 @@ static int extract_cert_der(int fd, unsigned char **out_der, size_t *out_len) {
      *
      *    BLK_START / CERT_OK 两个标记已随之删除（无代码引用）。
      *    LSGS_BLK_MAGIC2 必须保留 —— 见下方标记区的说明，它是数据不是文案。 */
-    (void)0;
 
-    if (sig_find_eocd(fd, fsize, eocd) != 0) return -1;
+    if (sig_find_eocd(fd, fsize, eocd) != 0) return EXTRACT_E_NO_EOCD;
 
     {
         unsigned long long cd_off = rd32le(eocd + 16);
-        if (cd_off == 0 || cd_off == 0xffffffffULL) return -1; /* 空/zip64 不支持 */
+        if (cd_off == 0 || cd_off == 0xffffffffULL)
+            return EXTRACT_E_BAD_CDOFF; /* 空/zip64 不支持 */
         found = sig_read_v2block(fd, (off_t)cd_off, magic, &value);
     }
-    if (found < 0) return -1;
+    if (found < 0) return EXTRACT_E_NO_BLOCK;
 
     if (sig_parse_first_cert(value, found, out_der, out_len) != 0) {
         free(value);
-        return -1;
+        return EXTRACT_E_BAD_CERT;
     }
 
     free(value);
     /* 证书 DER 长度改由调用方（sig_collect_fp_route）随 route 一起打 —— 见本函数头的去重说明 */
-    return 0;
+    return EXTRACT_OK;
 }
 
 /* ─────────────────────────── 校验主逻辑 ─────────────────────────── */
@@ -1747,11 +1765,20 @@ static int sig_collect_fp_route(int route, const char *apk_path,
          sig_route_name(route), fd, (long)fsize);
     if (out_size) *out_size = (long)fsize;
 
-    if (extract_cert_der(fd, &der, &der_len) != 0) {
-        if (fd_from_sys) close(fd); else nc_close_fd(fd);
-        /*LSG:ROUTE_NO_CERT|【流程】该路证书提取失败(记日志后跳过)*/
-        LSGE(LSG_ROUTE_NO_CERT, "route=%s", sig_route_name(route));
-        return -1;
+    {
+        int ex = extract_cert_der(fd, &der, &der_len);
+        if (ex != EXTRACT_OK) {
+            if (fd_from_sys) close(fd); else nc_close_fd(fd);
+            /*LSG:ROUTE_NO_CERT|【流程】该路证书提取失败(记日志后跳过)*/
+            /* ⚠️ 2026-11-25：带上失败原因码。上一版删掉 extract_cert_der 内部
+             *    的 3 条日志后，6 条路失败时都只打这一句笼统的话，分不清是
+             *    "无 EOCD"还是"无签名块 magic"还是"结构异常" —— 那是删日志
+             *    带来的信息损失。现在一条日志同时给出「哪条路」+「什么原因」。
+             *    码值见 EXTRACT_E_* 定义（负数，语义稳定）。 */
+            LSGE(LSG_ROUTE_NO_CERT, "route=%s reason=%d",
+                 sig_route_name(route), ex);
+            return -1;
+        }
     }
     sha256(der, der_len, out_fp);
     nc_free_ptr(der);
@@ -1816,18 +1843,21 @@ static int sig_collect_fp(unsigned char actual[32]) {
          * 先记下文件大小 —— 这是识别诱饵的最快判据（诱饵包体积必然不同）。 */
         size_a = (long)lseek(fd, 0, SEEK_END);
         lseek(fd, 0, SEEK_SET);
-        if (extract_cert_der(fd, &der, &der_len) != 0) {
-            nc_close_fd(fd);
-            /* LSGS 密文化(2026-10-16):原文案暴露"这是签名校验"+教会攻击者怎么重签。 */
-            {
-                char m[128];
-                const char *mm = lsg_s(LSGS_ERR_NO_SIGN_BLOCK, m, sizeof(m));
-                /* 两参数 → 同上 */
-                { char _b[256]; snprintf(_b, sizeof(_b), "%s: %s", mm, apk_path); LOGE_S(_b); }
+        {
+            int ex = extract_cert_der(fd, &der, &der_len);
+            if (ex != EXTRACT_OK) {
+                nc_close_fd(fd);
+                /* LSGS 密文化(2026-10-16):原文案暴露"这是签名校验"+教会攻击者怎么重签。 */
+                {
+                    char m[128];
+                    const char *mm = lsg_s(LSGS_ERR_NO_SIGN_BLOCK, m, sizeof(m));
+                    /* 两参数 → 同上 */
+                    { char _b[256]; snprintf(_b, sizeof(_b), "%s: %s reason=%d", mm, apk_path, ex); LOGE_S(_b); }
+                }
+                /*LSG:BLK_FAIL|【失败】签名块解析失败(无 v2/v3 或结构异常)*/
+                LSGE(LSG_BLK_FAIL, "%s reason=%d", apk_path, ex);
+                return -1;
             }
-            /*LSG:BLK_FAIL|【失败】签名块解析失败(无 v2/v3 或结构异常)*/
-            LSGE(LSG_BLK_FAIL, "%s", apk_path);
-            return -1;
         }
         sha256(der, der_len, route_fp[SIG_ROUTE_OPEN]);
         nc_free_ptr(der);

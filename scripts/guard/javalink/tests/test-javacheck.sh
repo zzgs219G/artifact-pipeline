@@ -98,6 +98,7 @@ public class Log {
     public static int w(String tag, String msg) { return 0; }
     public static int d(String tag, String msg) { return 0; }
     public static int e(String tag, String msg) { return 0; }
+    public static int i(String tag, String msg) { return 0; }
 }
 EOF
 javac -nowarn -d "$T/classes" \

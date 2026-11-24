@@ -102,6 +102,9 @@
     if-nez p0, :cond_1
 
     invoke-static {}, Lcom/test/placeholder/Guard;->kill()V
+
+    :cond_1
+    invoke-static {}, Lcom/test/placeholder/Guard;->reportJudge()V
     :try_end_0
     .catch Ljava/lang/UnsatisfiedLinkError; {:try_start_0 .. :try_end_0} :catch_0
     .catchall {:try_start_0 .. :try_end_0} :catchall_0
@@ -112,7 +115,6 @@
     invoke-static {}, Lcom/test/placeholder/Guard;->kill()V
 
     :catchall_0
-    :cond_1
     return-void
 .end method
 
@@ -150,9 +152,7 @@
 
     invoke-virtual {v3, v1}, Ljava/lang/StringBuilder;->append(I)Ljava/lang/StringBuilder;
 
-    move-result-object v0
-
-    invoke-virtual {v0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+    invoke-virtual {v3}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
 
     move-result-object v0
 
@@ -162,6 +162,65 @@
 
     :catchall_0
     :cond_0
+    return-void
+.end method
+
+.method private static reportJudge()V
+    .locals 3
+
+    :try_start_0
+    invoke-static {}, Lcom/nc/link/NcLink;->lastJudge()I
+
+    move-result v0
+    :try_end_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_0
+
+    const/4 v1, 0x2
+
+    const-string v2, "nc"
+
+    if-ne v0, v1, :cond_0
+
+    :try_start_1
+    const-string v0, "\u98ce\u63a7: PackageManager \u4e0e\u5b9e\u6d4b\u8bc1\u4e66\u4e0d\u4e00\u81f4\uff08\u53bb\u6821\u9a8c\u73af\u5883\uff09\uff0c\u5b9e\u9645\u4ee5 APK \u5b9e\u6d4b\u4e3a\u51c6\uff0c\u5df2\u653e\u884c"
+
+    invoke-static {v2, v0}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+
+    :cond_0
+    const/4 v1, 0x3
+
+    if-ne v0, v1, :cond_1
+
+    const-string v0, "\u98ce\u63a7: \u53ef\u4fe1\u8def\u7ebf\u4e0d\u53ef\u7528\uff0c\u672c\u6b21\u6309 PackageManager \u503c\u88c1\u51b3"
+
+    invoke-static {v2, v0}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+
+    :cond_1
+    const/4 v1, 0x1
+
+    if-ne v0, v1, :cond_2
+
+    const-string v0, "\u98ce\u63a7: PackageManager \u4e0e\u5b9e\u6d4b\u4e00\u81f4\uff08\u6b63\u5e38\u73af\u5883\uff09"
+
+    invoke-static {v2, v0}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+
+    :cond_2
+    if-nez v0, :cond_3
+
+    const-string v0, "\u98ce\u63a7: \u88c1\u51b3\u4e3a\u62d2\u7edd"
+
+    invoke-static {v2, v0}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;)I
+    :try_end_1
+    .catchall {:try_start_1 .. :try_end_1} :catchall_0
+
+    :catchall_0
+    :cond_3
     return-void
 .end method
 

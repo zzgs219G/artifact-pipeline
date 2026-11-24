@@ -84,10 +84,36 @@ public final class Guard {
             if (!ok) {
                 kill();
             }
+            /* 风控上报（2026-11-25）：把 native 侧的裁决结果码打出来。
+             * 2 = PackageManager 报的证书与 APK 实测不一致，但实测值等于
+             * 基准（去校验环境下的正常包）。以前这个区分在 boolean 边界被
+             * 丢弃，排障只能靠翻 C 层六路表反推。纯观测，失败不影响流程。 */
+            reportJudge();
         } catch (UnsatisfiedLinkError e) {
             kill();
         } catch (Throwable e) {
             /* 静默跳过(仅损失 Java 判决;so 已加载,constructor 校验照跑) */
+        }
+    }
+
+    /* 读最近一次裁决结果并打日志。全吞 Throwable —— 上报绝不成为新崩溃源。
+     * 文案在这里而不是 native：nc_link.c 有"零字符串常量"纪律（strings 扫
+     * so 零语义泄露），要打日志就得写文案，写文案就破纪律。 */
+    private static void reportJudge() {
+        try {
+            int r = NcLink.lastJudge();
+            if (r == 2) {
+                android.util.Log.w("nc", "风控: PackageManager 与实测证书不一致"
+                        + "（去校验环境），实际以 APK 实测为准，已放行");
+            } else if (r == 3) {
+                android.util.Log.w("nc", "风控: 可信路线不可用，本次按 PackageManager 值裁决");
+            } else if (r == 1) {
+                android.util.Log.i("nc", "风控: PackageManager 与实测一致（正常环境）");
+            } else if (r == 0) {
+                android.util.Log.e("nc", "风控: 裁决为拒绝");
+            }
+        } catch (Throwable ignored) {
+            /* so 未注册 lastJudge 或上报异常 → 不影响任何判定 */
         }
     }
 

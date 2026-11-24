@@ -24,6 +24,9 @@
 .method public static native heartbeat()V
 .end method
 
+.method public static native lastJudge()I
+.end method
+
 .method public static native ncVerify([B)Z
 .end method
 

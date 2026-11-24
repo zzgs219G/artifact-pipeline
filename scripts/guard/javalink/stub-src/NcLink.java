@@ -44,6 +44,21 @@ public final class NcLink {
     public static native void heartbeat();
 
     /**
+     * 风控上报入口（2026-11-25）：返回最近一次 ncVerify 裁决的结果码。
+     *
+     *   -1 尚未裁决      0 否决        1 正常包（PM 与实测一致）
+     *    2 PM 被污染但主人在场（去校验环境）  3 旧语义通过（可信路线不可用）
+     *
+     * 为什么需要它：ncVerify 返回 boolean，C 层算出的"PackageManager 被污染"
+     * 这个区分在 JNI 边界被折成 true 丢掉，排障时看不到。本方法只读、不裁决、
+     * 不影响任何判定，纯观测探针。
+     *
+     * ⚠️ 与 selftest 一样可选：so 里没注册它时调用会抛 UnsatisfiedLinkError，
+     *    调用方必须自己 catch（Guard 里已有同款处理）。
+     */
+    public static native int lastJudge();
+
+    /**
      * .ncguard 段自解密自检(2026-12)。
      * 返回 59 = 完整链路通过(解锁→解密→执行 .ncguard 里的密文代码)；
      * -100 = 已自检过(原子守门挡重入)；负数 = 解锁失败，见 nc_guard_unlock.c。

@@ -85,8 +85,6 @@ def main():
 
     print("[1/6] XOR 表还原后与 NcLink.java 逐字一致")
     tabs = parse_xor_tables(src)
-    check(f"解析出 6 张表（实得 {len(tabs)}）", len(tabs) == 6,
-          str(sorted(tabs)))
 
     # Java 侧声明的 (方法名, 签名) 对
     # 注意参数形态是 "byte[] t1"（类型 + 变量名），要先剥变量名再映射。
@@ -103,8 +101,31 @@ def main():
             typ = a.rsplit(None, 1)[0] if ' ' in a else a   # "byte[] t1" → "byte[]"
             parts.append(jt.get(typ, ''))
         java_decl[name] = '(' + ''.join(parts) + ')' + jt.get(ret, '?')
-    check(f"NcLink.java 声明了 3 个 native 方法（实得 {len(java_decl)}）",
-          len(java_decl) == 3, str(java_decl))
+
+    # ⚠️ 表数量与 native 方法数【不写死】（2026-11-25 改）：
+    #    原来断言 len(tabs)==6 / len(java_decl)==3，加第 4 个方法
+    #    （lastJudge）时这两条立刻变红，而它们想表达的其实是"两侧数量一致"
+    #    —— 写死具体数字就把"一致性检查"降级成了"记忆检查"。
+    #
+    #    ⚠️⚠️ 第一版改法犯过一次错（已修）：只断言"每个 Java 方法有对应
+    #    kName_ 密文表"，但密文表【定义了却没进 kBinds】照样能通过 ——
+    #    反向验证（把 lastJudge 的注册行删掉）竟然全绿，说明那条断言是假的。
+    #    真正要钉的是「注册行存在」，密文表只是前置条件。
+    check(f"XOR 表数({len(tabs)}) ≥ native 方法数({len(java_decl)})",
+          len(tabs) >= len(java_decl), f"tabs={sorted(tabs)}")
+
+    # 每条 kName_ 密文表都必须出现在 kBinds 的注册行里，且每个 Java 方法
+    # 都必须有对应的注册行 —— "定义了但没注册" 与 "注册了但名字表缺失"
+    # 都是 2026-11-22 那类静默失败的形态，两侧都要查。
+    registered = set(re.findall(r'\{\s*(kName_\w+)\s*,', src))
+    unregistered = [n for n in tabs if n.startswith('kName_')
+                    and n not in registered]
+    check("每个 kName_ 密文表都在 kBinds 里注册了", not unregistered,
+          f"定义了但没注册: {unregistered}")
+
+    missing = [n for n in java_decl if f'kName_{n}' not in registered]
+    check("每个 native 方法都有对应的注册行", not missing,
+          f"缺注册: {missing}")
 
     expect_names = {
         'ncVerify': tabs.get('kName_ncVerify'),

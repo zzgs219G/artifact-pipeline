@@ -245,6 +245,11 @@ extern int nc_trusted_t1_get(unsigned char out[SIG_HASH_LEN])
 #define NC_JUDGE_OK_PM_TAINTED 2   /* 通过，但 PM 与可信实测不一致（去校验环境） */
 #define NC_JUDGE_OK_NO_TRUSTED 3   /* 通过，走旧语义（可信路线不可用） */
 
+/* 最近一次裁决结果（供 lastJudge() 上报）。
+ * ⚠️ 初值 -1 = 尚未裁决过，与四个合法码都不冲突 —— Java 侧据此区分
+ *    "还没跑"和"跑了被拒"。 */
+volatile int nc_last_judge = -1;
+
 /* 三角比对裁决。纯逻辑，宿主可测（test-nclink-judge.c 链接本文件直接调）。
  *
  * 返回值见上方 NC_JUDGE_* 常量。
@@ -256,6 +261,7 @@ int nc_link_judge(const unsigned char *java_t1, int java_len)
 {
     unsigned char trusted[SIG_HASH_LEN];
     int have_trusted = 0;
+    int verdict;
 
     /* 弱符号：sig_check.c 未编入本 so 时该指针为 NULL → 走下面的回退分支。 */
     if (nc_trusted_t1_get != NULL)
@@ -269,24 +275,30 @@ int nc_link_judge(const unsigned char *java_t1, int java_len)
          *    攻击者只需让 PackageManager 报基准值就能通关 —— 那正是本次
          *    要修的洞（去校验模块就在那层撒谎）。 */
         if (!nc_verify_t1(trusted, SIG_HASH_LEN))
-            return NC_JUDGE_DENY;
-
-        /* 裁决已定（放行）。下面这一段【只用于区分上报码】，不参与判定：
-         *   java_ok=1 → PM 与实测一致（正常包）
-         *   java_ok=0 → PM 与实测不一致 或 Java 没传（去校验环境 / 测量失败）
-         * 这个区分是纯观测：无论哪个分支都返回"放行"。 */
-        if (java_t1 != NULL && java_len == SIG_HASH_LEN)
-            java_ok = nc_verify_t1(java_t1, SIG_HASH_LEN);
-
-        return java_ok ? NC_JUDGE_OK : NC_JUDGE_OK_PM_TAINTED;
+            verdict = NC_JUDGE_DENY;
+        else {
+            /* 裁决已定（放行）。下面这一段【只用于区分上报码】，不参与判定：
+             *   java_ok=1 → PM 与实测一致（正常包）
+             *   java_ok=0 → PM 与实测不一致，或 Java 没传（去校验 / 测量失败）
+             * 这个区分是纯观测：无论哪个分支都返回"放行"。 */
+            if (java_t1 != NULL && java_len == SIG_HASH_LEN)
+                java_ok = nc_verify_t1(java_t1, SIG_HASH_LEN);
+            verdict = java_ok ? NC_JUDGE_OK : NC_JUDGE_OK_PM_TAINTED;
+        }
+    } else {
+        /* 可信路线不可用（seccomp 拦掉 openat 系 / 平台不支持 /proc/self/fd）
+         * → 保持改动前的语义：Java 传什么就按什么判（fail-closed）。 */
+        if (java_t1 == NULL || java_len != SIG_HASH_LEN)
+            verdict = NC_JUDGE_DENY;
+        else
+            verdict = nc_verify_t1(java_t1, java_len) ? NC_JUDGE_OK_NO_TRUSTED
+                                                      : NC_JUDGE_DENY;
     }
 
-    /* 可信路线不可用（seccomp 拦掉 openat 系 / 平台不支持 /proc/self/fd）
-     * → 保持改动前的语义：Java 传什么就按什么判（fail-closed）。 */
-    if (java_t1 == NULL || java_len != SIG_HASH_LEN)
-        return NC_JUDGE_DENY;
-    return nc_verify_t1(java_t1, java_len) ? NC_JUDGE_OK_NO_TRUSTED
-                                           : NC_JUDGE_DENY;
+    /* 记下最近一次结果，供 lastJudge() 上报。
+     * ⚠️ 纯记录，不参与本次判定 —— 写在最后一行，无论走哪个分支都覆盖。 */
+    __atomic_store_n(&nc_last_judge, verdict, __ATOMIC_RELEASE);
+    return verdict;
 }
 
 #ifndef NCLINK_HOST_TEST
@@ -328,6 +340,20 @@ jboolean nc_link_jni_ncVerify(JNIEnv *env, jclass clazz, jbyteArray measured)
          ? JNI_TRUE : JNI_FALSE;
     (*env)->ReleaseByteArrayElements(env, measured, buf, JNI_ABORT);
     return ok;
+}
+
+/* lastJudge()I 的实现体 —— 风控上报（2026-11-25）
+ *
+ * 返回最近一次 nc_link_judge 的结果码，纯只读：
+ *   -1 尚未裁决  0 否决  1 正常包  2 PM 被污染但主人在场  3 旧语义通过
+ *
+ * ⚠️ 不重新裁决、不影响任何判定、不碰心跳 —— Java 侧随时可调多次。
+ * ⚠️ 不影响 ncVerify：即使本方法注册失败，判定链照原样工作。 */
+jint nc_link_jni_lastJudge(JNIEnv *env, jclass clazz)
+{
+    (void)env;
+    (void)clazz;
+    return (jint)__atomic_load_n(&nc_last_judge, __ATOMIC_ACQUIRE);
 }
 
 /* Java→Native 心跳(2026-10 借鉴 XopProtector 双向绑定设计):

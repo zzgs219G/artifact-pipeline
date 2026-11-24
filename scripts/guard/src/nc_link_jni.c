@@ -82,6 +82,19 @@ static const unsigned char kName_selftest[] = {
 static const unsigned char kSig_int[] = {
     0x72, 0x73, 0x13, 0x5A                                 /* "()I" */
 };
+/* lastJudge() —— 风控上报（2026-11-25）
+ *
+ * 为什么要它：ncVerify 返回 jboolean，只有过/不过两态。C 层算出的
+ * 「PackageManager 被污染但主人在场」这个区分在 JNI 边界被折成 true 丢掉，
+ * 排障时看不到。本方法把最近一次裁决的结果码原样交给 Java 侧打日志。
+ *
+ * ⚠️ 只读最近一次结果，不重新裁决、不影响任何判定 —— 纯观测探针。
+ * ⚠️ 与 selftest 一样可选：Java 侧没声明它就不会被调到；
+ *    这里注册失败也不影响 ncVerify / heartbeat（表驱动，槽位 = i）。 */
+static const unsigned char kName_lastJudge[] = {
+    0x36, 0x3B, 0x29, 0x2E, 0x10, 0x2F, 0x3E, 0x3D, 0x3F,
+    0x5A                                                   /* "lastJudge" */
+};
 
 #define NC_STR_MAX 16           /* 最长 "heartbeat"=9+1，留足 */
 
@@ -100,6 +113,7 @@ static int nc_restore(char *out, size_t cap,
  * 这三个 wrapper 保留 JNI 短名的【函数体】，只是不再由符号表暴露。 */
 extern jboolean nc_link_jni_ncVerify(JNIEnv *, jclass, jbyteArray);
 extern void nc_link_jni_heartbeat(JNIEnv *, jclass);
+extern jint nc_link_jni_lastJudge(JNIEnv *, jclass);
 /* selftest 在 nc_guard_jni.c；该文件不参与编译时用弱符号兜底 */
 extern jint nc_link_jni_selftest(JNIEnv *, jobject) __attribute__((weak));
 
@@ -141,6 +155,10 @@ static const nc_bind_t kBinds[] = {
       (void *)nc_link_jni_heartbeat },
     { kName_selftest,  sizeof kName_selftest,  kSig_int,      sizeof kSig_int,
       (void *)nc_link_jni_selftest  },          /* weak：未编入时为 NULL */
+    /* 风控上报（2026-11-25）：只读最近一次裁决结果。
+     * 加这一行即可 —— 表驱动保证槽位 = i，不存在 2026-11-22 那种错位。 */
+    { kName_lastJudge, sizeof kName_lastJudge, kSig_int,      sizeof kSig_int,
+      (void *)nc_link_jni_lastJudge },
 };
 
 #define NC_BIND_MAX ((int)(sizeof kBinds / sizeof kBinds[0]))
