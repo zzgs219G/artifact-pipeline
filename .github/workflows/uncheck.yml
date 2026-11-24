@@ -208,10 +208,20 @@ jobs:
           echo "SRC=$SRC" >> "$GITHUB_ENV"
 
           if [ -n "${R2_ACCESS_KEY:-}" ] && command -v aws >/dev/null 2>&1; then
+            # ⚠️ AWS_DEFAULT_REGION=auto 必需（2026-11-24 修）：
+            #    缺它时 aws cli 默认 us-west-2，R2 直接拒：
+            #      InvalidRegionName: The region name 'us-west-2' is not valid.
+            #      Must be one of: wnam, enam, weur, eeur, apac, oc, auto
+            #    而当时失败被 `|| echo ⚠️` 吞掉 → 构建显示 success、产物只在
+            #    Artifact 里、R2 上什么都没有。protect-modules.yml 一直有这行，
+            #    本文件漏了 —— 两条流水线的手抄差异。
             AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY" \
             AWS_SECRET_ACCESS_KEY="$R2_SECRET_KEY" \
+            AWS_DEFAULT_REGION="auto" \
             aws s3 cp "$SRC" "s3://$R2_BUCKET/apks/$FN" \
-              --endpoint-url "$R2_ENDPOINT" || echo "⚠️ R2 上传失败，走 Artifact 兜底"
+              --endpoint-url "$R2_ENDPOINT" --no-progress \
+              || { echo "❌ R2 上传失败（产物仅在 Artifact 里，用户拿不到）"; exit 1; }
+            echo "✅ 已上传 R2"
             echo "::notice title=产物::${R2_PUBLIC_DOMAIN}/apks/$FN"
           else
             echo "⚠️ 未配置 R2，仅上传 Artifact"
