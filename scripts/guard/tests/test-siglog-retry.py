@@ -113,11 +113,21 @@ def main():
     (ok if re.search(r'\bLOGI\(', body)
      else bad)("T6 失败原因进 logcat（用户能看到「为什么没日志」）")
 
-    # ── T7 区分「哨兵是目录」这一独立成因 ───────────────────────────
+    # ── T7 单独识别「哨兵被建成目录」这一独立成因 ───────────────────
     (ok if "S_ISDIR" in body
      else bad)("T7 单独识别「哨兵被建成目录」（与「不存在」区分开）")
 
-    print(f"\n=== 结果: {9 - len(fails)} 通过, {len(fails)} 失败 ===")
+    # ── T8 日志目录不存在时自己建（首次启动的第二个坑）──────────────
+    # 实测（2026-11-25 真机）：干净安装后第一次启动，
+    # /storage/emulated/0/Android/data/<pkg>/files 【目录还不存在】
+    # （系统在 App 首次运行时才建）→ access(W_OK) 得 ENOENT →
+    # 判"不可写" → 日志关闭。nox 的报告模块能写出 ncguard_log.md，
+    # 正是因为它自己 mkdir 了。
+    (ok if "ENOENT" in body and "mkdir(" in body
+     else bad)("T8 目录不存在时自己 mkdir（首启 files/ 尚未创建）")
+    # 反向：删掉 ENOENT 分支 → 这行红。
+
+    print(f"\n=== 结果: {10 - len(fails)} 通过, {len(fails)} 失败 ===")
     return 1 if fails else 0
 
 

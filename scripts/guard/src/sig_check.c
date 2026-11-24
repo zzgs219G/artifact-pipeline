@@ -191,21 +191,55 @@ static void siglog_detect(void) {
     }
     {
         /* 目标目录可写性：原来靠 fopen 失败再静默置 0，用户只看到
-         * "文件没出现"。这里提前探一次，失败就说明原因。 */
+         * "文件没出现"。这里提前探一次，失败就说明原因。
+         *
+         * ⚠️⚠️ 2026-11-25 实测补漏：首次启动时
+         * /storage/emulated/0/Android/data/<pkg>/files 【目录还不存在】
+         * （系统在 App 首次运行时才建），access(W_OK) 得 ENOENT →
+         * 判"不可写" → 日志关闭。而 nox 的报告模块能写出 ncguard_log.md，
+         * 是因为它自己 mkdir 了。这里同样补上逐级 mkdir。
+         *
+         * 三种情形分开处置：
+         *   目录不存在     → 逐级 mkdir 后复查（成功即继续）
+         *   目录在但不可写 → 真问题，报 errno 并留给下次重试
+         *   mkdir 也失败   → 不致命（可能别的进程刚建好），继续试 fopen
+         */
         char dir[512];
         const char *slash = strrchr(siglog_path, '/');
+        int dir_bad = 0;
         if (slash != NULL) {
             snprintf(dir, sizeof(dir), "%.*s",
                      (int)(slash - siglog_path), siglog_path);
             if (access(dir, W_OK) != 0) {
                 int e = errno;
-                if (first_try) {
+                if (e == ENOENT) {
+                    /* 逐级建：/storage/emulated/0/Android/data/<pkg> 也可能缺 */
+                    char tmp[512];
+                    size_t k;
+                    snprintf(tmp, sizeof(tmp), "%s", dir);
+                    for (k = 1; tmp[k] != '\0'; k++) {
+                        if (tmp[k] != '/') continue;
+                        tmp[k] = '\0';
+                        (void)mkdir(tmp, 0770);
+                        tmp[k] = '/';
+                    }
+                    (void)mkdir(tmp, 0770);
+                    if (access(dir, W_OK) == 0) {
+                        if (first_try)
+                            LOGI("siglog: created log dir %s", dir);
+                    } else {
+                        dir_bad = 1;
+                    }
+                } else {
+                    dir_bad = 1;
+                }
+                if (dir_bad && first_try) {
                     LOGI("siglog: log dir not writable: %s errno=%d(%s) "
                          "(retrying)", dir, e, strerror(e));
                 }
-                return;
             }
         }
+        if (dir_bad) return;      /* 保持 -1，下次再试 */
     }
 #undef SIGLOG_FAIL
     siglog_ready = 1;
