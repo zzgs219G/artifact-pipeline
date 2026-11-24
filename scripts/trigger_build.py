@@ -964,7 +964,17 @@ def _print_guard_sheet(args) -> None:
     确自带），但消费方层 VMP 需要 --vmp 且当时没开，两层全缺只靠锁箱，
     so 仅 88.66K 无人体感异常。这份清单把两层防护的存在性变成构建输出的
     固定内容，"以为有实际没有"从人记变成机器报。
+
+    ⚠️ 去校验流水线（uncheck.yml）没有锁箱/VMP/签名校验，显示它们会
+    误导（2026-11-24 实测：跑 uncheck 时清单照样打"锁箱✅ 一直在"）。
     """
+    wf = getattr(args, "workflow", "") or ""
+    if "uncheck" in wf:
+        print("── 防护清单（去校验流水线，不适用加固项）──")
+        print("  ✅ 签名伪造载荷（Java 三层 hook + native IO 重定向）")
+        print("  ✅ 数据复用打包（origin.apk 与整包共享字节）")
+        print("  ⚠️ 产物未签名——需自行用 keystore 签（数据复用包必须用 MT 管理器）")
+        return
     nox_vmp = "✅" if _nox_vmp_present() else "❌（nox.zip 无 .ncq —— T34 会拦）"
     rows = [
         ("锁箱（.ncx 六段加密）", "✅ 一直在", "--no-lock 可跳过"),
