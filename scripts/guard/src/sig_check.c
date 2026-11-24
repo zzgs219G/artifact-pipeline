@@ -1004,8 +1004,10 @@ static int sig_scan_pairs(int fd, off_t cd_off, off_t block_start,
             if (!value) return -1;
             if (read_at(fd, value, vlen, pair_pos + 12) != 0) { free(value); return -1; }
             found = (int)vlen;
-            /*LSG:BLK_ID_OK|【成功】命中 v2/v3 签名块,读取 signer 数据*/
-            LSGI(LSG_BLK_ID_OK, "id=0x%llx len=%d", (unsigned long long)block_id, found);
+            /* ⚠️ 2026-11-25 去重：原先此处打 LSG_BLK_ID_OK，本函数被 6 条路线
+             *    各调用一次 → 6 行「命中 v2/v3 签名块」（且因诱饵包字节数不同
+             *    还会分成 len=2602 / len=1312 两组，看起来更像"重复但又不完全
+             *    一样"的噪声）。现静默 —— route= 日志与汇总表已足够定位。 */
             *out_value = value;
             return found;
         }
