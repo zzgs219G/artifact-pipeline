@@ -213,22 +213,40 @@ static void siglog_detect(void) {
             if (access(dir, W_OK) != 0) {
                 int e = errno;
                 if (e == ENOENT) {
-                    /* 逐级建：/storage/emulated/0/Android/data/<pkg> 也可能缺 */
-                    char tmp[512];
-                    size_t k;
-                    snprintf(tmp, sizeof(tmp), "%s", dir);
-                    for (k = 1; tmp[k] != '\0'; k++) {
-                        if (tmp[k] != '/') continue;
-                        tmp[k] = '\0';
-                        (void)mkdir(tmp, 0770);
-                        tmp[k] = '/';
+                    /* ⚠️ 2026-11-25 实测：与 nox 报告模块对齐 —— 它只 mkdir
+                     * 最后一层 files/，因为 /…/<pkg>/ 由系统在 App 启动早期
+                     * 就建好了（cache/ files/ 是它的子目录）。
+                     *
+                     * 第一版这里做了「逐级 mkdir」，但循环里没判 EEXIST，
+                     * 且路径中间层（/storage、/storage/emulated …）本来就
+                     * 存在或不可写 —— 逐级建会撞 EACCES 而干扰判断。
+                     * 现在只建 <pkg>/ 与 <pkg>/files 两层，并记录真实 errno
+                     * 到诊断日志（不再用 (void) 把错误吞掉）。 */
+                    char base[512];
+                    int rc1 = 0, rc2 = 0;
+                    size_t dl;
+                    snprintf(base, sizeof(base), "%s", dir);
+                    dl = strlen(base);
+                    /* 去掉末尾的 "/files" 得到 <pkg>/ */
+                    if (dl > 6 && strcmp(base + dl - 6, "/files") == 0) {
+                        base[dl - 6] = '\0';
+                        rc1 = mkdir(base, 0770);
+                        if (rc1 != 0 && errno != EEXIST) rc1 = errno; else rc1 = 0;
                     }
-                    (void)mkdir(tmp, 0770);
+                    rc2 = mkdir(dir, 0770);
+                    if (rc2 != 0 && errno != EEXIST) rc2 = errno; else rc2 = 0;
                     if (access(dir, W_OK) == 0) {
                         if (first_try)
                             LOGI("siglog: created log dir %s", dir);
+                        dir_bad = 0;
                     } else {
                         dir_bad = 1;
+                        if (first_try) {
+                            LOGI("siglog: mkdir %s failed (pkg_rc=%d files_rc=%d) "
+                                 "— parent is system-managed (drwxrws--x), "
+                                 "only the system can create it; will retry",
+                                 dir, rc1, rc2);
+                        }
                     }
                 } else {
                     dir_bad = 1;
