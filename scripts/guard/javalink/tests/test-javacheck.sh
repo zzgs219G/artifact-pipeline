@@ -4,7 +4,8 @@
 # 覆盖:py_compile / javac 语义真相源(对 android API 桩)/ AXML 夹具生成 /
 #       注入 + SmaliBuilder 真汇编 + androguard 读回 / 调用点寄存器安全 /
 #       幂等 / clean / 自适应命名(普通包+R8 短名包)/ nc_link.c 判决对拍 /
-#       nc_jni_selfcheck.c 表项自检(重名/空表/NULL)
+#       nc_jni_selfcheck.c 表项自检(重名/空表/NULL)/
+#       nc_link_judge 三角裁决(可信实测优先 / 反作弊 PM 申辩无效)
 # 完整链路(dex2c 转译、ndk-build、apktool 回编、真机)由 CI workflow 闭环。
 set -euo pipefail
 
@@ -22,7 +23,7 @@ ok() { echo "  ✅ $1"; PASS=$((PASS + 1)); }
 
 [[ -f "$APKTOOL" ]] || { echo "❌ apktool 不在位(应在 tools/apktool.jar，git 跟踪)"; exit 1; }
 
-echo "[1/10] py_compile + javac 语义真相源(对 android API 桩编译,校验 API 形态)"
+echo "[1/11] py_compile + javac 语义真相源(对 android API 桩编译,校验 API 形态)"
 python3 -m py_compile "$JL/inject-javacheck.py"
 python3 -m py_compile "$JL/tests/mk_manifest.py"
 mkdir -p "$T/stubs/android/content/pm" "$T/stubs/android/os" "$T/stubs/android/util" \
@@ -109,7 +110,7 @@ javac -nowarn -d "$T/classes" \
   "$JL/stub-src/Guard.java"
 ok "javac 语义真相源编译通过(Guard/NcLink 与桩 API 形态一致)"
 
-echo "[2/10] 合成解包目录 + AXML 夹具"
+echo "[2/11] 合成解包目录 + AXML 夹具"
 mkdir -p "$T/app/smali/com/test/jc"
 python3 "$JL/tests/mk_manifest.py" "$T/app/AndroidManifest.xml" >/dev/null
 cat > "$T/app/smali/com/test/jc/App.smali" <<'EOF'
@@ -155,7 +156,7 @@ cat > "$T/app/smali/com/test/jc/Big.smali" <<'EOF'
 EOF
 ok "合成目录就绪(App/MainActivity/Secondary/Big + 二进制 manifest)"
 
-echo "[3/10] 注入(确定性 --wrapper-name)"
+echo "[3/11] 注入(确定性 --wrapper-name)"
 python3 "$JL/inject-javacheck.py" "$T/app" --wrapper-name 'Lcom/test/jc/NativeGuard;'
 ok "注入器退出 0"
 
@@ -179,7 +180,7 @@ done
 [ -z "$_missing" ] || { echo "❌ 这些 smali 没被注入:$ _missing" >&2; exit 1; }
 ok "stub-src 全部 smali 都已注入($(ls "$JL"/stub-src/*.smali | wc -l) 个)"
 
-echo "[4/10] SmaliBuilder 真汇编(语法+寄存器合法性裁决)"
+echo "[4/11] SmaliBuilder 真汇编(语法+寄存器合法性裁决)"
 javac -nowarn -cp "$APKTOOL" -d "$T/probe" "$JL/tests/AsmProbe.java"
 java -cp "$T/probe:$APKTOOL" AsmProbe "$T/out.dex" \
   "$T/app/smali/com/test/jc/App.smali" \
@@ -250,7 +251,7 @@ print('__OK__')
 PYCHECK
 ok "invoke 实参寄存器数与签名一致(防 dalvik VerifyError)"
 
-echo "[5/10] androguard 读回(dex 层结构断言)"
+echo "[5/11] androguard 读回(dex 层结构断言)"
 python3 - "$T/out.dex" <<'PY'
 import sys
 sys.path.insert(0, 'tools/Dex2C')
@@ -320,7 +321,7 @@ print('  ✅ 读回断言全部通过')
 PY
 PASS=$((PASS + 1))
 
-echo "[5b/10] 报错三十九回归——native onCreate 壳必须跳过(dex2c 组合场景防回编炸)"
+echo "[5b] 报错三十九回归——native onCreate 壳必须跳过(dex2c 组合场景防回编炸)"
 python3 - "$JL/inject-javacheck.py" <<'PY'
 import importlib.util, sys, os, tempfile
 spec = importlib.util.spec_from_file_location('ij', sys.argv[1])
@@ -363,13 +364,13 @@ os.unlink(path)
 PY
 PASS=$((PASS + 1))
 
-echo "[6/10] 幂等(重跑零改动)"
+echo "[6/11] 幂等(重跑零改动)"
 H1=$(find "$T/app" -type f -exec md5sum {} \; | sort | md5sum)
 python3 "$JL/inject-javacheck.py" "$T/app" --wrapper-name 'Lcom/test/jc/NativeGuard;'
 H2=$(find "$T/app" -type f -exec md5sum {} \; | sort | md5sum)
 [[ "$H1" == "$H2" ]] && ok "目录哈希不变" || { echo "❌ 重跑产生了改动"; exit 1; }
 
-echo "[7/10] clean(删生成类 + 摘调用点 + 再汇编仍合法)"
+echo "[7/11] clean(删生成类 + 摘调用点 + 再汇编仍合法)"
 python3 "$JL/inject-javacheck.py" clean "$T/app"
 [[ ! -f "$T/app/javacheck-components.json" ]] || { echo "❌ components json 未删"; exit 1; }
 [[ ! -f "$T/app/smali/com/nc/link/NcLink.smali" ]] || { echo "❌ NcLink 未删"; exit 1; }
@@ -380,7 +381,7 @@ java -cp "$T/probe:$APKTOOL" AsmProbe "$T/out2.dex" \
   "$T/app/smali/com/test/jc/Secondary.smali" > /dev/null
 ok "clean 后调用点归零,残留 smali 仍可汇编"
 
-echo "[8/10] 自适应命名(普通包派生 / R8 短名包风格)"
+echo "[8/11] 自适应命名(普通包派生 / R8 短名包风格)"
 W=$(python3 - "$T/app" <<'PY'
 import importlib.util, sys, os
 spec = importlib.util.spec_from_file_location('ij', 'scripts/guard/javalink/inject-javacheck.py')
@@ -420,7 +421,7 @@ W2=$(python3 -c "import json;print(json.load(open('$T/obf2/javacheck-components.
 [[ "$W1" == "$W2" ]] && ok "R8 短名包 → 短名风格,且命名确定($W1)" \
   || { echo "❌ 命名不确定: $W1 vs $W2"; exit 1; }
 
-echo "[10/10] nc_jni_selfcheck.c 表项自检(重名/空表/NULL)"
+echo "[9/11] nc_jni_selfcheck.c 表项自检(重名/空表/NULL)"
 # 2026-11-22 真机 bug 的教训：RegisterNatives 返回 0 不代表绑定成功
 # （那次 rc=0 但 ncVerify 从未绑上，静默闪退）。所以注册前必须自检，
 # 而自检逻辑本身也要有行为测试 —— 这里链接的是生产源码，不是复制品。
@@ -444,7 +445,7 @@ else
   exit 1
 fi
 
-echo "[9/10] nc_link.c 判决逻辑(宿主 clang,生成侧同公式对拍)"
+echo "[10/11] nc_link.c 判决逻辑(宿主 clang,生成侧同公式对拍)"
 mkdir -p "$T/ncl" "$T/ncl0"
 # ⚠️⚠️ 生成侧公式【从 make-sig-hash.sh 抽取】，不在这里手抄。
 #   2026-11-22 实测过的坑：test-sig-guard2.sh 曾把公式手抄一份并注释
@@ -501,6 +502,25 @@ clang -O1 -DNCLINK_HOST_TEST -I"$T/ncl0" \
   "$T/ncl0/nc_link.c" "$JL/tests/test-nclink.c" -o "$T/ncl/test0"
 "$T/ncl/test0" "$T/ncl/good.bin" "$T/ncl/good.bin" debug-skip
 ok "判决对拍:python 生成侧 == C 校验侧(含调试模式)"
+
+# ── 三角裁决（2026-11-25）：可信实测 vs PackageManager 上报 ──────────────
+# 真机根因：去校验在 IPackageManager 代理层撒谎 → Java 测到诱饵证书 →
+# ncVerify 拒 → Guard.kill() → 主人自己签的包闪退。
+# 修法：ncVerify 改用 sig_check.c 可信路线实测值裁决，Java 入参降级为风控。
+# J3 是本次修复点（可信=基准、Java=诱饵 → 放行），
+# J4 是反作弊（可信≠基准时不能采信 PM 申辩）—— 两者互为反向验证。
+echo "[11/11] nc_link_judge 三角裁决(可信实测 vs PM 上报)"
+python3 - "$T/ncl" <<'PY'
+import hashlib, sys, os
+d = sys.argv[1]
+# 诱饵 t1：与 good 不同的任意 32 字节，语义是"PackageManager 报的假值"
+bait_fp = hashlib.sha256(b'bait-seed').digest()
+open(os.path.join(d, 'bait.bin'), 'wb').write(hashlib.sha256(bait_fp).digest())
+PY
+clang -O1 -DNCLINK_HOST_TEST -I"$T/ncl" \
+  "$T/ncl/nc_link.c" "$JL/tests/test-nclink-judge.c" -o "$T/ncl/testj"
+"$T/ncl/testj" "$T/ncl/good.bin" "$T/ncl/bait.bin"
+ok "三角裁决:可信实测优先 / 旧语义回退 / 反作弊(PM 申辩无效)"
 
 echo ""
 echo "══════════════════════════════════════"

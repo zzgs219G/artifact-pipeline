@@ -195,6 +195,65 @@ int nc_verify_t1(const unsigned char *t1, int len)
     return mismatch == 0;
 }
 
+/* ── 可信实测输入（2026-11-25）────────────────────────────────────────
+ *
+ * 背景：Java 侧 Guard.c() 用 PackageManager 取证书 —— 那正是去校验模块在
+ * IPackageManager 代理层撒谎的地方。于是「加固 + 去校验」组合包里 Java 永远
+ * 测到原开发者的诱饵证书，与 SIG_HASH_STORED（逆向者自己的证书）不符 →
+ * ncVerify 返回 false → Guard.kill() → 主人自己签的包也闪退。
+ *
+ * 修法：sig_check.c 的可信路线（内联 svc / 裸 syscall / 复用系统 fd）读的是
+ * 真实 base.apk，inline hook 够不到。它把实测指纹的 t1 发布在这里，ncVerify
+ * 优先用它判定；Java 入参降级为"风控对照数据"，不再是判决依据。
+ *
+ * 三角比对得到的四种结论（native 侧裁决，Java 只执行 kill）：
+ *   可信=基准, Java=可信   → 正常包                          → 放行
+ *   可信=基准, Java≠可信   → PM 被代理篡改，但主人在场        → 放行(记风控)
+ *   可信≠基准              → 真被陌生证书重签（Java 报什么都不算数）→ 拒
+ *   可信未测到             → 退化到只看 Java 入参（旧语义，不变） → 按 Java 判
+ *
+ * ⚠️ 为什么"可信≠基准"时不采信 Java 的申辩：若采信，攻击者只需让
+ *    PackageManager 报基准值就能通关 —— 那正是我们要修的洞。
+ * ⚠️ 回退分支的真实触发场景【只有一种】：可信路线全失败（seccomp 拦掉
+ *    openat 系调用 / 平台不支持 /proc/self/fd）。不是"sig_check.c 未编入"
+ *    —— protect.sh:717-719 把两者无条件成对拷入同一个 NDK 工程，必然
+ *    同时在场（缺席时本文件也不存在）。
+ *    弱符号声明仍保留：它让宿主测试能用强定义注入假的可信值
+ *    （test-nclink-judge.c 正是这么做的），也保证单独编本文件时不链接失败。
+ */
+extern int nc_trusted_t1_get(unsigned char out[SIG_HASH_LEN])
+    __attribute__((weak));      /* 由 sig_check.c 强定义；单独编本文件时为 NULL */
+
+/* 三角比对裁决。纯逻辑，宿主可测（test-nclink.c 链接本文件直接调）。
+ *
+ * ⚠️ 纯被调方，可以进 .ncx（同 nc_verify_t1）；调用它的 ncVerify 是
+ *    JNI 入口，绝不能标段 —— 那是 unlock 调用方，标了即死锁。 */
+NC_VERIFY_SECTION
+int nc_link_judge(const unsigned char *java_t1, int java_len)
+{
+    unsigned char trusted[SIG_HASH_LEN];
+    int have_trusted = 0;
+
+    /* 弱符号：sig_check.c 未编入本 so 时该指针为 NULL → 走下面的回退分支。 */
+    if (nc_trusted_t1_get != NULL)
+        have_trusted = nc_trusted_t1_get(trusted);
+
+    if (have_trusted) {
+        /* 有可信实测值 → 它说了算。
+         * ⚠️ 刻意【不】参考 Java 入参：若"可信值不符时再看 Java 报的值"，
+         *    攻击者只需让 PackageManager 报基准值就能通关 —— 那正是本次
+         *    要修的洞（去校验模块就在那层撒谎）。
+         *    Java 入参在本分支只是风控对照数据，不参与裁决。 */
+        return nc_verify_t1(trusted, SIG_HASH_LEN);
+    }
+
+    /* 可信路线不可用（sig_check.c 未编入 / seccomp 把三条可信路线全拦掉）
+     * → 保持改动前的语义：Java 传什么就按什么判（fail-closed）。 */
+    if (java_t1 == NULL || java_len != SIG_HASH_LEN)
+        return 0;
+    return nc_verify_t1(java_t1, java_len);
+}
+
 #ifndef NCLINK_HOST_TEST
 /* ── JNI 入口实现（2026-11-04 改为动态注册）──────────────────────────
  *
@@ -230,7 +289,7 @@ jboolean nc_link_jni_ncVerify(JNIEnv *env, jclass clazz, jbyteArray measured)
     buf = (*env)->GetByteArrayElements(env, measured, NULL);
     if (buf == NULL)
         return JNI_FALSE;
-    ok = nc_verify_t1((const unsigned char *)buf, (int)len) ? JNI_TRUE : JNI_FALSE;
+    ok = nc_link_judge((const unsigned char *)buf, (int)len) ? JNI_TRUE : JNI_FALSE;
     (*env)->ReleaseByteArrayElements(env, measured, buf, JNI_ABORT);
     return ok;
 }

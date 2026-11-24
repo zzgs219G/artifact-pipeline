@@ -1114,6 +1114,53 @@ static void derive_expected(const unsigned char actual[32], unsigned char out[32
                                  ^ (unsigned char)((i * 0x9E) & 0xFF));
 }
 
+/* ── Java 层判决的可信输入槽（2026-11-25）─────────────────────────────
+ *
+ * 为什么要这个槽：Java 侧 Guard.c() 用 PackageManager 测证书 —— 而那正是
+ * 去校验模块在 IPackageManager 代理层撒谎的地方。于是「加固 + 去校验」组合
+ * 包里，Java 测到的永远是原开发者的诱饵证书（3c81b429…），与本文件的标准
+ * 答案 SIG_HASH_STORED（逆向者自己的证书 d82e48da…）必然不符 →
+ * ncVerify 返回 false → Guard.kill() → 主人自己签的包也闪退。
+ *
+ * 判据不变，只换「谁来测」：本文件的可信路线（内联 svc / 裸 syscall / 复用
+ * 系统 fd）读的是真实 base.apk，inline hook 够不到，测出来的就是主人自己的
+ * 证书。把那一路的 t1 = SHA256(可信指纹) 存进本槽，由 nc_link.c 的 ncVerify
+ * 优先取用，Java 入参降级为回退。
+ *
+ * ⚠️ 存的是【实测事实】而不是【比对结论】：这里记 t1 = SHA256(可信指纹)，
+ *    与 SIG_HASH_STORED 的比对仍然发生在 nc_link.c 的 nc_verify_t1 里。
+ *    若改成"本文件判过了就记个通过标志"，第二道防线就退化成恒真 —— 那是
+ *    把这道门变成装饰。记事实、让对方自己判，才是两道独立比对。
+ *
+ * ⚠️ 本槽不改变本文件的判定：下方 sig_verify 该杀还是杀（延时暗杀那条路
+ *    独立存在）。槽位只是把同一份可信实测结果多交一份给 Java 判决线。
+ * ⚠️ 作用域仅限同一个 so —— protect.sh 把 sig_check.c 与 nc_link.c 拷进
+ *    同一 NDK 工程（protect.sh:719），这是本设计的前提。
+ * ⚠️ 与 nc_link.c 必然成对编入同一个 so（protect.sh:717-719 无条件成对拷），
+ *    不存在"本文件在、nc_link.c 不在"的组合。nc_link.c 侧那个 weak 声明
+ *    是为宿主测试注入假可信值用的，不是为这种缺席场景。
+ */
+static volatile int nc_trusted_t1_ready = 0;
+static unsigned char nc_trusted_t1[SIG_HASH_LEN];
+
+/* 发布可信实测证书指纹（入参是指纹本身，不是 t1）。
+ * 无条件调用：调用点不做任何判断，把"测到什么"如实记下。
+ * 非 static → 由 -fvisibility=hidden 收敛符号面，不进 .dynsym。 */
+void nc_trusted_fp_publish(const unsigned char fp[32]) {
+    unsigned char t1[SIG_HASH_LEN];
+    int i;
+    sha256(fp, 32, t1);                       /* 与 nc_link.c 的入参语义同源 */
+    for (i = 0; i < SIG_HASH_LEN; i++) nc_trusted_t1[i] = t1[i];
+    __atomic_store_n(&nc_trusted_t1_ready, 1, __ATOMIC_RELEASE);
+}
+
+/* 供 nc_link.c 取用。返回 1 = 可信值就绪（已写入 out）；0 = 尚未测得。 */
+int nc_trusted_t1_get(unsigned char out[SIG_HASH_LEN]) {
+    if (!__atomic_load_n(&nc_trusted_t1_ready, __ATOMIC_ACQUIRE)) return 0;
+    memcpy(out, nc_trusted_t1, SIG_HASH_LEN);
+    return 1;
+}
+
 /* 失败后延时随机 abort，攻击者难以关联崩溃原因。
  * 二期升级为污染数据等更隐蔽的破坏策略。
  *
@@ -1861,6 +1908,19 @@ static int sig_collect_fp(unsigned char actual[32]) {
                 derive_expected((const unsigned char *)trusted_fp, expect);
                 for (i2 = 0; i2 < 32; i2++)
                     diff |= expect[i2] ^ SIG_HASH_STORED[i2];
+
+                /* 把可信实测指纹交给 Java 判决线（nc_link.c 的 ncVerify）。
+                 *
+                 * ⚠️⚠️ 发布点必须在【比对之前、无条件执行】：
+                 *    它记的是"可信路线测到了什么"这个事实，不是"比对通过"
+                 *    这个结论。若挪进下面的 diff==0 分支，则"可信路线读到了
+                 *    陌生证书"（真被重签）时槽位为空 → ncVerify 回退到 Java
+                 *    那条被代理污染的值 → 攻击者只要让 PM 报基准值就能过。
+                 *    实测事实与判决结论必须分开，这是本改动的核心纪律。
+                 *
+                 * 一致性由 nc_verify_t1 自己再判一遍（两道独立比对，不是
+                 * 复制结论）—— 见 nc_trusted_fp_publish 的头注。 */
+                nc_trusted_fp_publish((const unsigned char *)trusted_fp);
 
                 if (diff == 0) {
                     /* 主人在场 → 放行。故意继续走 sig_compare_fp：

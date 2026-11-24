@@ -181,7 +181,7 @@ jobs:
         run: python3 scripts/inject/tests/test_inject_loadlib.py
 
       # mark-native 同为冻结模块，历史 11 次事故（报错十/十三/三十九），
-      # 此前只有 test-javacheck 的 [5b/9] 间接覆盖"native 壳跳过注入"一个点。
+      # 此前只有 test-javacheck 的 [5b] 间接覆盖"native 壳跳过注入"一个点。
       - name: mark-native 壳替换（42 断言，纯 stdlib）
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/repack/tests/test_mark_native.py
