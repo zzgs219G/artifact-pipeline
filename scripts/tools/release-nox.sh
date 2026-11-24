@@ -17,13 +17,25 @@
 #        混淆——走 -obf tag 或设 AMICE_BUNDLE，见 AI接手文档 §9 的教训）
 set -uo pipefail
 
-NOX_REPO="${1:?用法: release-nox.sh <nox仓库路径> [版本号]}"
+NOX_REPO="${1:?用法: release-nox.sh <nox仓库路径> [版本号] | release-nox.sh --zip <zip路径>}"
+# --zip 直传模式（2026-11-24 补）：CI 产物在 GitHub release 上，不在本地
+# nox/dist/。此时跳过 ① ②（仓库状态/自测已有 CI 背书），只做
+# ③(混淆检查) ④(换包) ⑤(同步) ⑥(回归)。
+ZIP_DIRECT=""
+if [ "$1" = "--zip" ]; then
+    ZIP_DIRECT="${2:?--zip 需要 zip 路径}"
+    NOX_REPO=""
+fi
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 ok()   { echo "  ✅ $*"; }
 bad()  { echo "  ❌ $*" >&2; FAILED=1; }
 FAILED=0
 
+if [ -n "$ZIP_DIRECT" ]; then
+    echo "── ① ② 跳过（--zip 直传：CI 已跑过 test.sh）──"
+    ZIP="$ZIP_DIRECT"
+else
 echo "── ① nox 仓库状态 ──"
 cd "$NOX_REPO" || { bad "nox 仓库不存在: $NOX_REPO"; exit 1; }
 if [ -n "$(git status --porcelain)" ]; then
@@ -38,14 +50,17 @@ if bash test.sh 2>&1 | grep -qE "失败: [1-9]"; then
 else
     ok "test.sh 全绿"
 fi
+fi   # ← ZIP_DIRECT 的 if/else 收尾
 
 echo "── ③ 分发产物 ──"
-if [ -n "${2:-}" ]; then
-    ZIP="$(ls dist/nox-"$2".zip 2>/dev/null | head -1)"
-else
-    # ⚠️ dist/ 里存着历史产物，按文件名排序取"版本号最大"的，不按 mtime
-    #    （mtime 是本地打包时间，重打旧版会骗过排序；版本号才是真相）
-    ZIP="$(ls dist/nox-*.zip 2>/dev/null | sort -V | tail -1)"
+if [ -z "$ZIP_DIRECT" ]; then
+    if [ -n "${2:-}" ]; then
+        ZIP="$(ls dist/nox-"$2".zip 2>/dev/null | head -1)"
+    else
+        # ⚠️ dist/ 里存着历史产物，按文件名排序取"版本号最大"的，不按 mtime
+        #    （mtime 是本地打包时间，重打旧版会骗过排序；版本号才是真相）
+        ZIP="$(ls dist/nox-*.zip 2>/dev/null | sort -V | tail -1)"
+    fi
 fi
 if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
     bad "dist/ 里没有产物——先跑: bash scripts/make-zip-lib.sh <版本号-obf>"
