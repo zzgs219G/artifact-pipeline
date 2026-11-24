@@ -2615,8 +2615,19 @@ if [[ $WANT_PACKER -eq 1 ]]; then
     STUB_SEED_FILE="$WORK/stub_seed.txt" \
     CERT_SOURCE_APK="$IN_APK" \
     "$ROOT/scripts/packer/packer.sh" "$ALIGNED" "$OUT_APK"
+  # 保留原包签名块（2026-11-25，同不勾加壳分支的理由）：
+  # packer.sh 的产物同样是重写过的 ZIP，签名块不会自己出现。
+  # 放在 packer 之后（它的产物即最终产物，不能再叠 zipalign）。
+  python3 "$ROOT/scripts/repack/keep-sig-block.py" "$IN_APK" "$OUT_APK" \
+    || log_warn "[sig-block] 保留失败（产物仍可签，但 uncheck 提不到证书）"
   log_done "完成 ✅ 共 $TOTAL 个模块，产物: $OUT_APK（已加壳，未签名，开发者需自行 apksigner 重签）"
 else
   finish_apk "$WORK/unsigned.apk" "$OUT_APK"
+  # 保留原包签名块（2026-11-25）——⚠️ 必须在 zipalign【之后】：
+  # zipalign 重写 ZIP 会丢掉不认识的签名块（实测：注入→对齐→块消失）。
+  # 保留它只为「证书 DER 可读」（去校验从包里提证书时需要）；
+  # 签名本身对改动后的内容无效，装前仍须 apksigner 重签。
+  python3 "$ROOT/scripts/repack/keep-sig-block.py" "$IN_APK" "$OUT_APK" \
+    || log_warn "[sig-block] 保留失败（产物仍可签，但 uncheck 提不到证书）"
   log_done "完成 ✅ 共 $TOTAL 个模块，产物: $OUT_APK（未签名，开发者需自行 apksigner 重签）"
 fi

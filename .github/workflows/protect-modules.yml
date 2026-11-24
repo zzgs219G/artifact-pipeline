@@ -190,6 +190,12 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/actions/tests/test_guard_max.py
 
+      # 签名块保留（2026-11-25）：加固产物曾「未签名」→ 去校验提不到证书。
+      # 本项含与 uncheck 实现的逐字节对拍 + zipalign 丢块行为钉住。
+      - name: 签名块保留（7 断言，含跨模块对拍）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/repack/tests/test-keep-sig-block.py
+
       # ── 第二批（2026-11-01）：中等耗时，仍【不需要 nox / NDK】──────
       # 这些套件只依赖 JDK + 仓库内已入库的工具（apktool.jar / d8.jar），
       # 本地实测合计约 4 分钟。放进来能覆盖 dex 层与加壳层的回归，
