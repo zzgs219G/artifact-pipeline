@@ -808,6 +808,8 @@ def main() -> int:
                     help="【调试】编入 so 自检报告（产物不可分发）。需 --direct（relay 会静默丢字段）")
     ap.add_argument("--strdec-profile", action="store_true",
                     help="【调试】编入字符串解密耗时统计（logcat tag=sd）。需 --direct")
+    ap.add_argument("--profileable", action="store_true",
+                    help="【调试】注入 profileable（simpleperf 采样许可）。需 --direct")
 
     g = ap.add_argument_group("模块勾选")
     g.add_argument("--sigcheck", action="store_true", help="签名校验")
@@ -1102,6 +1104,8 @@ def _do_build(args, config, token, key, base_name):
     # （relay 只转发认识的字段）。云端调试出包用 --direct --strdec-profile。
     if getattr(args, "strdec_profile", False):
         payload["strdec_profile"] = True
+    if getattr(args, "profileable", False):
+        payload["profileable"] = True
     if args.abi:
         # 单 ABI 是本地/CI 调试专用的加速开关，只在 --direct 模式有意义
         # （relay 侧只转发它认识的字段，新参数会被静默丢弃）。
@@ -1135,7 +1139,7 @@ def _do_build(args, config, token, key, base_name):
         # 直接喂 gh 会撞 422 Unexpected inputs（display_name 是 relay 专用）。
         _WF_INPUTS = {"apk_url", "protect_config", "dpt_extra_args", "sign",
                       "amice_probe", "no_lock", "no_nox", "debug_report",
-                      "abis", "strdec_profile"}
+                      "abis", "strdec_profile", "profileable"}
         for k, v in payload.items():
             if k == "workflow_file" or k not in _WF_INPUTS:
                 continue

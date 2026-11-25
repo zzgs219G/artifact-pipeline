@@ -81,6 +81,11 @@ on:
         required: false
         type: boolean
         default: false
+      profileable:
+        description: '【调试】注入 profileable（shell 采样许可，simpleperf 可用）。产物不可分发'
+        required: false
+        type: boolean
+        default: false
       abis:
         description: '【调试】只编指定 ABI（如 arm64-v8a）以加速构建。留空=双 ABI（生产默认）。单 ABI 产物不完整，不可发布'
         required: false
@@ -805,6 +810,8 @@ jobs:
       # 字符串解密耗时统计（2026-11-26）：调试包专用，产物不可发布。
       # 编入后每 500 次解密打一条 logcat（tag=sd）。定位解密链耗时用。
       NC_STRDEC_PROFILE: ${{ inputs.strdec_profile && '1' || '0' }}
+      # profileable 注入（2026-11-26）：shell 采样许可，排障专用。
+      WANT_PROFILEABLE: ${{ inputs.profileable && '1' || '0' }}
       # ABI 覆盖：留空 = 双 ABI（生产）。只用于快速迭代，产物不可发布。
       # lib-ndk.sh 的 ndk_write_mk 读它决定 APP_ABI。
       NC_APP_ABI: ${{ inputs.abis }}

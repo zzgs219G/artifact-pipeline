@@ -69,6 +69,59 @@ repack_force_extractnativelibs() {
   python3 "$ROOT/scripts/repack/patch-extractnativelibs.py" "$decompiled/AndroidManifest.xml"
 }
 
+# repack_add_profileable <解包目录> — 注入 <profileable android:shell="true"/>（2026-11-26）
+#
+# 为什么需要：simpleperf / am profile 对非 debuggable 包默认拒绝
+#   （Process not debuggable, and not profileable by shell）。这一行
+#   就是官方的采样许可开关（Android 10+），加了它 adb 能直接对包做
+#   函数级 CPU 采样 —— 排障专用，正式产物不要加。
+#
+# 实现：manifest 在 -r 解包态是二进制 AXML；新增【元素】需要字符串池扩容
+#   + chunk 偏移重算（axml_edit.py 的能力是加【属性】，不是加子元素）。
+#   所以走 apktool --only-manifest 的文本形态中转：
+#     ① apktool d --only-manifest 解出文本 manifest（含 apktool.yml 元数据）
+#     ② 文本里插 <profileable android:shell="true"/>
+#     ③ apktool b 只回编 manifest → 得一个中间 APK
+#     ④ 从中间 APK 提取编好的 AXML，替换回 $WORK/decompiled/
+#   ⚠️ 第①③需要 aapt2 —— 本地 Termux 的 aapt2 arm64 会 SIGILL（已知），
+#     所以本函数实际只在云端跑。本地要跑就 export USE_SYSTEM_AAPT2。
+repack_add_profileable() {
+  local decompiled="$1"
+  local mf="$decompiled/AndroidManifest.xml"
+  [[ -f "$mf" ]] || { log_warn "AndroidManifest.xml 不存在，跳过 profileable 注入"; return 1; }
+
+  local tmp; tmp="$(mktemp -d)"
+  # ① 文本形态（--only-manifest 会带上 apktool.yml，回编需要）
+  java -jar "$APKTOOL_JAR" d -f --no-debug-info --only-manifest \
+       -o "$tmp/mf-src" "$mf" >/dev/null 2>&1 \
+    || { log_warn "[profileable] manifest 单独解码失败，跳过"; rm -rf "$tmp"; return 1; }
+
+  # ② 文本注入（幂等）
+  if grep -q "<profileable" "$tmp/mf-src/AndroidManifest.xml"; then
+    log_info "[profileable] 已存在，跳过"
+  else
+    python3 - "$tmp/mf-src/AndroidManifest.xml" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+i = s.index('<application')
+s2 = s[:i] + '    <profileable android:shell="true"/>\n    ' + s[i:]
+open(p, 'w', encoding='utf-8').write(s2)
+print("[profileable] 已注入文本 manifest")
+PY
+  fi
+
+  # ③ 回编中间 APK
+  ( cd "$tmp/mf-src" && java -jar "$APKTOOL_JAR" b -o "$tmp/mid.apk" . ) >/dev/null 2>&1 \
+    || { log_warn "[profileable] manifest 回编失败，跳过"; rm -rf "$tmp"; return 1; }
+
+  # ④ 提取编好的 AXML 覆盖回去
+  unzip -o -q "$tmp/mid.apk" AndroidManifest.xml -d "$tmp/out"
+  cp "$tmp/out/AndroidManifest.xml" "$mf"
+  rm -rf "$tmp"
+  log_info "[profileable] 注入完成（shell 采样许可）"
+}
+
 # repack_force_compress_payload <解包目录> — 从 apktool.yml 的 doNotCompress 删掉 so / dex
 #
 # ── 为什么必须做（2026-11-08）─────────────────────────────────────

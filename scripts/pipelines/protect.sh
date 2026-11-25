@@ -192,6 +192,7 @@ PY
 }
 
 WANT_SIGCHECK=0; WANT_DEX2C=0; WANT_PACKER=0; WANT_ENVCHECK=0; DEX2C_RULES=""
+WANT_PROFILEABLE=${WANT_PROFILEABLE:-0}   # 调试开关（2026-11-26）：注入 profileable，开 shell 采样许可。env 或 --profileable 均可
 PACKER_SMALLER=0   # 报错四十三:--packer-smaller(体积优化)→ 环境变量传 packer.sh
 DPT_EXTRA_ARGS_TEXT=""  # 通用 dpt 参数通道(报错四十三后方向调整):自由文本,空格分隔
 EXCLUDE_ABI=""          # 带值参数标准件(报错四十四):--exclude-abi 的值,经环境变量传 packer.sh
@@ -310,6 +311,10 @@ while [[ $# -gt 0 ]]; do
                   STRING_RULES="$(normalize_path "$1")"; shift
                 fi ;;
     --envcheck) WANT_ENVCHECK=1; shift ;;
+    # --profileable（2026-11-26）：调试开关。注入 <profileable android:shell="true"/>，
+    #   允许 adb shell simpleperf / am profile 对产物做函数级采样。
+    #   排障专用，产物不可分发（Manifest 多一行采样许可标记）。
+    --profileable) WANT_PROFILEABLE=1; shift ;;
     --packer)   WANT_PACKER=1; shift ;;
     --packer-smaller) WANT_PACKER=1; PACKER_SMALLER=1; shift ;;
     --exclude-abi)
@@ -2671,6 +2676,12 @@ if [[ $WANT_SIGCHECK -eq 1 || $WANT_TRANSPILE -eq 1 || $WANT_ENVCHECK -eq 1 \
   # 强制解压 so 加载（本方案唯一允许的 Manifest 修改）——只在有 so 的组合执行;
   # 纯 dex 组合(仅 stringenc 且用 Java 桩)没有 libnc.so,manifest 无需改写(报错二十三)
   repack_force_extractnativelibs "$WORK/decompiled"
+  # profileable 注入（2026-11-26，--profileable 调试开关）：shell 采样许可。
+  # 与 extractNativeLibs 同为 Manifest 改写，放同处。失败不阻断。
+  if [[ $WANT_PROFILEABLE -eq 1 ]]; then
+    repack_add_profileable "$WORK/decompiled" \
+      || log_warn "[profileable] 注入失败（产物可正常使用，只是无法 shell 采样）"
+  fi
   # 2026-11-08：清掉 apktool.yml 里继承来的 doNotCompress 条目（so / dex）。
   # 这是"继承输入 APK 规则"的后果：输入包若把 so/dex 列为"不压缩"，
   # 回编时我们新加的 libnc.so 也会跟着不压缩 —— 白胖约 1MB（双 ABI）。

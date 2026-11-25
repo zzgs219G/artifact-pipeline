@@ -46,7 +46,7 @@ inputs = trigger["workflow_dispatch"]["inputs"]
 # （2026-11-02 SIGILL 漏了几个月）—— 所以生产必须双编，单 ABI 只给快速迭代用。
 assert set(inputs) == {"apk_url", "protect_config", "schema_v1", "dpt_extra_args",
                        "sign", "amice_probe", "no_lock", "no_nox",
-                       "debug_report", "abis", "strdec_profile"}, \
+                       "debug_report", "abis", "strdec_profile", "profileable"}, \
     f"inputs 清单与预期不符（新增/删除 input 时必须同步本条）: {sorted(inputs)}"
 # schema_v1（2026-11-21）：声明式卡片标记，App 读它决定拉 configs/v1。
 # 是给 App 的元数据，不是用户选项 —— App 侧会把它从通用表单里过滤掉。
