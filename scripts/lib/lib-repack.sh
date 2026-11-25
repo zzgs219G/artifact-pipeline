@@ -36,7 +36,16 @@ repack_require_tools() {
 # repack_unpack <输出目录> <输入.apk>
 repack_unpack() {
   local out="$1" apk="$2"
-  java -jar "$APKTOOL_JAR" d -r -f --no-debug-info -o "$out" "$apk"
+  # ⚠️ -r（不解资源）是历史默认：快，但 manifest 保持二进制 AXML。
+  # 2026-11-26 加 WANT_PROFILEABLE 分支：profileable 注入需要【文本】
+  # manifest + 完整资源上下文回编（手拼二进制 6 轮全败，见
+  # axml-add-profileable.py 的教训）。只有这个开关要文本态。
+  # 云端 aapt2 正常，完整解码多花 2~3 分钟可接受。
+  if [[ "${WANT_PROFILEABLE:-0}" == "1" ]]; then
+    java -jar "$APKTOOL_JAR" d -f --no-debug-info -o "$out" "$apk"
+  else
+    java -jar "$APKTOOL_JAR" d -r -f --no-debug-info -o "$out" "$apk"
+  fi
 
   # ⚠️ dex 拆分【不在】这里做 —— 改为回编前局部拆分（protect.sh 的
   # repack_build 之前调 dex-rebalance.py --split）。
@@ -99,9 +108,32 @@ repack_force_extractnativelibs() {
 #   时 aapt2 对 icon/theme 空引用报错。直接对成品 APK 的 manifest 条目
 #   做字节级注入，全部 194 元素 aapt 解析通过（v6 实测）。
 repack_add_profileable() {
-  local target_apk="$1"
-  [[ -f "$target_apk" ]] || { log_warn "目标 APK 不存在，跳过 profileable 注入"; return 1; }
-  python3 "$ROOT/scripts/repack/axml-add-profileable.py" "$target_apk"     || { log_warn "[profileable] 注入失败（产物可正常使用，只是无法 shell 采样）"; return 1; }
+  local decompiled="$1"
+  local mf="$decompiled/AndroidManifest.xml"
+  [[ -f "$mf" ]] || { log_warn "AndroidManifest.xml 不存在，跳过 profileable"; return 1; }
+
+  # 仅完整解码（WANT_PROFILEABLE=1 时 repack_unpack 走此路径）下 manifest
+  # 是文本；二进制态(-r)无法安全注入（手拼 AXML 6 轮全败，见
+  # axml-add-profileable.py 的教训记录）。
+  if head -c 4 "$mf" | grep -q $'\x03\x00\x08\x00'; then
+    log_err "[profileable] manifest 是二进制 AXML（repack_unpack 未走完整解码）——"
+    log_err "  注入需要文本态。检查 WANT_PROFILEABLE 分支是否生效。"
+    return 1
+  fi
+  if grep -q "<profileable" "$mf"; then
+    log_info "[profileable] 已存在，跳过"
+    return 0
+  fi
+  python3 - "$mf" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+i = s.index('<application')
+s = s[:i] + '    <profileable android:shell="true"/>\n    ' + s[i:]
+open(p, 'w', encoding='utf-8').write(s)
+print("[profileable] 已注入文本 manifest")
+PY
+  log_info "[profileable] 注入完成（回编由 apktool/aapt2 完成，二进制细节不手拼）"
 }
 
 # repack_force_compress_payload <解包目录> — 从 apktool.yml 的 doNotCompress 删掉 so / dex

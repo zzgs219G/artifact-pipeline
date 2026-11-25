@@ -171,9 +171,9 @@ def _inject(mf_path, out_mf=None):
             + struct.pack('<I', idx5)               # rawValue = "true"
             + struct.pack('<HBBI', 8, 0, 0x12, 0)      # size=8 res0=0 type=INT_BOOLEAN
             + struct.pack('<I', 0xFFFFFFFF))        # data = true
-    se = node(0x0102, struct.pack('<iiHHHHH', android_idx, idx3, 20, 20, 1,
+    se = node(0x0102, struct.pack('<iiHHHHH', -1, idx3, 20, 20, 1,
                                   0, 0) + attr)
-    ee = node(0x0103, struct.pack('<ii', android_idx, idx3))
+    ee = node(0x0103, struct.pack('<ii', -1, idx3))
     inject = se + ee
 
     # 组装
