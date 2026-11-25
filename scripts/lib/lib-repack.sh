@@ -75,7 +75,20 @@ repack_install_so() {
 # repack_force_extractnativelibs <解包目录> — 二进制 AXML 原位改写 extractNativeLibs=true
 repack_force_extractnativelibs() {
   local decompiled="$1"
-  python3 "$ROOT/scripts/repack/patch-extractnativelibs.py" "$decompiled/AndroidManifest.xml"
+  local mf="$decompiled/AndroidManifest.xml"
+  # 完整解码（WANT_PROFILEABLE=1）下 manifest 是文本：直接 sed。
+  # 二进制态维持原 patch-extractnativelibs.py 原位改写。
+  if head -c 4 "$mf" | grep -q $'\x03\x00\x08\x00'; then
+    python3 "$ROOT/scripts/repack/patch-extractnativelibs.py" "$mf"
+  else
+    sed -i 's/android:extractNativeLibs="false"/android:extractNativeLibs="true"/g' "$mf"
+    if grep -q 'android:extractNativeLibs="true"' "$mf"; then
+      echo "ℹ️ extractNativeLibs 文本态已确保为 true"
+    else
+      log_warn "[extractNativeLibs] 文本 manifest 无该属性（原包未显式声明）——"
+      log_warn "  回编后系统默认值视 targetSdk 而定，请核对产物"
+    fi
+  fi
 }
 
 # repack_add_profileable <解包目录> — 注入 <profileable android:shell="true"/>（2026-11-26）
