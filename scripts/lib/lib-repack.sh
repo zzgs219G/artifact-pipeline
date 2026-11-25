@@ -92,9 +92,11 @@ repack_add_profileable() {
 
   local tmp; tmp="$(mktemp -d)"
   # ① 文本形态。⚠️ apktool d 只吃 APK，不吃裸 manifest 文件 ——
-  #    把二进制 manifest 打成最小 zip 喂进去（--only-manifest 只解
-  #    AndroidManifest.xml，不解资源，秒级完成）。
-  ( cd "$decompiled" && zip -q -j "$tmp/mf.apk" AndroidManifest.xml ) \
+  #    打最小 zip 喂进去。⚠️ 必须带上 resources.arsc：aapt2 解析
+  #    android:* attribute 依赖资源表，只有 manifest 时会报
+  #    "attribute android:name not found"（实测 v3/v4 两轮失败根因）。
+  #    --only-manifest 只解 manifest 不解 res，秒级完成。
+  ( cd "$decompiled" && zip -q -j "$tmp/mf.apk" AndroidManifest.xml resources.arsc ) \
     || { log_warn "[profileable] 造最小 zip 失败，跳过"; rm -rf "$tmp"; return 1; }
   java -jar "$APKTOOL_JAR" d -f --no-debug-info --only-manifest \
        -o "$tmp/mf-src" "$tmp/mf.apk" >/dev/null 2>&1 \
