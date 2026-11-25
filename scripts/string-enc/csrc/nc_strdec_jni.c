@@ -19,9 +19,6 @@
 #include <dlfcn.h>   /* dlsym/dlopen：从壳 so 取字符串密钥种子（2026-11-10 联动） */
 #include <link.h>    /* dl_iterate_phdr：遍历已加载 so 找壳 so 的 handle */
 #include <android/log.h>  /* __android_log_print：解密失败可见化（2026-11-22） */
-#ifdef NC_STRDEC_PROFILE
-#include <time.h>    /* clock_gettime：解密耗时统计（仅调试包） */
-#endif
 
 /* 构建期生成的配置头（protect.sh 写进 NDK 工程目录，不进 git）。
  * 没有它 = 本次不是 native 桩组合，bootstrap 退化为只记录 JavaVM。
@@ -110,42 +107,6 @@ unsigned nc_strdec_fail_count(void)
 /* logcat tag。刻意短且无业务语义（不含 strdec/stringenc/decrypt 等
  * 可搜词）—— 与模块内其它标识的纪律一致。 */
 #define NC_SD_TAG "sd"
-
-/* ── 耗时统计（仅 NC_STRDEC_PROFILE 编译期开启）────────────────────
- *
- * 为什么需要它：真机实测同一 App 的两个包，开字符串加密的那个启动后
- * 10 秒吃 16.77s CPU，没开的只吃 0.69s（差 24 倍）。而按文档记录
- * ChaCha20 档整包解密增量只有 0.15~0.77ms —— 相差四个数量级，说明
- * "解密被反复触发"或"单次解密远比预期慢"，二者必须靠实测区分。
- *
- * 三个指标分开计，因为对应的病因完全不同：
- *   calls  解密调用次数      → 次数爆炸 = 缓存没命中/被绕过
- *   ns     decrypt 本体耗时  → 大 = 算法或 VMP 开销
- *   keyns  nc_ensure_key 耗时 → 大 = dl_iterate_phdr 每次都在跑
- *
- * ⚠️ 默认不编入。生产包里的字符串明文/统计计数都会成为特征，且
- *    AGENTS §2.6 明令调试开关一律编译期（不用运行期 getenv）。 */
-#ifdef NC_STRDEC_PROFILE
-static volatile unsigned long nc_prof_calls = 0;
-static volatile unsigned long nc_prof_ns = 0;
-static volatile unsigned long nc_prof_keyns = 0;
-
-static unsigned long nc_prof_now_ns(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (unsigned long) ts.tv_sec * 1000000000UL + (unsigned long) ts.tv_nsec;
-}
-
-void nc_strdec_profile_dump(void);
-
-void nc_strdec_profile_dump(void)
-{
-    __android_log_print(ANDROID_LOG_INFO, NC_SD_TAG,
-                        "prof: calls=%lu decrypt=%.1fms key=%.1fms",
-                        nc_prof_calls, nc_prof_ns / 1e6, nc_prof_keyns / 1e6);
-}
-#endif
 
 static jobject nc_jni_fail(JNIEnv *env, jobject fallback)
 {
@@ -458,15 +419,7 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
      * OnLoad（短名绑定不需要它），bootstrap 永远不会被调 —— 密钥就永远
      * 是空，所有解密都会静默 fail-closed（真机实测：App 起来但功能全废，
      * 日志里只有 fail 计数）。 */
-#ifdef NC_STRDEC_PROFILE
-    {
-        unsigned long _t0 = nc_prof_now_ns();
-        nc_ensure_key();
-        nc_prof_keyns += nc_prof_now_ns() - _t0;
-    }
-#else
     nc_ensure_key();
-#endif
 
     if (!nc_strdec_has_key()) {
         /* 没有 cfg 头 = 构建期没注入密钥（非 native 桩组合误编进了本单元）。
@@ -512,19 +465,7 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
         return nc_jni_fail(env, payload);
     }
 
-#ifdef NC_STRDEC_PROFILE
-    unsigned long _t_dec = nc_prof_now_ns();
-#endif
     int dlen = nc_strdec_decrypt(pchars, (size_t)plen, decoded, cap);
-#ifdef NC_STRDEC_PROFILE
-    if (dlen >= 0) {
-        unsigned long n = ++nc_prof_calls;
-        nc_prof_ns += nc_prof_now_ns() - _t_dec;
-        if ((n % 500) == 0) {
-            nc_strdec_profile_dump();
-        }
-    }
-#endif
     (*env)->ReleaseStringUTFChars(env, payload, pchars);
 
     if (dlen <= 0) {
