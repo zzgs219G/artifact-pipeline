@@ -1131,8 +1131,13 @@ def _do_build(args, config, token, key, base_name):
             return 0
 
         cmd = ["gh", "workflow", "run", args.workflow, "-R", args.repo]
+        # workflow input 白名单（2026-11-26）：payload 是给 relay 的形态，
+        # 直接喂 gh 会撞 422 Unexpected inputs（display_name 是 relay 专用）。
+        _WF_INPUTS = {"apk_url", "protect_config", "dpt_extra_args", "sign",
+                      "amice_probe", "no_lock", "no_nox", "debug_report",
+                      "abis", "strdec_profile"}
         for k, v in payload.items():
-            if k == "workflow_file":
+            if k == "workflow_file" or k not in _WF_INPUTS:
                 continue
             if isinstance(v, bool):
                 cmd += ["-f", "%s=%s" % (k, "true" if v else "false")]
