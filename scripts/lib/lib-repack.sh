@@ -91,9 +91,13 @@ repack_add_profileable() {
   [[ -f "$mf" ]] || { log_warn "AndroidManifest.xml 不存在，跳过 profileable 注入"; return 1; }
 
   local tmp; tmp="$(mktemp -d)"
-  # ① 文本形态（--only-manifest 会带上 apktool.yml，回编需要）
+  # ① 文本形态。⚠️ apktool d 只吃 APK，不吃裸 manifest 文件 ——
+  #    把二进制 manifest 打成最小 zip 喂进去（--only-manifest 只解
+  #    AndroidManifest.xml，不解资源，秒级完成）。
+  ( cd "$decompiled" && zip -q -j "$tmp/mf.apk" AndroidManifest.xml ) \
+    || { log_warn "[profileable] 造最小 zip 失败，跳过"; rm -rf "$tmp"; return 1; }
   java -jar "$APKTOOL_JAR" d -f --no-debug-info --only-manifest \
-       -o "$tmp/mf-src" "$mf" >/dev/null 2>&1 \
+       -o "$tmp/mf-src" "$tmp/mf.apk" >/dev/null 2>&1 \
     || { log_warn "[profileable] manifest 单独解码失败，跳过"; rm -rf "$tmp"; return 1; }
 
   # ② 文本注入（幂等）
