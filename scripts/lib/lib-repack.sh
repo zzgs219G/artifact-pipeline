@@ -118,8 +118,8 @@ PY
   # ③ 回编中间 APK
   local _berr; _berr="$tmp/build.err"
   ( cd "$tmp/mf-src" && java -jar "$APKTOOL_JAR" b -o "$tmp/mid.apk" . ) >"$tmp/build.out" 2>"$_berr" \
-    || { log_warn "[profileable] manifest 回编失败，错误摘要："
-         grep -E "error|Error|ERROR" "$_berr" | head -5 | sed 's/^/    /'
+    || { log_warn "[profileable] manifest 回编失败，stderr 全文："
+         tail -20 "$_berr" | sed 's/^/    /'
          rm -rf "$tmp"; return 1; }
 
   # ④ 提取编好的 AXML 覆盖回去
