@@ -70,25 +70,26 @@ def main():
         return 1
     body = m.group(1)
     ok("定位到 nc_log_open()")
-    (ok if re.search(r"for\s*\(\s*waited\s*=\s*0", body) and "usleep" in body
-     else bad)("T1 有「等待 → 重查」循环（目录没建就等 2 秒再试）")
+    (ok if "nc_log_retry" in code
+     else bad)("T1 有 nc_log_retry()（饭没好，过会儿再看）")
 
-    # ── T2 等待参数在头文件里，且有界 ──────────────────────────────────
-    (ok if "NC_LOG_WAIT_MS" in h and "NC_LOG_WAIT_TRIES" in h
-     else bad)("T2 等待参数集中定义在 nc_log.h（NC_LOG_WAIT_MS / TRIES）")
-    # 反向：若把 TRIES 去掉、改成无限 while(1)，启动会永久卡住 → 这行红。
+    # ── T2 重试由【独立线程】驱动，不是主线程原地等 ─────────────────────
+    ec0 = strip_comments(open(ENVCHK, encoding="utf-8").read())
+    (ok if "nc_log_retry()" in ec0
+     else bad)("T2 nc_log_retry 由 env_check 看门狗（独立线程）调用")
 
-    # ── T3 等待只在【真机分支】，宿主测试不能 sleep ────────────────────
-    # 宿主端没有 FUSE/files 延迟这回事，sleep 只会拖慢 CI。
-    (ok if re.search(r"#ifdef SIGCHECK_HOST_TEST", body)
-     and body.index("#ifdef SIGCHECK_HOST_TEST") < body.index("usleep")
-     else bad)("T3 等待在真机分支内，宿主测试不走 usleep")
+    # ── T3 看门狗调 retry 的位置必须在循环内（每轮都试）────────────────
+    wd = re.search(r"static void \*env_watchdog.*?\n\}", ec0, re.S)
+    (ok if wd and "nc_log_retry()" in wd.group(0)
+     else bad)("T3 nc_log_retry 在看门狗循环内（每轮重试一次）")
 
     # ── T4 哨兵不存在时【立刻放弃】，不等待 ────────────────────────────
     # 哨兵没开是常态（用户不开日志），不能为此让启动白等 10 秒。
-    sent = re.search(r"sentinel", body)
-    (ok if sent and re.search(r"nc_log_state\s*=\s*0;\s*/\*[^*]*常态", body)
-     else bad)("T4 哨兵不存在时立刻放弃（不进入等待循环）")
+    # 判据：哨兵 access 失败的分支里直接落 0 并 return（不是继续往下等）
+    seg = re.search(r"access\(sentinel,\s*F_OK\)\s*!=\s*0\)\s*\{(.{0,200}?)\n\s*\}",
+                    body, re.S)
+    (ok if seg and "nc_log_state = 0" in seg.group(1) and "return 0" in seg.group(1)
+     else bad)("T4 哨兵不存在时立刻放弃（不进入等待）")
 
     # ── T5 目录不可写时打到 logcat，带 [no-file] 标记 ─────────────────
     (ok if "[no-file]" in code
@@ -108,7 +109,7 @@ def main():
         ("nc_log_summary",       "结论摘要"),
         ("nc_log_late_flush",    "异步补写线程"),
         ("nc_log_dir_probe",     "独立轮询探针"),
-        ("NC_LOG_MAX_TRIES",     "探测配额"),
+        ("NC_LOG_WAIT_MS",       "同步等待参数（会导致启动卡死）"),
     ):
         (ok if gone not in strip_comments(c) and gone not in strip_comments(h)
          and gone not in strip_comments(sc) and gone not in strip_comments(ec)
@@ -120,7 +121,7 @@ def main():
     (ok if not re.search(r"(static\s+)?char\s+\w*buf\w*\[\s*\d{4,}\s*\]", code)
      else bad)("T8 不缓冲日志文本（无大块明文常驻内存）")
 
-    print(f"\n=== 结果: {9 - len(fails)} 通过, {len(fails)} 失败 ===")
+    print(f"\n=== 结果: {10 - len(fails)} 通过, {len(fails)} 失败 ===")
     return 1 if fails else 0
 
 
