@@ -28,6 +28,11 @@ on:
     paths:
       # 只看 schema 与它们依赖的脚本；改 README 之类的无需同步
       - "configs/**"
+      # 去签名校验载荷（boot.dex / payload.dex / libusign*.so）。
+      # 这四个是构建产物，改成「只有源码变了才触发」会让产物更新漏同步 ——
+      # 2026-11 加 native 层时就漏过一次：源码改了、产物提交了、
+      # json 仓库那边的 boot.dex 却停在无 native 支持的旧版。
+      - "scripts/uncheck/payload/**"
       - ".github/workflows/notify-json-mirror.yml"
   workflow_dispatch:
 
@@ -44,14 +49,52 @@ jobs:
           TOKEN: ${{ secrets.JSON_REPO_DISPATCH_TOKEN }}
         run: |
           if [ -z "$TOKEN" ]; then
-            echo "::notice title=跳过镜像同步::未配置 JSON_REPO_DISPATCH_TOKEN，本次不同步 schema 到 json 仓库"
+            echo "::notice title=跳过镜像同步::未配置 JSON_REPO_DISPATCH_TOKEN，本次不同步到 json 仓库"
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Dispatch to zzgs219G/json
+      # 两条镜像线共用本工作流（同一个 token、同一个目标仓库），
+      # 但 event_type 不同 —— json 仓库侧按 event_type 过滤。
+      # 发错类型不会报错，只会「同步了另一边、这一边完全没动」，
+      # 所以这里必须按实际变更判定，不能笼统都发。
+      - name: Decide which mirrors to notify
+        id: scope
         if: steps.gate.outputs.enabled == 'true'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -o pipefail
+
+          schema=true
+          payload=true
+
+          # push 事件才拿得到前后提交。workflow_dispatch 没有，
+          # 此时两者都发 —— 两边同步都是幂等的（无变化不提交），
+          # 多跑一次只是浪费几秒，比「漏同步」安全。
+          if [ -n "${BEFORE:-}" ] \
+             && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$BEFORE" "$AFTER")
+            echo "本次变更文件："
+            echo "$changed" | sed 's/^/  /'
+
+            schema=false
+            payload=false
+            if echo "$changed" | grep -qE '^configs/'; then schema=true; fi
+            if echo "$changed" | grep -qE '^scripts/uncheck/payload/'; then payload=true; fi
+          else
+            echo "无法取到变更范围（非 push 或历史不可达），两条线都通知"
+          fi
+
+          echo "schema=$schema" >> "$GITHUB_OUTPUT"
+          echo "payload=$payload" >> "$GITHUB_OUTPUT"
+          echo "→ schema=$schema payload=$payload"
+
+      - name: Dispatch schema sync to zzgs219G/json
+        if: steps.gate.outputs.enabled == 'true' && steps.scope.outputs.schema == 'true'
         env:
           # 经 env 中转，token 不出现在命令行参数里（与 protect-modules.yml 一致的做法）
           TOKEN: ${{ secrets.JSON_REPO_DISPATCH_TOKEN }}
@@ -61,7 +104,6 @@ jobs:
         run: |
           set -o pipefail
 
-          # 只同步 configs/ 目录的变更事件；json 侧按 event_type 过滤
           payload=$(python3 - <<'PY'
           import json, os
           print(json.dumps({
@@ -88,4 +130,41 @@ jobs:
             cat /tmp/resp.txt
             exit 1
           fi
-          echo "::notice title=已通知镜像::$TARGET_REPO 将在 workflow 中拉取最新 schema"
+          echo "::notice title=已通知 schema 镜像::$TARGET_REPO 将拉取最新 configs/"
+
+      - name: Dispatch uncheck payload sync to zzgs219G/json
+        if: steps.gate.outputs.enabled == 'true' && steps.scope.outputs.payload == 'true'
+        env:
+          TOKEN: ${{ secrets.JSON_REPO_DISPATCH_TOKEN }}
+          TARGET_REPO: "zzgs219G/json"
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -o pipefail
+
+          payload=$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({
+              "event_type": "uncheck-payload-updated",
+              "client_payload": {
+                  "source_repo": os.environ.get("GITHUB_REPOSITORY", ""),
+                  "source_sha": os.environ.get("SOURCE_SHA", ""),
+              },
+          }))
+          PY
+          )
+
+          code=$(curl -sS -o /tmp/resp.txt -w '%{http_code}' \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$TARGET_REPO/dispatches" \
+            --data-binary "$payload")
+
+          echo "HTTP $code"
+          if [ "$code" != "204" ]; then
+            echo "::error title=镜像通知失败::向 $TARGET_REPO 发 repository_dispatch 返回 HTTP $code"
+            cat /tmp/resp.txt
+            exit 1
+          fi
+          echo "::notice title=已通知去校验载荷镜像::$TARGET_REPO 将拉取最新 payload/"

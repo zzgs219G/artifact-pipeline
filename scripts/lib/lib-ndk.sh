@@ -151,6 +151,17 @@ OBFEOF
     echo "  [mk] Amice 混淆: $obf_spec（plugin=$AMICE_PLUGIN）"
   fi
 
+  # ── 字符串解密耗时统计（仅 NC_STRDEC_PROFILE=1，调试包专用）────────
+  # AGENTS §2.6：调试开关一律编译期。统计 calls/decrypt/key 三项，
+  # 每 500 次解密打一条 logcat（tag=sd）。产物不可发布。
+  if [[ "${NC_STRDEC_PROFILE:-0}" == "1" ]]; then
+    cat >> "$jni/Application.mk" <<'PROFEOF'
+APP_CFLAGS   += -DNC_STRDEC_PROFILE
+APP_CPPFLAGS += -DNC_STRDEC_PROFILE
+PROFEOF
+    echo "  [mk] ⚠️ NC_STRDEC_PROFILE=1：编入解密耗时统计（产物不可发布）"
+  fi
+
   cat > "$jni/Android.mk" <<EOF
 LOCAL_PATH := \$(call my-dir)
 
