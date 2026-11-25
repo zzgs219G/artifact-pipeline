@@ -130,9 +130,28 @@ static int nc_log_mkdir_target(const char *file_path)
 int nc_log_open(void)
 {
     int first_try;
+    static long long last_fail_ms = 0;   /* 上次失败时刻（防 constructor 密集重试） */
 
     if (nc_log_state >= 0) return nc_log_state;
     if (nc_log_tries >= NC_LOG_MAX_TRIES) { nc_log_state = 0; return 0; }
+
+    /* ⚠️ 2026-11-25 真机实测：constructor 阶段 sig_verify 会在同一秒内
+     * 连打几十条日志（08:06:59.215~.231 一秒 11 次探测），把配额
+     * 瞬间打光 → 延时线程醒来时配额已尽 → files/ 目录出现后也没人再试。
+     *
+     * 现在：失败后 500ms 内再来调用直接返回（不消耗配额）。
+     * constructor 的密集日志因此最多消耗 1~2 次配额，剩下的留给
+     * 延时线程和运行期。代价：真正"目录刚好在这 500ms 内就绪"时会
+     * 晚 0.5 秒才写 —— 对日志场景完全可接受。 */
+    {
+        struct timespec now;
+        long long now_ms;
+        clock_gettime(CLOCK_REALTIME, &now);
+        now_ms = (long long)now.tv_sec * 1000LL + now.tv_nsec / 1000000L;
+        if (last_fail_ms != 0 && now_ms - last_fail_ms < 500) return 0;
+        /* 记录本轮的失败时刻（成功则清零，见函数末尾） */
+        last_fail_ms = now_ms;
+    }
 
     first_try = (nc_log_tries == 0);
     nc_log_tries++;
@@ -228,6 +247,38 @@ int nc_log_open(void)
 
 int nc_log_ready(void) { return nc_log_state == 1; }
 
+/* 轻量轮询：目标目录当前可写吗？不做完整探测、不消耗 nc_log_tries 配额。
+ *
+ * ⚠️ 为什么需要它：真机实测构造期 sig_verify 的密集日志会在同一秒内
+ * 把探测配额打光（08:06:59.215~.231 一秒 11 次），延时线程醒来时
+ * 配额已尽 → 直接放弃 → files/ 目录出现后也没人再试。
+ * 本函数只做一次 access()，供延时线程高频轮询用。 */
+int nc_log_dir_probe(void)
+{
+    char pkg[256];
+    char fn[48];
+    const char *name;
+    char path[512];
+    char dir[512];
+    const char *slash;
+
+    if (nc_log_state == 1) return 1;
+#ifndef SIGCHECK_HOST_TEST
+    if (nc_log_pkgname(pkg, sizeof(pkg)) != 0) return 0;
+    name = lsg_s(LSGS_NC_LOG_FILENAME, fn, sizeof(fn));
+    if (!name) return 0;
+    snprintf(path, sizeof(path),
+             "/storage/emulated/0/Android/data/%s/files/%s", pkg, name);
+    slash = strrchr(path, '/');
+    if (!slash) return 0;
+    snprintf(dir, sizeof(dir), "%.*s", (int)(slash - path), path);
+    return (access(dir, W_OK) == 0) ? 1 : 0;
+#else
+    (void)pkg; (void)fn; (void)name; (void)path; (void)dir; (void)slash;
+    return 0;
+#endif
+}
+
 void nc_log_line(const char *prio, const char *fmt, ...)
 {
     FILE *fp;
@@ -297,21 +348,29 @@ static void *nc_log_late_thread(void *arg)
 {
     int i;
     (void)arg;
-    /* ⚠️ 2026-11-25 真机实测：files/ 目录比 <pkg>/ 晚得多 ——
-     *   08:01:43.410 constructor
-     *   08:01:44.032 系统建 <pkg>/ 与 cache/
-     *   08:02:00.928 files/ 才出现（17 秒后，由第一次实际写入触发）
-     * 原来只试 1s + 1s = 2 秒，必然错过。
+    /* ⚠️ 2026-11-25 真机实测（两次）：
+     *   files/ 目录由【第一次实际写入】隐式触发创建，比 constructor 晚
+     *   十几秒到几十秒（08:06 那次 constructor 在 08:06:59，files/ 直到
+     *   08:07:2x 才出现）。
      *
-     * 现在改成【最多 8 次、每次间隔 2 秒】（约 16 秒），覆盖实测的 17 秒
-     * 最坏情况；一旦成功就立刻停。为什么不用更密的重试：每次都要 access()
-     * 两个路径，2 秒粒度对"首次启动补日志"这个场景完全够，且不占 CPU。
+     * ⚠️⚠️ 第一版这里直接调 nc_log_open()，但每次调用都消耗
+     *    nc_log_tries 配额 —— 而 constructor 阶段 sig_verify 的密集日志
+     *    会在同一秒内把 12 次配额打光，延时线程醒来时配额已尽，
+     *    直接落 0 放弃。实测：08:06:59.215~.231 一秒内试了 11 次。
      *
-     * ⚠️ 线程是 detached，进程退出自然回收，不需要 join。 */
-    for (i = 0; i < 8; i++) {
+     * 现在：延时线程【自己轮询 access()，不碰 nc_log_tries 配额】，
+     * 只在真正探测时才调 nc_log_open()。间隔 2 秒 × 最多 30 次 ≈ 60 秒，
+     * 覆盖实测的最坏情况，且代价只是每 2 秒一次 access()（可忽略）。
+     */
+    for (i = 0; i < 30; i++) {
         sleep(2);
-        nc_log_open();
-        if (nc_log_ready()) break;
+        /* 轻量轮询：只问"目录能不能写"，不做完整探测 */
+        if (nc_log_dir_probe()) {
+            /* 目录出现 → 重置配额，让 nc_log_open() 有机会真正成功 */
+            nc_log_tries = 0;
+            nc_log_open();
+            if (nc_log_ready()) break;
+        }
     }
     if (nc_sum_done) {
         nc_log_line("I",

@@ -76,6 +76,10 @@ void nc_log_line(const char *prio, const char *fmt, ...);
 /* 当前是否可写（1=可以，0=否）。供需要"只在可写时才做重活"的调用方用。 */
 int  nc_log_ready(void);
 
+/* 轻量轮询：目标目录当前可写吗？不消耗探测配额。
+ * 供 nc_log_late_flush 的线程高频轮询用（见 nc_log.c 里的说明）。 */
+int  nc_log_dir_probe(void);
+
 /* ── 首次启动的结论摘要（可选，仅 sig_check.c 用）──────────────────────
  *
  * 为什么需要：constructor 期目录还不存在（见头注），那几十毫秒的日志
