@@ -162,6 +162,35 @@ _size_report() {
   [[ $_found -eq 1 ]] || echo "[size:$stage] （未生成 libnc.so）"
 }
 
+# _partial_reuse <输入.apk> <输出.apk> — 把与 origin.apk 内容相同的条目指回它的
+# 内部偏移（119MB → 69MB）。详见 docs/计划书-部分数据复用.md
+#
+# ⚠️ 必须在 zipalign【之后】调用：zipalign 重写整个 ZIP，会把共享布局拆平。
+# ⚠️ 产物之后也不能再跑 apksigner —— 它同样展开重叠条目。签名用 MT 管理器。
+_partial_reuse() {
+  local src="$1" dst="$2"
+  python3 "$ROOT/scripts/repack/partial-reuse.py" "$src" "$dst" \
+    || { log_warn "[partial-reuse] 跳过（产物仍可用，只是体积未优化）"; return 1; }
+}
+
+# _partial_reuse_inplace <apk> — 原地复用。没有 origin.apk 就静默跳过
+# （没勾去校验时本就不需要，不该在日志里制造噪音）。
+_partial_reuse_inplace() {
+  local apk="$1"
+  python3 - "$apk" <<'PY' || return 0
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    names = set(z.namelist())
+sys.exit(0 if 'assets/nc_sigfix/origin.apk' in names else 1)
+PY
+  local tmp="${apk%.apk}.reuse.apk"
+  if _partial_reuse "$apk" "$tmp"; then
+    mv -f "$tmp" "$apk"
+  else
+    rm -f "$tmp"
+  fi
+}
+
 WANT_SIGCHECK=0; WANT_DEX2C=0; WANT_PACKER=0; WANT_ENVCHECK=0; DEX2C_RULES=""
 PACKER_SMALLER=0   # 报错四十三:--packer-smaller(体积优化)→ 环境变量传 packer.sh
 DPT_EXTRA_ARGS_TEXT=""  # 通用 dpt 参数通道(报错四十三后方向调整):自由文本,空格分隔
@@ -2665,6 +2694,9 @@ if [[ $WANT_PACKER -eq 1 ]]; then
     STUB_SEED_FILE="$WORK/stub_seed.txt" \
     CERT_SOURCE_APK="$IN_APK" \
     "$ROOT/scripts/packer/packer.sh" "$ALIGNED" "$OUT_APK"
+  # 部分数据复用（2026-11-25）—— 必须在 packer 之后：
+  # packer 重写整个 ZIP，会把 apktool 留下的 origin.apk 实体副本继续当成普通文件。
+  _partial_reuse_inplace "$OUT_APK"
   # 保留原包签名块（2026-11-25，同不勾加壳分支的理由）：
   # packer.sh 的产物同样是重写过的 ZIP，签名块不会自己出现。
   # 放在 packer 之后（它的产物即最终产物，不能再叠 zipalign）。
@@ -2673,6 +2705,9 @@ if [[ $WANT_PACKER -eq 1 ]]; then
   log_done "完成 ✅ 共 $TOTAL 个模块，产物: $OUT_APK（已加壳，未签名，开发者需自行 apksigner 重签）"
 else
   finish_apk "$WORK/unsigned.apk" "$OUT_APK"
+  # 部分数据复用（2026-11-25）—— 必须在 zipalign【之后】：zipalign 重写整个 ZIP，
+  # 会把共享布局拆平（体积回到 119MB）。
+  _partial_reuse_inplace "$OUT_APK"
   # 保留原包签名块（2026-11-25）——⚠️ 必须在 zipalign【之后】：
   # zipalign 重写 ZIP 会丢掉不认识的签名块（实测：注入→对齐→块消失）。
   # 保留它只为「证书 DER 可读」（去校验从包里提证书时需要）；

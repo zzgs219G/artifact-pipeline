@@ -214,6 +214,13 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/repack/tests/test-keep-sig-block.py
 
+      # 部分数据复用（2026-11-25）：apktool b 把 origin.apk 从「共享字节」拆成
+      # 实体副本 → 加固+去校验产物 119MB。本项钉住"手写 ZIP 补回共享布局"的正确性
+      # （错 1 字节就装不上，装机失败无任何诊断信息）。
+      - name: 部分数据复用（手写 ZIP 的 offset / 对齐 / CRC）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/repack/tests/test-partial-reuse.py
+
       # ── 第二批（2026-11-01）：中等耗时，仍【不需要 nox / NDK】──────
       # 这些套件只依赖 JDK + 仓库内已入库的工具（apktool.jar / d8.jar），
       # 本地实测合计约 4 分钟。放进来能覆盖 dex 层与加壳层的回归，

@@ -14,6 +14,8 @@ apktool 回编会丢属性、降 dex 版本。
 | `patch-dex-version.py` | 修复 apktool 回编降级 dex 版本导致的问题 |
 | `dex-capacity.py` | dex 方法数容量检测 + 注入落点选择（纯 stdlib，零依赖） |
 | `dex-rebalance.py` | 重排 smali 目录，让每个 dex 的 `method_ids` 留足余量 |
+| `partial-reuse.py` | 手写 ZIP，让与 `origin.apk` 内容相同的条目指回它的内部偏移（119MB → 69MB） |
+| `keep-sig-block.py` | 回编后把原包的 APK Signing Block 原地写回（证书 DER 可读） |
 | `verify_text_crc_ready.py` | 校验 `.text` 是否满足「代码自绑定」的前提 |
 
 ## 为什么用二进制 AXML 改写而不是 apktool
