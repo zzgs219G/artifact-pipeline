@@ -2676,12 +2676,6 @@ if [[ $WANT_SIGCHECK -eq 1 || $WANT_TRANSPILE -eq 1 || $WANT_ENVCHECK -eq 1 \
   # 强制解压 so 加载（本方案唯一允许的 Manifest 修改）——只在有 so 的组合执行;
   # 纯 dex 组合(仅 stringenc 且用 Java 桩)没有 libnc.so,manifest 无需改写(报错二十三)
   repack_force_extractnativelibs "$WORK/decompiled"
-  # profileable 注入（2026-11-26，--profileable 调试开关）：shell 采样许可。
-  # 与 extractNativeLibs 同为 Manifest 改写，放同处。失败不阻断。
-  if [[ $WANT_PROFILEABLE -eq 1 ]]; then
-    repack_add_profileable "$WORK/decompiled" \
-      || log_warn "[profileable] 注入失败（产物可正常使用，只是无法 shell 采样）"
-  fi
   # 2026-11-08：清掉 apktool.yml 里继承来的 doNotCompress 条目（so / dex）。
   # 这是"继承输入 APK 规则"的后果：输入包若把 so/dex 列为"不压缩"，
   # 回编时我们新加的 libnc.so 也会跟着不压缩 —— 白胖约 1MB（双 ABI）。
@@ -2760,6 +2754,14 @@ if [[ $WANT_PACKER -eq 1 ]]; then
   log_done "完成 ✅ 共 $TOTAL 个模块，产物: $OUT_APK（已加壳，未签名，开发者需自行 apksigner 重签）"
 else
   finish_apk "$WORK/unsigned.apk" "$OUT_APK"
+  # profileable 注入（2026-11-26，--profileable 调试开关）：shell 采样许可。
+  # ⚠️ 必须对【成品 APK】操作：apktool b 会用 aapt2 重编 manifest，无视
+  #    decompiled 里的二进制文件（v5 实测解包态覆盖无效）。必须在
+  #    partial-reuse 之前 —— 它重排 ZIP 条目，先注入避免重排干扰。
+  if [[ $WANT_PROFILEABLE -eq 1 ]]; then
+    repack_add_profileable "$OUT_APK" \
+      || log_warn "[profileable] 注入失败（产物可正常使用，只是无法 shell 采样）"
+  fi
   # 部分数据复用（2026-11-25）—— 必须在 zipalign【之后】：zipalign 重写整个 ZIP，
   # 会把共享布局拆平（体积回到 119MB）。
   _partial_reuse_inplace "$OUT_APK"

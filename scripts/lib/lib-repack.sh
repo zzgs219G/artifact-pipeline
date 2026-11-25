@@ -85,50 +85,23 @@ repack_force_extractnativelibs() {
 #     ④ 从中间 APK 提取编好的 AXML，替换回 $WORK/decompiled/
 #   ⚠️ 第①③需要 aapt2 —— 本地 Termux 的 aapt2 arm64 会 SIGILL（已知），
 #     所以本函数实际只在云端跑。本地要跑就 export USE_SYSTEM_AAPT2。
+# repack_add_profileable <成品.apk> — 注入 <profileable android:shell="true"/>（2026-11-26）
+#
+# 为什么需要：simpleperf / am profile 对非 debuggable 包默认拒绝
+#   （Process not debuggable, and not profileable by shell）。这一行
+#   就是官方的采样许可开关（Android 10+），加了它 adb 能直接对包做
+#   函数级 CPU 采样 —— 排障专用，正式产物不要加。
+#
+# 实现：scripts/repack/axml-add-profileable.py 直接做二进制 AXML 注入
+#   （字符串池扩容 + 在 <application> 内插入 START/END 元素对）。
+#   为什么不用 apktool 文本中转：apktool b 回编时用 aapt2 重编 manifest，
+#   无视解包态的二进制文件（v5 实测注入丢失）；且最小 zip 缺 res/
+#   时 aapt2 对 icon/theme 空引用报错。直接对成品 APK 的 manifest 条目
+#   做字节级注入，全部 194 元素 aapt 解析通过（v6 实测）。
 repack_add_profileable() {
-  local decompiled="$1"
-  local mf="$decompiled/AndroidManifest.xml"
-  [[ -f "$mf" ]] || { log_warn "AndroidManifest.xml 不存在，跳过 profileable 注入"; return 1; }
-
-  local tmp; tmp="$(mktemp -d)"
-  # ① 文本形态。⚠️ apktool d 只吃 APK，不吃裸 manifest 文件 ——
-  #    打最小 zip 喂进去。⚠️ 必须带上 resources.arsc：aapt2 解析
-  #    android:* attribute 依赖资源表，只有 manifest 时会报
-  #    "attribute android:name not found"（实测 v3/v4 两轮失败根因）。
-  #    --only-manifest 只解 manifest 不解 res，秒级完成。
-  ( cd "$decompiled" && zip -q -j "$tmp/mf.apk" AndroidManifest.xml resources.arsc ) \
-    || { log_warn "[profileable] 造最小 zip 失败，跳过"; rm -rf "$tmp"; return 1; }
-  java -jar "$APKTOOL_JAR" d -f --no-debug-info --only-manifest \
-       -o "$tmp/mf-src" "$tmp/mf.apk" >/dev/null 2>&1 \
-    || { log_warn "[profileable] manifest 单独解码失败，跳过"; rm -rf "$tmp"; return 1; }
-
-  # ② 文本注入（幂等）
-  if grep -q "<profileable" "$tmp/mf-src/AndroidManifest.xml"; then
-    log_info "[profileable] 已存在，跳过"
-  else
-    python3 - "$tmp/mf-src/AndroidManifest.xml" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p, encoding='utf-8').read()
-i = s.index('<application')
-s2 = s[:i] + '    <profileable android:shell="true"/>\n    ' + s[i:]
-open(p, 'w', encoding='utf-8').write(s2)
-print("[profileable] 已注入文本 manifest")
-PY
-  fi
-
-  # ③ 回编中间 APK
-  local _berr; _berr="$tmp/build.err"
-  ( cd "$tmp/mf-src" && java -jar "$APKTOOL_JAR" b -o "$tmp/mid.apk" . ) >"$tmp/build.out" 2>"$_berr" \
-    || { log_warn "[profileable] manifest 回编失败，stderr 全文："
-         tail -20 "$_berr" | sed 's/^/    /'
-         rm -rf "$tmp"; return 1; }
-
-  # ④ 提取编好的 AXML 覆盖回去
-  unzip -o -q "$tmp/mid.apk" AndroidManifest.xml -d "$tmp/out"
-  cp "$tmp/out/AndroidManifest.xml" "$mf"
-  rm -rf "$tmp"
-  log_info "[profileable] 注入完成（shell 采样许可）"
+  local target_apk="$1"
+  [[ -f "$target_apk" ]] || { log_warn "目标 APK 不存在，跳过 profileable 注入"; return 1; }
+  python3 "$ROOT/scripts/repack/axml-add-profileable.py" "$target_apk"     || { log_warn "[profileable] 注入失败（产物可正常使用，只是无法 shell 采样）"; return 1; }
 }
 
 # repack_force_compress_payload <解包目录> — 从 apktool.yml 的 doNotCompress 删掉 so / dex
