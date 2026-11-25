@@ -358,6 +358,31 @@ NKEYS=4        ：块密钥流 = XOR over t of mix64(key[t] + (blk+t)*gamma[t])
 
 ### 已知安全边界（如实记录，别高估）
 
+**2026-11-25 起：6 个算法函数默认不进 `.ncx`（`NC_STRDEC_IN_NCX=0`）。**
+
+真机实测（同一 App 两个包，只差字符串加密，启动后 10 秒采样 CPU 时间）：
+
+| 包 | 全进程 CPU | 主线程 CPU |
+|---|---|---|
+| 无字符串加密 | **0.69s** | 31 ticks |
+| 有字符串加密 | **16.77s** | 201 ticks |
+
+差 24 倍。而文档记载的 ChaCha20 档整包解密增量只有 0.15~0.77ms —— 相差四个
+数量级，说明不是「解密慢」而是别的路径在烧 CPU（待查，见下方"耗时统计"）。
+
+**取舍**：这 6 个函数原本同时受两层保护（`.ncx` 段加密 + 其中 3 个密钥流函数
+`+vm_virtualize`）。默认改为留在 `.text`（只受 Amice 混淆），需要强度时用
+`NC_STRDEC_IN_NCX=1` 恢复。
+
+**为什么这个取舍可以接受**：`decrypt` / `b64_decode` / `utf8_to_utf16` 是公开
+编码算法，藏它收益本就低；决定「能不能解开全部字符串」的是**密钥** —— 包壳时
+密钥来自 `ncg_strkey()`（`nc_strdec_jni.c` 的 `nc_ensure_key` 分支①），
+编译期常量分支在包壳时根本不编进来。算法本身是公开的 splitmix64 / ChaCha20。
+
+⚠️ **密钥常量仍然在 `.ncxr`**（`nc_strdec_jni.c:699` 的编译期
+`__attribute__((section(".ncxr")))`），与算法层的段标记**解耦** —— 关掉
+`NC_STRDEC_IN_NCX` 不影响密钥的保护级别。
+
 `NKEYS=1` 时，**若攻击者已拿到算法**（解开了 `.ncx`，或 dump 内存），
 则猜中任意一条明文 → 算出该段密钥流 → 反演 `mix64`（可逆双射）→ 得到种子 → 全包沦陷。
 
@@ -366,6 +391,25 @@ NKEYS=4        ：块密钥流 = XOR over t of mix64(key[t] + (blk+t)*gamma[t])
 
 ⚠️ **加轮数无效**：`mix64` 的每一步（乘法、异或右移）都可逆，
 叠多少层整体仍可逆，攻防成本同比例上涨。实测加 512 轮，攻/防成本比仍是 3.4e-05。
+
+### 解密耗时统计（`NC_STRDEC_PROFILE=1`，调试包专用）
+
+2026-11-25 加。为了把「16.77s CPU」拆成"调用次数爆炸"还是"单次解密极慢"。
+
+```bash
+NC_STRDEC_PROFILE=1 bash scripts/pipelines/protect.sh in.apk out.apk --stringenc --sigcheck
+# 装机后：adb logcat -s sd
+# → prof: calls=1500 decrypt=832.1ms key=0.4ms
+```
+
+三个指标对应三种病因：
+- `calls` 大 → 缓存没命中 / 被绕过（Java 侧回填链问题）
+- `decrypt` 大 → 算法或 VMP 开销
+- `key` 大 → `nc_ensure_key()` 的 `dl_iterate_phdr` 每次都在跑
+
+⚠️ 默认不编入（AGENTS §2.6：调试开关一律编译期，不用运行期 getenv/哨兵）。
+产物含统计计数与日志串，**不可发布**。
+
 
 ### Base64 为什么保留、又为什么要重写实现
 

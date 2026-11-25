@@ -151,6 +151,23 @@ OBFEOF
     echo "  [mk] Amice 混淆: $obf_spec（plugin=$AMICE_PLUGIN）"
   fi
 
+  # ── 字符串解密耗时统计（仅 NC_STRDEC_PROFILE=1，调试包专用）────────
+  # 2026-11-25：真机实测同一 App 开/关字符串加密两个包，启动后 10 秒
+  # CPU 时间 16.77s vs 0.69s（差 24 倍），而文档记录的整包解密增量只有
+  # 0.15~0.77ms —— 相差四个数量级，必须实测区分"调用次数爆炸"与
+  # "单次解密极慢"（后者还可细分为 VMP 开销 vs 算法开销）。
+  #
+  # ⚠️ 默认不编入：统计计数与日志串本身会成为特征（AGENTS §2.6
+  #    要求调试开关一律编译期，不能用运行期 getenv/文件哨兵）。
+  if [[ "${NC_STRDEC_PROFILE:-0}" == "1" ]]; then
+    cat >> "$jni/Application.mk" <<'PROFEOF'
+# 字符串解密耗时统计（调试包专用，产物不可发布）
+APP_CFLAGS   += -DNC_STRDEC_PROFILE
+APP_CPPFLAGS += -DNC_STRDEC_PROFILE
+PROFEOF
+    echo "  [mk] ⚠️ NC_STRDEC_PROFILE=1：编入解密耗时统计（产物不可发布）"
+  fi
+
   cat > "$jni/Android.mk" <<EOF
 LOCAL_PATH := \$(call my-dir)
 

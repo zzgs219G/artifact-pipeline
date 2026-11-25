@@ -289,6 +289,25 @@ WANT_VMP_VM=0
 #
 # 设 0 可整体关闭（回到"algorithm 层只受锁箱保护"）。
 NC_VMP_CSTUB=1
+# NC_STRDEC_IN_NCX（2026-11-25）：字符串解密桩的 6 个算法函数是否进 .ncx。
+#
+# 默认 0 = 不进。理由（真机实测，同一 App 两包只差字符串加密，启动后
+# 10 秒采样）：无加密 0.69s CPU / 有加密 16.77s CPU，差 24 倍；而文档
+# 记录的整包解密增量只有 0.15~0.77ms —— 相差四个数量级。
+#
+# 环境变量覆盖（不进参数解析，避免被当成正式 CLI 选项）：
+#   NC_STRDEC_IN_NCX=1  → 恢复旧行为（6 个函数进 .ncx，且 3 个密钥流
+#                          函数叠加 +vm_virtualize，即两层保护）
+#
+# ⚠️ 取舍如实：留在 .text 后算法逻辑静态可读。但决定「能不能解开全部
+#    字符串」的是**密钥**（包壳时来自 ncg_strkey，明文常量编不进来），
+#    算法本身是公开的 splitmix64 / ChaCha20。
+NC_STRDEC_IN_NCX=0
+# NC_STRDEC_PROFILE（2026-11-25）：是否编入字符串解密耗时统计。
+# 默认 0 = 不编。置 1 后 nc_strdec_jni.c 统计 calls / decrypt 耗时 /
+# nc_ensure_key 耗时，每 500 次解密打一条 logcat（tag=sd）。
+# ⚠️ 调试包专用，产物不可发布（AGENTS §2.6：调试开关一律编译期）。
+NC_STRDEC_PROFILE=${NC_STRDEC_PROFILE:-0}
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sigcheck) WANT_SIGCHECK=1; shift ;;
@@ -1571,6 +1590,13 @@ if [[ $WANT_VMP -eq 1 ]]; then
 fi
 ndk_write_mk "$WORK/project/jni" nc "$GUARD_LIB_DIR" "$_MK_OBF_SPEC"   # mk 模板唯一来源（报错十一），模块名固定 nc
 
+if [[ "${NC_STRDEC_PROFILE:-0}" == "1" ]]; then
+  echo ""
+  echo "⚠️⚠️ NC_STRDEC_PROFILE=1：编入字符串解密耗时统计（logcat tag=sd）"
+  echo "     产物含统计计数与日志串，【不可发给终端用户】"
+  echo ""
+fi
+
 # ── 通用段标记（2026-10 设施化第2层）──────────────────────────────
 # 让 dex2c 转译产物吃上 .ncx 加密：用规则把 JNI 函数打进加密段。
 # 位置必须在 ndk_build 【之前】——标记器改的是源码，编译后才跑就晚了。
@@ -1785,7 +1811,27 @@ fi
 # 不标（调用方 / 门槛函数，标了会死锁或纯属浪费）：
 #   nc_strdec_has_key      只是读一个 flag
 #   nc_strdec_set_key      只在 <clinit> 调一次
+#
+# ── 2026-11-25：默认【不】进 .ncx（NC_STRDEC_IN_NCX=0）────────────────
+#
+# 真机实测（同一 App 两个包，只差字符串加密，启动后 10 秒采样）：
+#   无字符串加密 0.69s CPU  ／  有字符串加密 16.77s CPU  （差 24 倍）
+# 而文档记录的整包解密增量只有 0.15~0.77ms —— 相差四个数量级。
+#
+# 本段是加密强度与启动开销的取舍点，不是"算法该不该藏"的判断题：
+#   · decrypt/b64_decode/utf8_to_utf16 是公开编码算法，藏它收益本就低
+#   · 3 个密钥流函数同时在 .ncx 又打了 +vm_virtualize → 两层开销叠加
+# 所以默认让 6 个函数留在 .text（只受 Amice 混淆），需要强度时用
+#   NC_STRDEC_IN_NCX=1
+# 恢复旧行为（全部进 .ncx + 3 个密钥流函数 VMP）。
+#
+# ⚠️ 取舍代价如实：留在 .text 后算法逻辑静态可读。但真正决定
+#    "能不能解密全部字符串"的是**密钥**（包壳时来自 ncg_strkey，
+#    明文常量编不进来），不是算法 —— 算法是公开的 splitmix64/ChaCha20。
 if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
+  if [[ "${NC_STRDEC_IN_NCX:-0}" != "1" ]]; then
+    echo "[mark] 解密桩算法层【不进】.ncx（默认，NC_STRDEC_IN_NCX=0）"
+  else
   echo "[mark] 段标记：纯 C 解密桩【算法层】→ .ncx"
   # ── VMP（2026-11-11）：--vmp 时同时打 +vm_virtualize ──────────────
   # 这 5 个函数是 stringenc 的全部算法（Base64/密钥流/UTF-8），
@@ -1795,24 +1841,20 @@ if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
   # ⚠️ 走 so_section_mark 的 --annotate 而不是手写 attribute：
   #    它会自动去掉 used/retain（那两个会产生 @llvm.used → Amice 跳过）。
   # ═══ VMP 范围实验开关（2026-11-11）═══════════════════════════════
-  # NC_VMP_CSTUB=0（默认）→ 不给 stringenc 算法层打 VMP 注解
-  # NC_VMP_CSTUB=1         → 打（旧行为，实测真机栈溢出）
+  # NC_VMP_CSTUB=1（默认，见 291 行）→ 给 3 个密钥流函数打 VMP 注解
+  # NC_VMP_CSTUB=0                   → 不打（回到"算法层只受锁箱保护"）
   #
-  # 为什么默认关：真机实测（sigcheck+dex2c+stringenc+vmp，两个 algo 档
-  # 都试过）应用启动页 SIGSEGV/SEGV_ACCERR，栈溢出：
-  #   guard page 0x...e000-0x...f000 权限 ---
-  #   崩溃 sp 恰在 guard page 上边界（再压 16B 即越界）
-  #   x29 与 sp 相差整整 1.01MB
-  # 而同一份代码只 VMP sigcheck（derive_expected）则完全正常。
+  # 只挑 3 个而不是全 6 个的原因（2026-11-11 真机实测）：6 个函数一起
+  # VMP → 启动页 SIGSEGV/SEGV_ACCERR 栈溢出（Amice 的 spill frame 是栈
+  # 分配，ART 线程池线程只有约 1MB 栈）。只挑代码短、寄存器需求低的
+  # 3 个密钥流函数风险小得多。
   #
-  # 注意：这不是"stringenc 不能 VMP"的普适结论 —— nox 自己的解密链
-  # 14 个函数全上 VMP 且真机可用。差别在字节码规模：这里 5 个函数
-  # 含 Base64/UTF-8/密钥流，字节码远长于 nox 那些 19~31 条指令的小函数。
-  # 根因待查（dispatcher 内 61 处 bl 回自身，疑似递归分派）。
+  # ⚠️ 这不是「stringenc 不能 VMP」的普适结论 —— nox 自己的解密链 14 个
+  #    函数全上 VMP 且真机可用。差别在字节码规模。
   if [[ $WANT_VMP -eq 1 && "$NC_VMP_CSTUB" == "1" ]]; then
     echo "[mark] VMP: 密钥流函数稍后单独打注解（NC_VMP_CSTUB=1）"
   elif [[ $WANT_VMP -eq 1 ]]; then
-    echo "[mark] VMP: 纯 C 桩算法层【不】打注解（NC_VMP_CSTUB=0，实测真机栈溢出）"
+    echo "[mark] VMP: 纯 C 桩算法层【不】打注解（NC_VMP_CSTUB=0）"
   fi
   # 一次调用同时做两件事（2026-11-11 改）：
   #   --pattern           → 6 个算法函数全部进 .ncx（受锁箱保护）
@@ -1837,7 +1879,7 @@ if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
     echo "❌ 纯 C 解密桩段标记失败 —— 算法将以明文留在 .text" >&2
     exit 1
   }
-  # 静默失防守卫：算法层 5 个函数必须全部标上。
+  # 静默失防守卫：算法层 6 个函数必须全部标上。
   # 少标一个 = 那部分算法明文可读，而这不会有任何运行期症状
   # （功能完全正常），属于最难发现的"假绿"。
   # 计数用固定串（-F）：'section(".ncx")' 里的引号/点号在正则下都要转义，
@@ -1852,6 +1894,7 @@ if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
     exit 1
   fi
   echo "[mark] 完成：$_cstub_marked 处 .ncx 标记（纯 C 桩算法层）"
+  fi
 fi
 
 log_step 4 6 "NDK 编译"

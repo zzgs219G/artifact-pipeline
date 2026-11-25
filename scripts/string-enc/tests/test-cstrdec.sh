@@ -630,6 +630,26 @@ VEOF
   fi
 fi
 
+# ── 段标记策略（2026-11-25）─────────────────────────────────────────
+# 为什么钉住：这是「加密强度 vs 启动开销」的取舍点，默认值改过一次
+# （6 个算法函数进 .ncx → 默认不进）。没有断言的话，后续改动顺手把
+# 它改回去不会有任何症状 —— 真机上只表现为主页卡 8 秒，没人会想到
+# 是 stringenc 的段标记。
+echo "[段标记策略]"
+PROT="$ROOT/scripts/pipelines/protect.sh"
+if [[ -f "$PROT" ]]; then
+  chk "NC_STRDEC_IN_NCX 默认 0（不进 .ncx）" \
+      "$(grep -cE '^NC_STRDEC_IN_NCX=0$' "$PROT")" "1"
+  # 开关打开时才走标段路径（判断式必须存在，否则开关失效）
+  chk "开关打开时仍有 .ncx 标段调用" \
+      "$(grep -c 'section \.ncx' "$PROT")" "1"
+  # 计数守卫必须仍在（少标一个不许静默放行）
+  chk "标段计数守卫仍在（-lt 6）" \
+      "$(grep -c '\-lt 6' "$PROT")" "1"
+else
+  bad "找不到 $PROT"
+fi
+
 echo
 echo "────────────────────────────────────────"
 if [[ $FAIL -eq 0 ]]; then
