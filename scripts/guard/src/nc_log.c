@@ -95,24 +95,35 @@ static int nc_log_mkdir_target(const char *file_path)
     const char *slash = strrchr(file_path, '/');
     char base[512];
     size_t dl;
-    int rc;
+    int rc, e1 = 0, e2 = 0;
 
     if (!slash) return -1;
     snprintf(dir, sizeof(dir), "%.*s", (int)(slash - file_path), file_path);
     if (access(dir, W_OK) == 0) return 0;        /* 已就绪，最常见路径 */
 
-    /* 先建 <pkg>/（去掉末尾 /files） */
+    /* ① 先建 <pkg>/（去掉末尾的 "/files"）。
+     * ⚠️ 2026-11-25 实测修 bug：原来写 `strcmp(base + dl - 6, "/files")`，
+     *    而 "files" 是 5 字符 + NUL —— base+dl-6 指向的是 "files"，
+     *    拿去和 "/files"（6 字符）比永不相等 → 这个分支从来没执行过。
+     *    正确偏移是 dl - 5。 */
     snprintf(base, sizeof(base), "%s", dir);
     dl = strlen(base);
-    if (dl > 6 && strcmp(base + dl - 6, "/files") == 0) {
-        base[dl - 6] = '\0';
+    if (dl > 5 && strcmp(base + dl - 5, "files") == 0 && base[dl - 6] == '/') {
+        base[dl - 6] = '\0';                     /* → .../com.nivii.app */
         rc = mkdir(base, 0770);
-        /* EEXIST 是正常的（系统已建），EACCES 说明父目录系统托管 —— 等下次 */
-        if (rc != 0 && errno != EEXIST) return -1;
+        if (rc != 0 && errno != EEXIST) e1 = errno;
     }
+    /* ② 再建 .../files */
     rc = mkdir(dir, 0770);
-    if (rc != 0 && errno != EEXIST) return -1;
-    return (access(dir, W_OK) == 0) ? 0 : -1;
+    if (rc != 0 && errno != EEXIST) e2 = errno;
+    if (access(dir, W_OK) != 0) {
+        /* 打真实 errno —— 上一次就是靠"加诊断"才定位到 pkg_rc=13。 */
+        __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+            "nc_log: mkdir failed pkg_errno=%d files_errno=%d (%s)",
+            e1, e2, dir);
+        return -1;
+    }
+    return 0;
 }
 #endif /* !SIGCHECK_HOST_TEST (真机专用的路径/mkdir 辅助) */
 
@@ -284,11 +295,23 @@ void nc_log_summary(int rc, int routes, int verdict)
 
 static void *nc_log_late_thread(void *arg)
 {
+    int i;
     (void)arg;
-    sleep(1);            /* 1s：给系统建目录留时间 */
-    if (!nc_log_ready()) {
-        sleep(1);        /* 再等 1s（总 2s）：低端机首次启动可能更慢 */
+    /* ⚠️ 2026-11-25 真机实测：files/ 目录比 <pkg>/ 晚得多 ——
+     *   08:01:43.410 constructor
+     *   08:01:44.032 系统建 <pkg>/ 与 cache/
+     *   08:02:00.928 files/ 才出现（17 秒后，由第一次实际写入触发）
+     * 原来只试 1s + 1s = 2 秒，必然错过。
+     *
+     * 现在改成【最多 8 次、每次间隔 2 秒】（约 16 秒），覆盖实测的 17 秒
+     * 最坏情况；一旦成功就立刻停。为什么不用更密的重试：每次都要 access()
+     * 两个路径，2 秒粒度对"首次启动补日志"这个场景完全够，且不占 CPU。
+     *
+     * ⚠️ 线程是 detached，进程退出自然回收，不需要 join。 */
+    for (i = 0; i < 8; i++) {
+        sleep(2);
         nc_log_open();
+        if (nc_log_ready()) break;
     }
     if (nc_sum_done) {
         nc_log_line("I",
