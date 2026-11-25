@@ -198,6 +198,9 @@ def main(apk):
     import zipfile as _zf, shutil as _sh, os as _os
     with _zf.ZipFile(apk) as z:
         blob = z.read('AndroidManifest.xml')
+    if b'p\x00r\x00o\x00f\x00i\x00l\x00e\x00a\x00b\x00l\x00e\x00' in blob:
+        print('[profileable] 已存在，跳过（幂等）')
+        return
     tmp = apk + '.mf'
     open(tmp, 'wb').write(blob)
     _inject(tmp)
