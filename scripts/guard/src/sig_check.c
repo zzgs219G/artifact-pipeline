@@ -1887,7 +1887,6 @@ static int sig_collect_fp(unsigned char actual[32]) {
             LSGI(LSG_ROUTE_SUM, "ok=%d/%d mismatch=%d",
                  ok, SIG_ROUTE_NUM, mismatch);
             /* 记入首次启动摘要（纯整数，不存日志文本 —— 见 nc_log.h） */
-            nc_log_summary(-2, ok, -1);
         }
 
         /* ── 判定（2026-11-25 重写）──────────────────────────────────
@@ -1952,7 +1951,6 @@ static int sig_collect_fp(unsigned char actual[32]) {
                     /*LSG:ROUTE_TRUSTED_OK|【通过】可信路线(内联svc)与基准一致,主人自己在场,放行*/
                     LSGI(LSG_ROUTE_TRUSTED_OK, "route=%s",
                          sig_route_name(trusted_from));
-                    nc_log_summary(-2, -1, 1);   /* 摘要：裁决=放行(主人在场) */
                     memcpy(actual, trusted_fp, 32);
                     return 0;
                 }
@@ -2017,10 +2015,10 @@ static void sig_verify(void) {
      * 保证任何未显式设置的失败路径都不会被"轻处理"。 */
     int killvar = 2;
 
-    /* 文件日志开关探测（2026-11-25：委托 nc_log 模块，可重试非一次性）。
-     * ⚠️ 首次启动这里通常失败 —— 日志目录 /…/<pkg>/files 由 system_server
-     * 建立，晚于本 constructor。失败不落死，constructor 末尾的
-     * nc_log_late_flush() 会在 1~2 秒后补写一条结论摘要。 */
+    /* 文件日志开关探测（委托 nc_log 模块）。
+     * ⚠️ 首次启动时日志目录 /…/<pkg>/files 还不存在（它由第一次文件写入
+     * 隐式创建），nc_log_open() 内部会等最多 2 秒 × 5 轮；等到了就正常写，
+     * 等不到则该条日志打到 logcat 并带 [no-file] 标记。 */
     nc_log_open();
 
     /* ⚠️ 2026-11-25 启动分隔线（用户反馈：多个包的日志追加在同一文件里，
@@ -2060,7 +2058,6 @@ static void sig_verify(void) {
         LOGI_S("nc: ok");   /* so加固2026-10: 原文 "signature verify ok",改中性 */
         /*LSG:VERIFY_OK|【通过】指纹比对一致,签名校验通过,放行*/
         LSGI0(LSG_VERIFY_OK);
-        nc_log_summary(-2, -1, 1);   /* 摘要：裁决=放行 */
         return;
     }
     LOGE_S("nc: mm");   /* so加固2026-10: 原文 "signature mismatch (actual vs expected...)",排障走上方 fp 行 */
@@ -2077,17 +2074,6 @@ fail:
 /* dlopen 后最先执行的入口（早于 JNI_OnLoad 与一切 Java 代码） */
 __attribute__((constructor)) static void sig_check_entry(void) {
     sig_verify();
-    /* ⚠️ 2026-11-25：首次启动的补写（用户明确要求"一两秒就出结果"）。
-     *
-     * 为什么需要：本 constructor 跑在 system_server 建 <pkg>/files 目录
-     * 之前，那几十毫秒的日志必然落不了盘（实测 mkdir 得 EACCES 13）。
-     * 已就绪时（第二次启动及之后）本调用直接返回，零成本；
-     * 未就绪时起一个 detached 线程，1~2 秒后重试探测并写一条摘要。
-     *
-     * ⚠️ 只补【摘要】不补全文：缓冲全文会让解密后的明文常驻 .bss，
-     *    Frida Memory.scan 可整块读走 —— 与"字符串必须密文化"的纪律冲突。
-     *    摘要只含 3 个整数（rc / 路数 / 裁决码），泄露面约 16 字节。 */
-    nc_log_late_flush();
 }
 
 /* ── 宿主端测试钩子（仅 SIGCHECK_HOST_TEST 编译时启用，Android 构建不受影响）── */
