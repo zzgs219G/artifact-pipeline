@@ -288,7 +288,11 @@ WANT_VMP_VM=0
 # 那几个字节码远长于 nox 那些 19~31 条指令的小函数。
 #
 # 设 0 可整体关闭（回到"algorithm 层只受锁箱保护"）。
-NC_VMP_CSTUB=1
+# 2026-11-26 临时改 0（对照实验）：隔离「VMP 注解」与「.ncx 段加密」两个
+# 变量 —— 你的包（=1）16.5s CPU / 8 秒才发网络请求，23:21 包（算法不在
+# .ncx、无 VMP 注解）2.49s。本包 =1→0 后与你的包只差 VMP 注解一个变量。
+# 实验完成后必须改回 1。
+NC_VMP_CSTUB=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sigcheck) WANT_SIGCHECK=1; shift ;;
