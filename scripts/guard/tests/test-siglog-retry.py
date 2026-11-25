@@ -81,11 +81,19 @@ def main():
         (ok if gone not in code and gone not in sc and gone not in ec
          else bad)(f"T6 {gone}（已砍掉的复杂度）未复活")
 
+    # ── T6b 外部存储根动态探测（多用户/工作资料兼容）──────────────────
+    # 2026-11-25 兼容性审计第 1 条：写死 /storage/emulated/0 在多用户
+    # （Android 4.2+）/ 工作资料（Android 5+）下会指到别人的空间。
+    (ok if "nc_log_ext_root" in code
+     else bad)("T6b 有外部存储根动态探测（多用户兼容）")
+    (ok if "storage/self/primary" in c
+     else bad)("T6c 优先用 /storage/self/primary（当前用户主存储）")
+
     # ── T7 不缓冲日志文本（不引入明文常驻内存）────────────────────────
     (ok if not re.search(r"static\s+char\s+\w*buf\w*\[\s*\d{4,}\s*\]", code)
      else bad)("T7 不缓冲日志文本（无大块明文常驻）")
 
-    print(f"\n=== 结果: {11 - len(fails)} 通过, {len(fails)} 失败 ===")
+    print(f"\n=== 结果: {13 - len(fails)} 通过, {len(fails)} 失败 ===")
     return 1 if fails else 0
 
 
