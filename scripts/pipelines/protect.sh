@@ -1856,6 +1856,46 @@ if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
     exit 1
   fi
   echo "[mark] 完成：$_cstub_marked 处 .ncx 标记（纯 C 桩算法层）"
+
+  # ── JNI 服务层（nc_strdec_jni.c）→ annotate("+no_obf")（2026-11-26）──
+  #
+  # 为什么：三个混淆 pass（mba/param_aggregate/vm_flatten）是编译期的，
+  #   按函数处理，不看它落在哪个段 —— .ncx 段级跳过（AMICE_OBF_SKIP_
+  #   SECTIONS）只保护算法层，管不了本文件这些留在 .text 的函数。
+  # 真机实测（同输入、四项全开、桩 VMP 关）：
+  #   服务层被混淆 11.57s CPU / 混淆跳过 2.89s → 混淆贡献 ≈ 8.7s。
+  #   主页解密 3000+ 条字符串 × 每条完整走一遍服务层（查缓存/JNI 取串/
+  #   分配内存），单函数被 mba+vm_flatten 撑大 3~5 倍 → 累积出 8.7s。
+  # 安全代价（如实）：这些函数不含秘密 —— 秘密是密钥（壳 so 的
+  #   ncg_strkey / .ncxr 常量）与算法（公开的 splitmix64/ChaCha20）。
+  #   服务层只是"搬运工"，混淆它防不了任何攻击，只拖慢每次解密。
+  #
+  # 范围 = 热路径 5 个：入口 / 取串 / 缓存读写 / 失败兜底。
+  # 不标（保留混淆）：nc_ensure_key / nc_find_shell_symbol / nc_phdr_cb /
+  #   nc_find_apk_path / nc_set_key_with_cert / nc_strdec_jni_set_key ——
+  #   密钥查找链，低频（仅首次），有真实防护价值。
+  echo "[mark] JNI 服务层 → annotate(\"+no_obf\")（热路径 5 函数，防 8.7s 混淆税）"
+  # ⚠️ 正则两处纪律（首次实跑踩过）：
+  #   ① 尾部 [ \t]*\( 必须紧跟函数名 —— 否则命中 nc_jni_fail 的【调用行】
+  #      （`return nc_jni_fail(env, NULL);`），把 attribute 插进函数体语句
+  #      之间 → 编译错误。用「行首到函数名之间只允许 static/类型/星号」
+  #      的贪 nhi_characterization 排除 return 前缀。
+  #   ② 显式排除含 return 的行（双保险）。
+  python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec_jni.c" \
+    --pattern '^[ \t]*((?:static[ \t]+)?[A-Za-z_][A-Za-z0-9_ \*]*[ \t]+\**((nc_strdec_jni_decrypt|nc_jstr_chars|nc_cache_get|nc_cache_put|nc_jni_fail))[ \t]*\()' \
+    --section ".text" \
+    --annotate "+no_obf" \
+    -v 2>&1 | sed 's/^/  [mark] /' || {
+    echo "❌ JNI 服务层 no_obf 标记失败（不阻断构建，只影响性能）" >&2
+  }
+  _jni_marked=$(grep -cF 'annotate("+no_obf")' "$_cstub_jni_dst/nc_strdec_jni.c" 2>/dev/null || true)
+  _jni_marked="${_jni_marked:-0}"
+  if [[ "$_jni_marked" -lt 5 ]]; then
+    echo "❌ JNI 服务层 no_obf 只命中 ${_jni_marked} 处（应为 5：decrypt入口/jstr_chars/cache_get/cache_put/jni_fail）" >&2
+    echo "   → nc_strdec_jni.c 的函数头形态变了，正则已脱节（不阻断，但主页会慢 8.7s）" >&2
+  else
+    echo "[mark] 完成：$_jni_marked 处 +no_obf（JNI 服务层热路径）"
+  fi
 fi
 
 log_step 4 6 "NDK 编译"
