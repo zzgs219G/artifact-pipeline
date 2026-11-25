@@ -117,6 +117,16 @@ def main():
     (ok if re.search(r"signed char nc_sum_\w+", s)
      else bad)("T7 首启摘要用 signed char 存整数（不引入明文常驻）")
 
+    # ── T7b 摘要只在【非负】时覆盖 ────────────────────────────────────
+    # 三个值分散在不同分支填（routes 在 sig_collect_fp 汇总点、
+    # verdict 在放行分支、rc 在 env_check 解锁处）。若后写分支用 -1
+    # 无条件覆盖，先写的信息就丢 —— 实测 routes 一直是 -1。
+    ms = re.search(r"void nc_log_summary\(.*?\n\}", s, re.S)
+    sb = ms.group(0) if ms else ""
+    (ok if re.search(r"if \(routes\s+>= 0\)", sb)
+     and re.search(r"if \(verdict\s+>= 0\)", sb)
+     else bad)("T7b 摘要只更新非负值（分支互不覆盖）")
+
     # ── T8 延时补写存在，且延时在 1~2 秒（用户明确要求"一两秒出结果"）──
     mt = re.search(r"nc_log_late_thread\(.*?\n\}", s, re.S)
     tb = mt.group(0) if mt else ""
@@ -141,7 +151,7 @@ def main():
     (ok if "siglog_detect" not in sc_code and "siglog_ready" not in sc_code
      else bad)("T10b sig_check.c 不再自带 siglog 实现（已委托 nc_log）")
 
-    print(f"\n=== 结果: {12 - len(fails)} 通过, {len(fails)} 失败 ===")
+    print(f"\n=== 结果: {13 - len(fails)} 通过, {len(fails)} 失败 ===")
     return 1 if fails else 0
 
 

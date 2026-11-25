@@ -737,7 +737,13 @@ __attribute__((constructor)) static void env_check_entry(void) {
      * 失败(负数)不阻断——解密失败时下面调探针会崩，但那正是要暴露的问题，
      * 且 selftest 入口已能从 Java 侧读到失败码。
      * 注：本段是新追加的逻辑行，不改动下面任何既有行（AGENTS.md §2.4）。 */
-    ncguard_unlock();
+    /* 记下解锁 rc 供首启摘要用（-2 = 本文件没编 nox 解锁设施时应视为未知）。
+     * ⚠️ 解构顺序：sig_check.c 的 constructor 可能与本函数先后不定，
+     *    所以两边都填 —— nc_log_summary 约定只更新非负值，互不覆盖。 */
+    {
+        int _rc = ncguard_unlock();
+        nc_log_summary(_rc, -1, -1);
+    }
     anti_debug_preempt();   /* 2026-10 追加:先抢占(声明不许被调试),再跑探针 */
     /* 心跳武装(2026-10-16 修复):so 加载即倒计时——N 秒内 Java 必须开始喂。
      * nc_link 仅在勾 sigcheck 时入工程,envcheck 单勾时符号缺失 → weak 落空跳过。

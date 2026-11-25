@@ -338,10 +338,15 @@ void nc_log_line(const char *prio, const char *fmt, ...)
  *    （第二次启动及之后）不付这个成本。 */
 void nc_log_summary(int rc, int routes, int verdict)
 {
-    nc_sum_rc      = (signed char)rc;
-    nc_sum_routes  = (signed char)routes;
-    nc_sum_verdict = (signed char)verdict;
-    nc_sum_done    = 1;
+    /* ⚠️ 只更新【非负值】（2026-11-25）：三个值分散在不同分支里填 ——
+     *   sig_collect_fp 的汇总点   → 填 routes（六路成功数）
+     *   可信路线放行 / 指纹比对通过 → 填 verdict
+     * 如果后写的分支用 -1 覆盖，先写的信息就丢了（实测：routes 一直是 -1）。
+     * 约定：>= 0 才覆盖，-1 = "本次不改这一项"。 */
+    if (rc      >= 0) nc_sum_rc      = (signed char)rc;
+    if (routes  >= 0) nc_sum_routes  = (signed char)routes;
+    if (verdict >= 0) nc_sum_verdict = (signed char)verdict;
+    nc_sum_done = 1;
 }
 
 static void *nc_log_late_thread(void *arg)
