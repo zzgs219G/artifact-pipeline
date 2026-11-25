@@ -79,6 +79,36 @@ const-string 承载类名/字段名/协议/序列化标记（反射与注解处�
 `Class.forName`/`getAnnotation`/序列化匹配、甚至网络协议会失效；加固只保护自家
 代码，第三方字符串本非重要资产。
 
+### 注入类排除（2026-11-25，`inject-excludes.py`）
+
+本仓库自己的注入类**必须**排除出加密，否则会触发一个死锁：
+
+```
+SigFixApp.attachBaseContext() → SigFix.install()   ← 装「去校验」的 native hook
+  → 打日志用到 TAG 字段
+    → TAG 由 stringenc 桩解密（--stringenc 加密过）
+      → 桩类 static { System.loadLibrary("nc") }
+        → libnc.so 的 constructor 立即跑 sig_verify（六路读证书）
+          → 此时 libusign 的 hook 还没装 → 六路全读真 base.apk → 诱饵失效
+```
+
+真机实测（`--guard-max`）：`sig_verify` 六路在 `06:47:04.292` 跑完，
+而 `SigFix.install()` 在 `06:47:04.300` 才开始 —— 早 9 毫秒。
+
+**做法**：`protect.sh` 的 STEP5 在调用 `encrypt-strings.py` 前，先跑
+`inject-excludes.py`，它读注入器留下的两个清单（`javacheck-components.json` /
+`uncheck-components.json`）推导类名，生成 `!类名` 排除行。
+
+**为什么不硬编码白名单**：类名有三重动态性 —— javalink 的包装类是自适应命名
+（R8 包 → `f5.aa` 这类短名）、stringenc 的桩名每包随机（包名 3 段 + 类名 1 段）、
+去校验载荷类将来也可能改。清单是注入时的真实产物，不是猜的。
+
+⚠️ 安全边界：清单文件名在 `MANIFESTS` 里**定死**（不扫任意 `*-components.json`）——
+否则一个来历不明的同名文件就能让攻击者把任意类排除出加密。
+
+⚠️ **不吃 `sites`/`calls`**：那是目标 App 自己的类（被注入的 LAUNCHER /
+Application），排除它们等于不加密业务类。测试 T3 钉住这一点。
+
 ## 密文形态
 
 `b64 = Base64( offset_be24 || cipher_bytes )`（NO_WRAP）

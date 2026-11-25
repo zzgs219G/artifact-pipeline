@@ -58,6 +58,18 @@ ok=6/6 mismatch=1
 【失败】多路证书指纹不一致(疑似 APK 读取被劫持)
 ```
 
+日志写到 `/storage/emulated/0/Android/data/<包名>/files/sigcheck_log.txt`
+（哨兵 `touch /storage/emulated/0/xixin_debug` 开启）。
+
+⚠️ **首次启动时目录可能还不存在**：`files/` 由第一次文件写入隐式创建，而
+本 so 的 constructor 跑在那之前。`nc_log` 的处理是「存在就写，不存在就起
+后台线程 2 秒后再写一次」；期间该条日志打到 logcat 并标 `[no-file]`。
+实测通常 2 秒内就绪（干净安装 → 只启动一次 → 2 秒内出文件）。
+
+⚠️ **`nc_log` 的任何函数都不许 sleep** —— 它由 constructor 里的 `sig_verify`
+调用，而 constructor 跑在 App 主线程上；在那里 sleep 会把启动卡住
+（2026-11-25 真机事故：App 点了图标进不去）。"等 2 秒"只在后台线程里。
+
 ⚠️ **"哪一路是诱饵"按多数派判定**，不能按"第一个成功的"
 （被劫持的往往正是最先成功的 `open()`；以它为基准会把 5 路真货全标错，
 实测踩过）。
@@ -90,6 +102,8 @@ guard/
 │   ├── env_check.c         环境检测主体（13 探针 + 常驻复查）
 │   ├── env_probes.c        探针实现（特征串在这里，LSGS 密文化）
 │   ├── env_internal.h      探针声明
+│   ├── nc_log.c            文件日志【唯一实现】（sig_check/env_check 共用）
+│   ├── nc_log.h            日志契约：nc_log_open / nc_log_line / nc_log_ready
 │   └── nc_demangle_stub.c  __cxa_demangle 的最小替代
 ├── hash/                 make-sig-hash.sh（提证书指纹 → sig_hash.h）
 │                         extract-derive.py（从生成侧抽取派生公式，供测试用）
