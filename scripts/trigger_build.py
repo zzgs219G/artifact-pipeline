@@ -805,9 +805,9 @@ def main() -> int:
                          "与云端生产一致。⚠️ 单 ABI 产物不完整：v7a 设备会装不上，"
                          "不可发布。云端构建请留空。")
     ap.add_argument("--debug-report", action="store_true",
-                    help="【调试】编入 so 自检报告：装机后可读 ncguard_log.md，"
-                         "看段熵/VMP/崩溃定位，不用反汇编。"
-                         "⚠️ 产物不可分发（多了可被哨兵文件或环境变量触发的报告模块）。")
+                    help="【调试】编入 so 自检报告（产物不可分发）。需 --direct（relay 会静默丢字段）")
+    ap.add_argument("--strdec-profile", action="store_true",
+                    help="【调试】编入字符串解密耗时统计（logcat tag=sd）。需 --direct")
 
     g = ap.add_argument_group("模块勾选")
     g.add_argument("--sigcheck", action="store_true", help="签名校验")
@@ -1098,6 +1098,10 @@ def _do_build(args, config, token, key, base_name):
         payload["no_nox"] = True
     if args.debug_report:
         payload["debug_report"] = True
+    # strdec_profile（2026-11-26）：解密耗时统计。仅 --direct 模式可达
+    # （relay 只转发认识的字段）。云端调试出包用 --direct --strdec-profile。
+    if getattr(args, "strdec_profile", False):
+        payload["strdec_profile"] = True
     if args.abi:
         # 单 ABI 是本地/CI 调试专用的加速开关，只在 --direct 模式有意义
         # （relay 侧只转发它认识的字段，新参数会被静默丢弃）。
