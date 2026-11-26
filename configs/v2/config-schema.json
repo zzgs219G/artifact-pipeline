@@ -23,14 +23,14 @@
           "options": [
             {
               "value": "both",
-              "label": "Java + native",
-              "desc": "默认。",
+              "label": "完整",
+              "desc": "Java 层 + 读取 APK 重定向。覆盖面最广。",
               "arg_on": ""
             },
             {
               "value": "java",
-              "label": "仅 Java",
-              "desc": "WebView 类 App 出问题时用。",
+              "label": "仅 Java 层",
+              "desc": "只走 PackageManager，不接管文件读取。",
               "arg_on": "--java-only"
             }
           ]
