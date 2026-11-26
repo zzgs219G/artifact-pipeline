@@ -96,6 +96,25 @@ static uint64_t nc_fnv1a(const char *s, size_t n)
         h ^= (uint8_t)s[i];
         h *= 0x100000001b3ULL;
     }
+    /* ⚠️ 2026-11-26 最终定案：必须做一次终混合（splitmix64 finalizer）。
+     *
+     * 真机实测（全开+stringenc，CLOCK_THREAD_CPUTIME 计时）：
+     *   total=12477ms，其中 cacheget=10715ms（86%）
+     *   probes=848449 / 3500 calls → 平均每次查询探测 242 个槽
+     *   而装载因子只有 3500/32768 = 10.7%（不该出现这么深的探测）
+     *
+     * 根因：FNV-1a 的**低位**质量差。我们的 key 是 Base64 密文，
+     * 同一个类的字符串前缀高度相同、只在尾部不同 —— 而 FNV 的
+     * 差异主要落在高位，低位（h & 0x7FFF）几乎不散开 → 聚簇成链。
+     *
+     * 修法：终混合打散位分布（与原值一一对应，不改变相等性判断）。
+     * 常数取自 splitmix64 标准 finalizer：全 1 位扩散 + 两次乘法，
+     * 保证任意单个输入位的变化都能影响输出的全部 64 位。 */
+    h ^= h >> 30;
+    h *= 0xbf58476d1ce4e5b9ULL;
+    h ^= h >> 27;
+    h *= 0x94d049bb133111ebULL;
+    h ^= h >> 31;
     return h ? h : 1;       /* 保证非 0（0 是空槽标记） */
 }
 
@@ -203,14 +222,15 @@ void nc_strdec_profile_dump(void)
                         nc_prof_mallocns / 1e6, nc_prof_newstr / 1e6,
                         nc_prof_cacheput / 1e6, nc_prof_keyns / 1e6);
     __android_log_print(ANDROID_LOG_INFO, NC_SD_TAG,
-                        "prof2: worst=%.1fms fullscan=%lu probes=%lu avg=%.1f gcalls=%lu total=%.1fms",
+                        "prof2: worst=%.1fms fullscan=%lu probes=%lu avg=%.1f gcalls=%lu total=%.1fms n=%d load=%.1f%%",
                         nc_prof_worst_us / 1000.0,
                         nc_prof_full_scan,
                         nc_prof_probes,
                         nc_prof_calls
                             ? (double) nc_prof_probes / (double) nc_prof_calls
                             : 0.0,
-                        nc_prof_getchars_n, nc_prof_total / 1e6);
+                        nc_prof_getchars_n, nc_prof_total / 1e6,
+                        nc_cache_n, 100.0 * nc_cache_n / (double) NC_CACHE_CAP);
 }
 #endif
 
