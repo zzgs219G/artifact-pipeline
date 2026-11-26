@@ -69,8 +69,11 @@ chk("openat2/statx/opendir 各自独立成档（4/5/6）",
         for n, fn in ((4, 'openat2'), (5, 'statx'), (6, 'opendir'))))
 # 核心档的 7 个函数必须在 if 之前注册（无条件）
 core_block = c.split("if (lv < NC_HOOK_LEVEL_FULL)")[0]
+# 别名（open64/fopen64/openat64）走 hook_one_opt，本体走 hook_one —— 两者都算"注册"
+_tail = core_block.split("patch_all")[-1]
 for fn in ("open", "open64", "__open_2", "fopen", "fopen64", "access", "stat"):
-    chk(f"核心档无条件注册 {fn}", f'hook_one("{fn}"' in core_block.split("patch_all")[-1])
+    chk(f"核心档无条件注册 {fn}",
+        f'hook_one("{fn}"' in _tail or f'hook_one_opt("{fn}"' in _tail)
 
 print("\n[③ Java 侧透传]")
 chk("native 声明带 int level",

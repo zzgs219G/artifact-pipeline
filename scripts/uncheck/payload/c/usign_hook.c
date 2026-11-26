@@ -56,16 +56,14 @@ static char s_rep_path[PATH_MAX];
 static size_t s_apk_len = 0;
 static volatile int s_installed = 0;
 
-/* hook 分层（2026-11-27）。数值越大注册的接口越多，每层是上一层的超集。
- * 定义放在这里而不是枚举，是为了让 JNI 侧直接传 int，不做字符串解析。 */
-#define NC_HOOK_LEVEL_CORE  1   /* open/fopen/access/stat —— 商业 App 主路径 */
-#define NC_HOOK_LEVEL_FULL  2   /* + at 家族 + readlink/readlinkat */
-/* 3 = 下面三个逐个叠加的起点（等价旧"全量"）。4/5/6 是定位用的细分档，
- * 每档只多一个接口 —— 见 patch_all 里第 3~5 层的说明。 */
-#define NC_HOOK_LEVEL_STEP  3   /* 档 3：与档 2 相同（兼容旧值） */
-#define NC_HOOK_LEVEL_OPENAT2 4 /* + openat2 */
-#define NC_HOOK_LEVEL_STATX   5 /* + statx */
-#define NC_HOOK_LEVEL_ALL   6   /* + opendir（默认，覆盖最广） */
+/* hook 档位。数值越大注册的接口越多，每档是上一档的超集。
+ * 用 int 而非枚举：JNI 侧直接传数字，不做字符串解析。详见文档 §2.3。 */
+#define NC_HOOK_LEVEL_CORE    1   /* open/fopen/access/stat */
+#define NC_HOOK_LEVEL_FULL    2   /* + at 家族 + readlink */
+#define NC_HOOK_LEVEL_STEP    3   /* 同 2（兼容旧值） */
+#define NC_HOOK_LEVEL_OPENAT2 4   /* + openat2（实际不注册，libc 无此符号） */
+#define NC_HOOK_LEVEL_STATX   5   /* + statx */
+#define NC_HOOK_LEVEL_ALL     6   /* + opendir（默认） */
 static int s_hook_level = NC_HOOK_LEVEL_ALL;
 
 static inline int is_target_apk(const char *path) {
@@ -330,22 +328,18 @@ static DIR *proxy_opendir(const char *path) {
 
 // xhook_register 的 pattern 传 ".*" —— 匹配所有已加载和后续加载的 so。
 // 回调里靠 is_target_apk 判断，不匹配的立即透传，开销可忽略。
-/* 有些"失败"是预期内的，降到 INFO 并用中性措辞，避免日志里出现红色 E
- * 让人以为出了问题（2026-11-27）：
+/* 以下两种"失败"是预期内的，降到 INFO，避免日志里出现红色 E 让人误判：
  *
- *   · errno 16 SHADOWHOOK_ERRNO_DUP = 该符号与本体重名同址。
- *     真机 libc 实测：open@0x8f150 == open64@0x8f150、
- *     openat@0x8f410 == openat64@0x8f410、fopen@0xa3530 == fopen64@0xa3530。
- *     本体先注册已占用该地址，别名再注册必报 16 —— 功能完整。
+ *   16 = 该符号与本体重名同址（open64/openat64/fopen64 与本体共用地址，
+ *        本体先注册已占用）→ 功能完整，不是失败。
+ *   18 = 该符号在 libc 里不存在（典型 openat2：内核有、bionic 无封装）。
  *
- *   · errno 18 SHADOWHOOK_ERRNO_ELF = 该符号在 libc 里不存在。
- *     典型是 openat2（内核有、bionic 无封装），见 patch_all 的说明。
- */
-/* ⚠️ 这两个编号来自 shadowhook 的 sh_errno.c 消息表，不是 shadowhook.h 的
- * SHADOWHOOK_ERRNO_DUP(=36，那是 init/fini 回调的重复码) —— 两套编号不同，
- * 别混用。这里用 US_ 前缀避免与头文件宏撞名。 */
-#define US_SH_ERRNO_DUP  16   /* "Duplicate shared hook" */
-#define US_SH_ERRNO_ELF  18   /* "Find symbol in ELF failed" */
+ * ⚠️ 编号取自 shadowhook 的 sh_errno.c 消息表，**不是** shadowhook.h 的
+ *    SHADOWHOOK_ERRNO_DUP(=36，那是 init/fini 回调重复码)。两套编号不同。
+ *    用 US_ 前缀避免与头文件宏撞名。
+ * 真机地址实测见 docs/签名校验接手文档.md §2.3。 */
+#define US_SH_ERRNO_DUP  16
+#define US_SH_ERRNO_ELF  18
 
 static void hook_one_opt(const char *name, void *proxy, void **orig,
                          const char *why) {
@@ -384,23 +378,9 @@ static void patch_all(void) {
     }
     LOGI("shadowhook init ok (v%s)", shadowhook_get_version());
 
-    // ══ 分层注册（2026-11-27）═══════════════════════════════════════
-    //
-    // 为什么分层而不是全挂：18 个 hook 全部生效时，会波及**与签名校验无关**
-    // 的进程内所有代码。实测（JMComic / Capacitor WebView）：
-    //   Java + native 两层 → 图片与网络加载失败
-    //   仅 Java 层         → 一切正常
-    // 但没定位到具体是哪几个 hook 引起的。所以做成能力分层：
-    // 代码全留，只是按 profile 决定注册哪些，便于按 App 类型权衡。
-    //
-    // profile 由 JNI 入口传入（Java 侧从 sigfix.json 的 "hookProfile" 读），
-    // 取值：
-    //   U. 全量（默认，覆盖最广，副作用最大）
-    //   C  核心（open/fopen/access/stat 家族）—— 商业 App 的主要路径
-    //   A  核心 + at 家族 + readlink —— 加防 fd 反查
-    //
-    // ⚠️ 每一层都是【上一层的超集】，不会出现"开了 C 反而少了某个"的情况。
-    // ⚠️ 各函数实现一字未改 —— 只是注册与否。将来要改行为，改 proxy_xxx。
+    // ══ 按 hookLevel 分档注册 ══
+    // 档位定义与依据见 docs/签名校验接手文档.md §2.3。
+    // 每档是上一档的超集；各 proxy 实现与档位无关，改行为改 proxy_xxx。
     const int lv = s_hook_level;
 
     // ── 第 1 层：核心（任何 native 校验都必须先打开 base.apk）──
@@ -433,28 +413,13 @@ static void patch_all(void) {
         hook_one("readlink",   (void *) proxy_readlink,   (void **) &orig_readlink);
         hook_one("readlinkat", (void *) proxy_readlinkat, (void **) &orig_readlinkat);
 
-        // ── 第 3~5 层：Android 11+ 新接口，逐个加（2026-11-27）──
-        //
-        // 为什么拆成一个接口一档：实测 JMComic(Capacitor WebView) 在
-        // 档 1(7 个) / 档 2(14 个) 下图片和网络都正常，档 3(18 个) 坏。
-        // 所以问题一定在下面这 3 个里的某一个。一档加一个就能一次定位，
-        // 比反复二分省事。
-        //
-        // ⚠️ 定位完成后应该把这三档收敛回去（保留发现的坏接口单独成档，
-        //    其余合并），否则档位会一直膨胀。收敛前别在 UI 里暴露 4/5/6。
+        // ── 第 4~6 层：openat2 / statx / opendir，一档一个（便于定位）──
         if (lv >= 4) {
-            /* ⚠️ 不注册 openat2（2026-11-27）。
-             *
-             * 真机 libc 实测：open/openat/fopen 及其 64 位别名都在，但
-             * **openat2 不存在**（NDK 的 API 23/29/30/35 sysroot 全无此符号）。
-             * 它是内核 Linux 5.6+ 的系统调用，bionic 从未给它做 libc 封装 ——
-             * 应用要调只能自己写 syscall(__NR_openat2, ...)，不经过 libc 符号，
-             * 我们也就 hook 不到。
-             *
-             * 注册它的唯一效果是每次启动多一次 dlsym 失败 + 一条日志。
-             * proxy_openat2 / orig_openat2 的实现全部保留：万一将来 bionic
-             * 加了封装，把下面这行取消注释即可（档位语义不变）。
-             */
+            /* openat2 不注册：bionic 从未封装它（内核 Linux 5.6+ 有，
+             * NDK API 23/29/30/35 的 libc 全无此符号）。应用只能自己写
+             * syscall(__NR_openat2,...)，不经 libc → 挂不上。
+             * 注册只会多一次 dlsym 失败 + 一条日志。
+             * proxy_openat2 实现保留：若将来 bionic 加了封装，取消下一行注释。 */
             /* hook_one("openat2", (void *) proxy_openat2, (void **) &orig_openat2); */
         }
         if (lv >= 5) {
@@ -488,10 +453,8 @@ Java_com_nc_uncheck_SigFix_nativeHookApkPath(JNIEnv *env, jclass clazz,
                                              jint level) {
     if (s_installed) return JNI_TRUE;
 
-    /* hook 分层（2026-11-27）：默认 ALL，调用方可降档。
-     * 为什么由 Java 传而不是编译期常量：同一个 so 要在不同 App 上复用，
-     * 而"该用哪档"取决于目标 App 的 IO 栈（WebView/Flutter 类要降档）。
-     * 越界值一律钳到 [CORE, ALL]，不报错 —— 这是尽力而为的降级，不是契约。 */
+    /* 档位由 Java 侧传入（同一个 so 复用于不同 App），越界钳到 [CORE, ALL]，
+     * 不报错 —— 尽力而为的降级，不是契约。 */
     if (level < NC_HOOK_LEVEL_CORE) level = NC_HOOK_LEVEL_CORE;
     if (level > NC_HOOK_LEVEL_ALL)  level = NC_HOOK_LEVEL_ALL;
     s_hook_level = (int) level;

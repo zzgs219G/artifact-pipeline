@@ -173,13 +173,38 @@ LAUNCHER.onCreate              ← 最晚，兜底
 **所有指向 base.apk 的文件操作**重定向到 `origin.apk`（原签名 APK 全量副本，
 注入时放进 `assets/nc_sigfix/origin.apk`，运行时释放到 `codeCacheDir`）。
 
-覆盖 **17 个**路径类 libc 函数：
+覆盖路径类 libc 函数，按 `hookLevel` 分档注册（默认档 6 = 全量）。
+真机实测**真实生效 14 个**：
 
 ```
-open      open64    __open_2    openat    openat64   __openat_2  openat2
-fopen     fopen64   access      faccessat  stat       lstat      statx
-readlink  readlinkat opendir
+open  __open_2  fopen  access  stat  faccessat  lstat
+openat  __openat_2  readlink  readlinkat  statx  opendir
+
+别名（与本体同址，注册一次即覆盖两者）：
+open64 == open    openat64 == openat    fopen64 == fopen
+
+不注册：
+openat2  —— bionic 从未封装（内核 Linux 5.6+ 有，NDK 各版 libc 均无此符号）
 ```
+
+档位定义、地址实测数据、以及「本模块的 hook 覆盖面 vs 加固侧实际用几个接口」
+见 [`docs/签名校验接手文档.md`](../../docs/签名校验接手文档.md) §2.3。
+
+#### 🔴 硬前提：`extractNativeLibs` 必须是 true
+
+`SigFix` 用 `System.load(nativeLibraryDir + "/libusign.so")` 加载本库，
+这要求 `.so` 是**磁盘上的实体文件**。而 `extractNativeLibs="false"` 时
+系统安装阶段**不解压** `.so`，`nativeLibraryDir` 是空目录 → 加载失败 →
+**native 层静默失效**：构建绿灯、装得上、Java 层去校验照常工作，
+只有 `adb logcat -s USign` 能看到「找不到 native 库」。
+
+`run.py` 已自动调用 `scripts/repack/patch-extractnativelibs.py` 改写该属性
+（失败直接 raise，不 warn 后继续）。回归：
+`tests/test-uncheck-extract-nativelibs.py`。
+
+> 2026-11-27 补：这一步此前漏了 4 天（ApkForge 的 Kotlin 实现在做，
+> Python 这套没做）。代价是 7 轮档位测试包全部无效。详细复盘见
+> `docs/签名校验接手文档.md` §0.1.2。
 
 - **为什么 `__openat_2` 必须挂**（2026-11-24 实测）：C 里写
   `openat(AT_FDCWD, path, O_RDONLY)`，`_FORTIFY_SOURCE` 会把它编成
