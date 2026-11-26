@@ -55,20 +55,38 @@
 /* ── L1 缓存（对应 Java 桩的 ConcurrentHashMap）─────────────────────
  * 不缓存则每次重算 Base64 + 密钥流 + 分配 String；实测某些位点单次启动
  * 被执行 ~20 次（Compose 重组），累计开销比"换算法"那一档大一个数量级。
- * 用 global ref（局部引用跨不了调用栈）。上限 30000，racy 检查
- * （并发略超无害），进程生命周期内不释放 —— 与 Java 侧 CHM 语义等同。
- * 命中也要 GetStringUTFChars 查表，不是零成本，但比重算便宜 5~10 倍。 */
-#define NC_CACHE_CAP 30000
+ * 上限 30000，racy 检查（并发略超无害），进程生命周期内不释放 ——
+ * 与 Java 侧 CHM 语义等同。
+ *
+ * ⚠️ 2026-11-26 性能定案：key 从 jstring 改成【字节副本】。
+ *
+ * 实测（真机，全开+stringenc，profile 埋点）：
+ *   cache_get 累计 11069ms = 总耗时 99%，其中 GetStringUTFChars
+ *   被调用 14826 次，平均 747μs/次（正常应 1~2μs，慢 500 倍），
+ *   单次最坏 81ms。根因：原实现把 key 存成 jstring global ref，
+ *   每次比较都要跨界取内容 —— 而命中路径上 78% 的探测都命中，
+ *   即每次解密都要付一次 JNI 转换（分配临时 buffer + UTF-16↔
+ *   Modified UTF-8 转换 + 释放）。
+ *
+ * 改成存字节副本后，命中路径是纯 memcmp，零 JNI。
+ * 代价：每个 key 一份 malloc 副本（30000 × 平均 60B ≈ 1.8MB，
+ *       由 NC_CACHE_BYTES_MAX 硬上限兜住）。
+ * val 仍保持 global ref —— 返回给 Java 时直接用，不需要转换。 */
+#define NC_CACHE_CAP     32768u       /* 2 的幂：h & (CAP-1) 代替除法取模 */
+#define NC_CACHE_MASK    (NC_CACHE_CAP - 1u)
+#define NC_CACHE_BYTES_MAX (4u * 1024 * 1024)  /* key 副本总量上限 4MB */
 
 /* 极简开放寻址哈希表。不用链表：插入后不删除，探测序列恒有效。 */
 typedef struct {
     uint64_t hash;          /* 0 = 空槽（密文 hash 恰为 0 概率 ~2^-64，可接受） */
-    jstring  key;           /* 密文 payload 的 global ref */
+    char    *key;           /* 密文 payload 的字节副本（malloc） */
+    uint32_t klen;          /* 密文长度（memcmp 前先比长度，快路径） */
     jstring  val;           /* 明文的 global ref */
 } nc_cache_slot;
 
 static nc_cache_slot nc_cache[NC_CACHE_CAP];
 static volatile int nc_cache_n = 0;
+static size_t nc_cache_bytes = 0;       /* key 副本累计字节（racy，仅上限判断） */
 
 /* FNV-1a 64：查表用，非密码学用途 */
 static uint64_t nc_fnv1a(const char *s, size_t n)
@@ -210,11 +228,12 @@ static const char *nc_jstr_chars(JNIEnv *env, jstring s, jsize *out_len)
 /* ── 缓存查找 ──────────────────────────────────────────────────────── */
 static jstring nc_cache_get(JNIEnv *env, const char *payload, size_t n)
 {
+    (void) env;                         /* 命中路径零 JNI：env 只给 put 用 */
     if (nc_cache_n == 0) {
         return NULL;
     }
     const uint64_t h = nc_fnv1a(payload, n);
-    size_t idx = (size_t)(h % NC_CACHE_CAP);
+    size_t idx = (size_t) h & NC_CACHE_MASK;
 #ifdef NC_STRDEC_PROFILE
     size_t _probe_done = 0;
 #endif
@@ -224,34 +243,18 @@ static jstring nc_cache_get(JNIEnv *env, const char *payload, size_t n)
         _probe_done++;
 #endif
         if (s->hash == 0) {
+            break;                      /* 空槽 = 未命中（开放寻址可提前终止）*/
+        }
+        /* ⚠️ 纯内存比较，不调 GetStringUTFChars —— 见文件头 2026-11-26 说明。
+         * 先比长度（一次整型比较就能排除绝大多数碰撞），再 memcmp。 */
+        if (s->hash == h && s->klen == (uint32_t) n
+                && memcmp(s->key, payload, n) == 0) {
 #ifdef NC_STRDEC_PROFILE
             nc_prof_probes += _probe_done;
 #endif
-            return NULL;                /* 空槽 = 未命中（开放寻址可提前终止）*/
+            return s->val;
         }
-        if (s->hash == h) {
-            /* hash 相同还要比内容：hash 碰撞是可能的，不能只比 hash */
-#ifdef NC_STRDEC_PROFILE
-            nc_prof_getchars_n++;
-#endif
-            const char *k = (*env)->GetStringUTFChars(env, s->key, NULL);
-            if (k == NULL) {
-#ifdef NC_STRDEC_PROFILE
-                nc_prof_probes += _probe_done;
-#endif
-                return NULL;
-            }
-            jsize kl = (*env)->GetStringUTFLength(env, s->key);
-            int same = (kl == (jsize)n) && (memcmp(k, payload, n) == 0);
-            (*env)->ReleaseStringUTFChars(env, s->key, k);
-            if (same) {
-#ifdef NC_STRDEC_PROFILE
-                nc_prof_probes += _probe_done;
-#endif
-                return s->val;
-            }
-        }
-        idx = (idx + 1) % NC_CACHE_CAP;
+        idx = (idx + 1) & NC_CACHE_MASK;
     }
 #ifdef NC_STRDEC_PROFILE
     nc_prof_probes += _probe_done;
@@ -260,11 +263,14 @@ static jstring nc_cache_get(JNIEnv *env, const char *payload, size_t n)
     return NULL;
 }
 
-/* 写入缓存。失败（NewGlobalRef 返回 NULL）静默放弃 ——
- * 缓存是优化不是正确性依赖，宁可少缓存也不能让解密失败。 */
+/* 写入缓存。失败一律静默放弃 —— 缓存是优化不是正确性依赖，
+ * 宁可少缓存也不能让解密失败。
+ *
+ * 写序纪律（并发安全的关键）：先填 key/klen/val，最后写 hash。
+ * hash 非 0 是"槽有效"的唯一标志，读侧看到非 0 时其余字段必已就绪。 */
 static void nc_cache_put(JNIEnv *env, jstring payload, jstring val)
 {
-    if (nc_cache_n >= NC_CACHE_CAP) {
+    if (nc_cache_n >= (int) NC_CACHE_CAP || nc_cache_bytes >= NC_CACHE_BYTES_MAX) {
         return;                         /* 上限守卫：racy 检查，略超无害 */
     }
     const char *p = (*env)->GetStringUTFChars(env, payload, NULL);
@@ -273,35 +279,43 @@ static void nc_cache_put(JNIEnv *env, jstring payload, jstring val)
     }
     const jsize pl = (*env)->GetStringUTFLength(env, payload);
     const uint64_t h = nc_fnv1a(p, pl);
+
+    /* key 字节副本：这里有且只有这一次 GetStringUTFChars */
+    char *kcopy = (char *) malloc((size_t) pl);
+    if (kcopy == NULL) {
+        (*env)->ReleaseStringUTFChars(env, payload, p);
+        return;
+    }
+    memcpy(kcopy, p, (size_t) pl);
     (*env)->ReleaseStringUTFChars(env, payload, p);
 
-    size_t idx = (size_t)(h % NC_CACHE_CAP);
+    size_t idx = (size_t) h & NC_CACHE_MASK;
     for (size_t probe = 0; probe < NC_CACHE_CAP; probe++) {
         nc_cache_slot *s = &nc_cache[idx];
         if (s->hash == 0) {
-            jstring gk = (*env)->NewGlobalRef(env, payload);
-            if (gk == NULL) {
-                return;
-            }
             jstring gv = (*env)->NewGlobalRef(env, val);
             if (gv == NULL) {
-                (*env)->DeleteGlobalRef(env, gk);
+                free(kcopy);
                 return;
             }
-            s->key = gk;
-            s->val = gv;
-            s->hash = h;                /* 最后写 hash：保证并发下"槽有效"才可见 */
+            s->key  = kcopy;
+            s->klen = (uint32_t) pl;
+            s->val  = gv;
+            s->hash = h;                /* 最后写：见上方写序纪律 */
             nc_cache_n++;               /* racy，仅用于上限判断 */
+            nc_cache_bytes += (size_t) pl;
             return;
         }
-        if (s->hash == h) {
-            /* 同 hash 已存在：可能是同一条（并发重复插入）或碰撞。
-             * 不覆盖 —— 先写入者胜出，行为与 Java 侧 CHM 的
-             * "两线程同时未命中各算一遍、一个写入胜出"一致。 */
+        if (s->hash == h && s->klen == (uint32_t) pl
+                && memcmp(s->key, kcopy, (size_t) pl) == 0) {
+            /* 同一条已存在（并发重复插入）：先写入者胜出，
+             * 与 Java 侧 CHM"各算一遍、一个胜出"一致。 */
+            free(kcopy);
             return;
         }
-        idx = (idx + 1) % NC_CACHE_CAP;
+        idx = (idx + 1) & NC_CACHE_MASK;
     }
+    free(kcopy);                        /* 表满（理论上不会）：放弃缓存 */
 }
 
 /* 前置声明：定义在本文件后部（bootstrap 附近），decrypt 里要调。 */

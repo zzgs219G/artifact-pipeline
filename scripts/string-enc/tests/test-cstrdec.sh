@@ -630,6 +630,30 @@ VEOF
   fi
 fi
 
+echo "[性能：缓存命中路径零 JNI]"
+# 2026-11-26：cache_get 里 GetStringUTFChars 每次 747μs（慢 500 倍），
+# 命中 14826 次累计 11 秒 → 主页卡 8 秒。改法 = key 存字节副本。
+JNI_C="$CSRC/nc_strdec_jni.c"
+if [[ -f "$JNI_C" ]]; then
+  # ① cache_get 函数体内不得出现 GetStringUTFChars（注释除外）
+  _hit=$(awk '/^static jstring nc_cache_get/,/^}$/' "$JNI_C" \
+         | grep -v '^\s*/\*' | grep -c 'GetStringUTFChars' || true)
+  chk "cache_get 命中路径零 JNI 调用" "${_hit:-0}" "0"
+  # ② 结构体 key 必须是 char* 而不是 jstring
+  chk "缓存 key 存字节副本（char *key）" \
+      "$(grep -c 'char    \*key;' "$JNI_C" || true)" "1"
+  # ③ 容量必须是 2 的幂（用掩码取模）
+  chk "NC_CACHE_CAP 为 2 的幂" \
+      "$(grep -c 'define NC_CACHE_CAP     32768u' "$JNI_C" || true)" "1"
+  chk "取模用掩码而非除法" \
+      "$(awk '/^static jstring nc_cache_get/,/^}$/' "$JNI_C" | grep -c 'NC_CACHE_MASK' || true)" "2"
+  # ④ 字节上限守卫存在（防 key 副本撑爆内存）——数实际使用点，不含注释
+  chk "key 副本有总量上限守卫" \
+      "$(grep -v '^\s*\*' "$JNI_C" | grep -c 'nc_cache_bytes >= NC_CACHE_BYTES_MAX' || true)" "1"
+else
+  bad "找不到 $JNI_C"
+fi
+
 echo
 echo "────────────────────────────────────────"
 if [[ $FAIL -eq 0 ]]; then
