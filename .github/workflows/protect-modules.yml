@@ -176,6 +176,14 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/actions/tests/test-workflow-yml.sh
 
+      # 2026-11-27：apk_url 百分号编码。报错四十四 2026-10-16 就在
+      # protect-modules.yml 修过，但 uncheck.yml 后加时漏抄 → 用户上传
+      # "JMComic3v2.1.14 (2).apk" 直接 curl(3) 失败，连包都下不下来。
+      # 本 step 强制两条 workflow 都带编码，防再漏一条。
+      - name: apk_url 编码（两条 workflow 都要有）
+        if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/actions/tests/test-workflow-url-encode.py
+
       - name: smali 参数槽计数
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/lib/tests/test-smali-params.sh

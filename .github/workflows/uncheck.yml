@@ -112,9 +112,22 @@ jobs:
           python3 scripts/actions/check-schema.py configs/v2/config-schema.json
 
       - name: 下载 APK
+        env:
+          # apk_url 经 env 中转：URL 直接插值进 bash 双引号可被 "$(...)" 逃逸
+          # （与 protect-modules.yml 同一防线）
+          APK_URL: ${{ inputs.apk_url }}
         run: |
           mkdir -p work
-          curl -fL --retry 3 -o work/app.apk "${{ inputs.apk_url }}"
+          # 报错四十四（2026-10-16 在 protect-modules.yml 修过，本文件漏抄）：
+          #   curl (3) URL rejected: Malformed input to a URL function
+          #   apk_url 含空格/中文/括号时 curl 拒绝。实测文件名
+          #   "JMComic3v2.1.14 (2).apk" 就炸在这里 —— 空格与括号未百分号编码。
+          # 修法：下载前对 path/query 做百分号编码（scheme/host 保留，
+          #       已编码的 %XX 不重复编码）。
+          ENC_URL=$(APK_URL="$APK_URL" python3 -c 'import os, urllib.parse; u = os.environ["APK_URL"].strip(); p = urllib.parse.urlsplit(u); path = urllib.parse.quote(p.path, safe="/%:@"); query = urllib.parse.quote(p.query, safe="=&%:@") if p.query else ""; print(urllib.parse.urlunsplit((p.scheme, p.netloc, path, query, "")))')
+          [ -n "$ENC_URL" ] || { echo "❌ apk_url 为空" | tee -a work/build.log; exit 1; }
+          echo "下载 URL(编码后): $ENC_URL" | tee -a work/build.log
+          curl -fL --retry 3 -o work/app.apk "$ENC_URL"
           ls -la work/app.apk | tee -a work/build.log
           # 文件大小必须 > 0，否则后面解包会给出难懂的报错
           test -s work/app.apk || { echo "❌ 下载的 APK 为空"; exit 1; }
