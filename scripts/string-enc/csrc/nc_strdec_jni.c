@@ -165,11 +165,22 @@ static volatile unsigned long nc_prof_worst_us = 0;
 static volatile unsigned long nc_prof_full_scan = 0;
 static volatile unsigned long nc_prof_probes = 0;
 static volatile unsigned long nc_prof_getchars_n = 0;  /* cache_get 内 GetStringUTFChars 次数 */
+static volatile unsigned long nc_prof_total = 0;      /* 整个 JNI 函数 CPU 时间（对账用） */
 
 static unsigned long nc_prof_now_ns(void)
 {
+    /* ⚠️ 2026-11-26：必须用 CLOCK_THREAD_CPUTIME_ID，不能用 CLOCK_MONOTONIC。
+     *
+     * 用 MONOTONIC（墙钟）测出的数字会被【线程被抢占的时间】污染：
+     * 首版测出 cacheget=11069ms，而整个线程 utime 只有 6878ms ——
+     * 墙钟累计超过了线程总 CPU 时间，这在物理上就证明它含等待。
+     * 于是把「纯内存比较」误判成 80μs/次（实际 ~10ns），
+     * 一路归因到 JNI 转换，方向全错。
+     *
+     * THREAD_CPUTIME 只计本线程真正在 CPU 上执行的时间 ——
+     * 它给出的才是「这段代码花了多少 CPU」，不受调度抖动影响。 */
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
     return (unsigned long) ts.tv_sec * 1000000000UL + (unsigned long) ts.tv_nsec;
 }
 
@@ -186,14 +197,14 @@ void nc_strdec_profile_dump(void)
                         nc_prof_mallocns / 1e6, nc_prof_newstr / 1e6,
                         nc_prof_cacheput / 1e6, nc_prof_keyns / 1e6);
     __android_log_print(ANDROID_LOG_INFO, NC_SD_TAG,
-                        "prof2: worst=%.1fms fullscan=%lu probes=%lu avg=%.1f gcalls=%lu",
+                        "prof2: worst=%.1fms fullscan=%lu probes=%lu avg=%.1f gcalls=%lu total=%.1fms",
                         nc_prof_worst_us / 1000.0,
                         nc_prof_full_scan,
                         nc_prof_probes,
                         nc_prof_calls
                             ? (double) nc_prof_probes / (double) nc_prof_calls
                             : 0.0,
-                        nc_prof_getchars_n);
+                        nc_prof_getchars_n, nc_prof_total / 1e6);
 }
 #endif
 
@@ -243,7 +254,13 @@ static jstring nc_cache_get(JNIEnv *env, const char *payload, size_t n)
         _probe_done++;
 #endif
         if (s->hash == 0) {
-            break;                      /* 空槽 = 未命中（开放寻址可提前终止）*/
+            /* 空槽 = 未命中，开放寻址可提前终止。
+             * ⚠️ 不走 fullscan 计数 —— 那是「扫满整表仍未命中」的计数器，
+             * 提前终止时计入会谎报（2026-11-26 首版就写错了）。 */
+#ifdef NC_STRDEC_PROFILE
+            nc_prof_probes += _probe_done;
+#endif
+            return NULL;
         }
         /* ⚠️ 纯内存比较，不调 GetStringUTFChars —— 见文件头 2026-11-26 说明。
          * 先比长度（一次整型比较就能排除绝大多数碰撞），再 memcmp。 */
@@ -517,6 +534,13 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
 {
     (void)clazz;
 
+    /* 函数级 CPU 时间对账：六段之和 vs 总耗时。
+     * 差额 = 未被任何分段覆盖的代码（真正的"别处"）。
+     * 用 CLOCK_THREAD_CPUTIME_ID，不含抢占（见 nc_prof_now_ns 注释）。 */
+#ifdef NC_STRDEC_PROFILE
+    unsigned long _t_all = nc_prof_now_ns();
+#endif
+
     if (payload == NULL) {
         return nc_jni_fail(env, NULL);  /* 传 null 进来：返回 null，不崩 */
     }
@@ -681,6 +705,9 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
     nc_cache_put(env, payload, out);
 #ifdef NC_STRDEC_PROFILE
     nc_prof_cacheput += nc_prof_now_ns() - _t_cp;
+#endif
+#ifdef NC_STRDEC_PROFILE
+    nc_prof_total += nc_prof_now_ns() - _t_all;
 #endif
     return out;
 }
