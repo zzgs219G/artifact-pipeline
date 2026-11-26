@@ -163,7 +163,8 @@ _size_report() {
 }
 
 # _partial_reuse <输入.apk> <输出.apk> — 把与 origin.apk 内容相同的条目指回它的
-# 内部偏移（119MB → 69MB）。详见 docs/计划书-部分数据复用.md
+# 内部偏移（119MB → 69MB）。实现与五条纪律见 AGENTS.md 冻结表的
+# partial-reuse.py 行（该行是唯一维护点，避免与代码漂移）。
 #
 # ⚠️ 必须在 zipalign【之后】调用：zipalign 重写整个 ZIP，会把共享布局拆平。
 # ⚠️ 产物之后也不能再跑 apksigner —— 它同样展开重叠条目。签名用 MT 管理器。
