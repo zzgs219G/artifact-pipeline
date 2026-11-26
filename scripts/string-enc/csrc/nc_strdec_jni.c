@@ -166,6 +166,12 @@ static volatile unsigned long nc_prof_full_scan = 0;
 static volatile unsigned long nc_prof_probes = 0;
 static volatile unsigned long nc_prof_getchars_n = 0;  /* cache_get 内 GetStringUTFChars 次数 */
 static volatile unsigned long nc_prof_total = 0;      /* 整个 JNI 函数 CPU 时间（对账用） */
+static unsigned long nc_prof_now_ns(void);
+/* cleanup 回调：任何 return 路径离开作用域时自动累加（结构上不可漏） */
+static void nc_prof_scope_exit(unsigned long *t)
+{
+    nc_prof_total += nc_prof_now_ns() - *t;
+}
 
 static unsigned long nc_prof_now_ns(void)
 {
@@ -536,9 +542,16 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
 
     /* 函数级 CPU 时间对账：六段之和 vs 总耗时。
      * 差额 = 未被任何分段覆盖的代码（真正的"别处"）。
-     * 用 CLOCK_THREAD_CPUTIME_ID，不含抢占（见 nc_prof_now_ns 注释）。 */
+     * 用 CLOCK_THREAD_CPUTIME_ID，不含抢占（见 nc_prof_now_ns 注释）。
+     *
+     * ⚠️ 2026-11-26 修正：首版把累加写在最后的 `return out;` 前面 ——
+     *    而函数有 10 条 return，其中「缓存命中」那条（占 97% 的调用）
+     *    完全没计入，于是得到 total=67ms 的假象。
+     *    改用 cleanup 属性：任何 return 路径离开作用域时都自动累加，
+     *    结构上不可能漏。 */
 #ifdef NC_STRDEC_PROFILE
-    unsigned long _t_all = nc_prof_now_ns();
+    unsigned long _t_all __attribute__((cleanup(nc_prof_scope_exit)))
+        = nc_prof_now_ns();
 #endif
 
     if (payload == NULL) {
@@ -705,9 +718,6 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
     nc_cache_put(env, payload, out);
 #ifdef NC_STRDEC_PROFILE
     nc_prof_cacheput += nc_prof_now_ns() - _t_cp;
-#endif
-#ifdef NC_STRDEC_PROFILE
-    nc_prof_total += nc_prof_now_ns() - _t_all;
 #endif
     return out;
 }
