@@ -252,6 +252,20 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/uncheck/tests/test-e2e.py
 
+      # 2026-11-27 新增的四套（此前只写了测试、没接入 CI = 等于没测试）。
+      # 各自对应本轮踩过的真实事故，见各自文件头注：
+      #   test-uncheck-extract-nativelibs → extractNativeLibs 漏改（native 层静默失效）
+      #   test-payload-sync               → 改 Java 忘重跑 build.sh（JNI 签名不匹配）
+      #   test-usign-hook-level           → hookLevel 分档与 orig NULL 兜底
+      #   test-resolve                    → v2 卡片的 layer 选项
+      - name: uncheck 载荷与配置回归（4 套）
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          python3 scripts/uncheck/tests/test-uncheck-extract-nativelibs.py
+          python3 scripts/uncheck/tests/test-payload-sync.py
+          python3 scripts/uncheck/tests/test-usign-hook-level.py
+          python3 scripts/uncheck/tests/test-resolve.py
+
       - name: anti-diff 冒烟（含报错三十一~四十一回归）
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/anti-diff/tests/test-smoke.sh

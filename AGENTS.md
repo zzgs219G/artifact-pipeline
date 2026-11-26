@@ -62,7 +62,7 @@ AI 不得"顺手优化"、"重构"、"重命名"、"整理格式"。它们的正
 | `scripts/repack/mark-native.py` | native 壳替换 + loadLibrary 插桩 | `scripts/repack/tests/test_mark_native.py`（42 断言，纯 stdlib；覆盖 full_name 解析与 `->` 误写纠正、方法名非贪婪解析(报错十)、保留 `.end method`(报错十三)、构造器不 native 化、幂等、多 dex、exit 3 语义） ✅CI |
 | `scripts/repack/dex-capacity.py` | dex 方法数容量检测 + 注入落点选择（读 header 的 method_ids_size，不反汇编） | `scripts/repack/tests/test_dex_capacity.py`（33 断言，纯 stdlib；覆盖 header 解析边界、目录名→dex 名映射(对齐 apktool 字节码)、n+1 命名(含不连续序号)、落点决策三分支、不捡现成空 dex、扫描路径 ×1.25 保守上浮、SMALI_DIR_RE 单一真相） ✅CI。**报错五十九**：注入类曾固定写 `smali/`，大型包 classes.dex 贴顶(65519/65536)导致回编 `Unsigned short value out of range: 65536`，且报错类名随机无诊断价值 |
 | `scripts/repack/partial-reuse.py` | **部分数据复用**：`apktool b` 用 `java.util.zip` 重写 ZIP，把 `origin.apk` 从「共享字节」拆成实体副本 → 加固+去校验产物 119MB。本脚本在 zipalign 之后手写 ZIP，让与 origin.apk 内部条目 `(method,CRC,csize,fsize)` 全同的条目指向 `origin_data_start + 内部offset` → 69MB（省 42%） | `scripts/repack/tests/test-partial-reuse.py`（18 断言 + 9 组反向验证，纯 stdlib；每条断言都验证过「改坏则红」） ✅CI。⚠️ **五条硬纪律**：① **必须在 zipalign 之后、keep-sig-block 之前** —— zipalign 重写整个 ZIP 会拆平共享布局（体积回到 119MB）。② **产物之后绝不能再跑 apksigner** —— 它同样展开重叠条目；签名必须用 MT 管理器（手写 ZIP，保重叠）。③ **验收不能用 `zipfile.testzip()`** —— 数据复用本身就是条目重叠，Python 的 zip-bomb 防护会报 `origin.apk`，那是**预期行为**（T8 钉住）。④ **对齐判据看数据起始**（`lfh+30+name_len+extra_len`），不是 LFH offset（实测 `resources.arsc` 的 LFH offset 7,794,185 非 4 倍数但数据起始 7,794,232 对齐）。⑤ **任何条目共享失败就放弃它、正常存** —— 宁可少省几 MB，也不要产出装不上的包。能力边界：**做不到 64MB**（origin 内容 60.95MB 是去校验包，产物本体 63.78MB 是加固包，内容不同，69MB 是物理下限）；只支持 ZIP32（产物约 72MB，远小于 4GB） |
-| `scripts/string-enc/csrc/nc_fnv1a`（含 `nc_strdec_jni.c` 全部热路径小函数） | L1 缓存的哈希函数。**不在 `+no_obf` 白名单里就会毁掉性能** —— 它按每字节做 64 位乘法、是**循环**结构，密文 60~200B → 单次 120~400 条指令；被混淆后单次从 0.04μs 涨到 70μs（实测 11.5 万次调用累计 8 秒）。⚠️ 机制如实：mba **不处理 Mul**（上游 mba/region.rs:24 只有 Add/Sub/And/Or/Xor），放大它的是 vm_flatten 的块分发（每轮循环过一次 dispatcher），但 70μs 这个量级我无法从源码精确推出 —— 修法是实测 A/B 定的，不是理论推导的 | `scripts/string-enc/tests/test-cstrdec.sh` 的「性能：缓存命中路径零 JNI」段（含白名单成员断言）。⚠️ **两条硬纪律**：① **白名单要按「调用链」列，不能只列入函数口** —— `decrypt`/`cache_get`/`cache_put` 都豁免了、漏掉被调 22 万次的 `nc_fnv1a`，等于没豁免（2026-11-26 主页卡 8 秒的唯一根因）。② **埋点只能证明「包住的那段」快** —— 哈希在 `nc_cache_get` 第一行之前，永在埋点圈外，所以实测「探测 1.46 槽却有 64μs」无法解释。判定手段：把 `nc_cache_get` 改 `return NULL` 看窗口时间，比任何 profiler 都可靠（不可能被测量污染） |
+| `scripts/string-enc/csrc/nc_strdec_jni.c` 的 `nc_fnv1a` 与热路径小函数 | L1 缓存的哈希函数（同文件里的 `nc_strdec_jni_decrypt` / `nc_cache_get` / `nc_cache_put` / `nc_jstr_chars` / `nc_jni_fail` / `nc_ensure_key` 一并）。**不在 `+no_obf` 白名单里就会毁掉性能** —— `nc_fnv1a` 按每字节做 64 位乘法、是**循环**结构，密文 60~200B → 单次 120~400 条指令；被混淆后单次从 0.04μs 涨到 70μs（实测 11.5 万次调用累计 8 秒）。⚠️ 机制如实：mba **不处理 Mul**（上游 mba/region.rs:24 只有 Add/Sub/And/Or/Xor），放大它的是 vm_flatten 的块分发（每轮循环过一次 dispatcher），但 70μs 这个量级我无法从源码精确推出 —— 修法是实测 A/B 定的，不是理论推导的 | `scripts/string-enc/tests/test-cstrdec.sh` 的「性能：缓存命中路径零 JNI」段（含白名单成员断言）。⚠️ **两条硬纪律**：① **白名单要按「调用链」列，不能只列入函数口** —— `decrypt`/`cache_get`/`cache_put` 都豁免了、漏掉被调 22 万次的 `nc_fnv1a`，等于没豁免（2026-11-26 主页卡 8 秒的唯一根因）。② **埋点只能证明「包住的那段」快** —— 哈希在 `nc_cache_get` 第一行之前，永在埋点圈外，所以实测「探测 1.46 槽却有 64μs」无法解释。判定手段：把 `nc_cache_get` 改 `return NULL` 看窗口时间，比任何 profiler 都可靠（不可能被测量污染） |
 | `tools/apktool.jar` | 解包/重打包工具(apktool 3.0.3,git 跟踪独立文件) | 严禁替换版本(历史: 报错四/五)。升级必须回归「解包后 manifest 头 4 字节仍是 `03 00 08 00`」 |
 | `scripts/guard/archive/nc_guard_unlock.c` | `.ncx` 段运行期自解密的**旧实现**(历史存档) | **不进 NDK 工程、不参与任何构建**。契约逐条过期(slot 80 字节/旧 XOR_KEY/`slot^XOR_KEY` 取钥),刻意保留旧段名——读到 `.ncguard` 说明那是旧版,不要照着改。现行实现见 §1.1 |
 
@@ -397,7 +397,7 @@ vm + mba + param_aggregate + vm_flatten
 
 ---
 
-## 2.6 调试开关一律编译期，不用运行期字符串
+## 2.6 调试开关：C 字符串必进 `.rodata`，别指望"藏起来"
 
 外部 0 信息逆向 **5 秒**就通过 `strings libnc.so | grep -i xixin`
 找到 `/storage/emulated/0/xixin_debug` 和 `NCG_REPORT_PATH`，
@@ -407,9 +407,16 @@ vm + mba + param_aggregate + vm_flatten
 
 | 不要做 | 要做什么 |
 |---|---|
-| ❌ `getenv("XXX_DEBUG")` / `access("/sdcard/xxx")` | ✅ 编译期 `#ifdef`，release 里代码不存在 |
-| ❌ 给开关改名（"不显眼的名字"）| ❌ 没用 —— `strings` 看的是 ASCII，改名不改变可见性 |
-| ❌ 用 Android 的 `debuggable` | ❌ `protect.sh` 已强制 `false`（安全要求，不能为调试改回去）|
+| ❌ 指望靠改名藏住开关（"不显眼的名字"）| ❌ 没用 —— `strings` 看的是 ASCII，改名不改变可见性 |
+| ❌ 为了藏开关去改 `debuggable` | ❌ `protect.sh` 已强制 `false`（安全要求，不能为调试改回去）|
+| ❌ 无脑上 `getenv` / `access` 哨兵 | ⚠️ 先算性价比：这个开关值得泄露多少信息？ |
+
+**判据是「泄露什么」，不是「编译期还是运行期」**：
+
+| 开关类型 | 该怎么实现 | 为什么 |
+|---|---|---|
+| 会泄露**机制**的（12 步解密流水线、检测探针列表） | 编译期 `#ifdef`，release 里代码不存在 | 看到开关 = 拿到地图 |
+| 只泄露**「有个开关」**的（自检报告哨兵） | 运行期哨兵可接受 | 读到开关也读不到秘密 |
 
 **当前实现**（2026-11-25 起）：自检报告**无条件编入所有包**，
 原 `#ifdef NCGUARD_DEBUG_REPORT` / `DEBUG_REPORT=1` / `--debug-report`
@@ -422,11 +429,12 @@ adb shell 'touch /storage/emulated/0/xixin_debug'    # 下次启动写报告
 adb shell "cat /storage/emulated/0/Android/data/<包名>/files/ncguard_log.md"
 ```
 
-判据与报告格式见 `docs/发布与验证流程.md` 的「怎么看自检报告」一节。
+**它为什么可以接受**：哨兵路径进 `.rodata`（`strings` 可见），但报告内容
+只有段名/大小/权限/熵/判定 —— **没有密钥、没有明文、没有算法名**。
+读到开关也拿不到能降低逆向成本的东西。换回来的是「任何包都能排障」，
+不必为看报告重出特定构建，而线上问题往往拿不到那个构建。
 
-> 代价如实：哨兵路径字符串会进 `.rodata`（`strings` 可见）。
-> 换来的是「任何包都能排障」——不用为了看报告重出一个特定构建，
-> 而线上问题往往拿不到那个构建。
+判据与报告格式见 `docs/发布与验证流程.md` 的「怎么看自检报告」一节。
 
 ---
 
@@ -446,8 +454,8 @@ git diff                          # 自查: 只含预期改动
 >
 > | 层 | 内容（与 workflow 的 step 一一对应） | 触发 |
 > |---|---|---|
-> | `test` job 第一批（<10s） | 文档路径校验 / schema 结构 / resolve-config（用例数跑一遍看，勿抄） / workflow yml / smali 参数槽 / dex 版本头 / **inject-loadlib 73 断言** / **mark-native 42 断言** | 按改动范围过滤，与构建**并行** |
-> | `test` job 第二批（~4min） | anti-diff 冒烟 / **dex 容量 33 断言** / packer 冒烟 / **stringenc 五套**（含 apktool 真汇编、密钥流 468 例、联动端到端） | 仅改代码时跑 |
+> | `test` job 第一批（<10s） | 文档路径校验 / schema 结构 / resolve-config（用例数跑一遍看，勿抄） / workflow yml / **apk_url 编码**（两条 workflow 都要有，2026-11-27 加）/ smali 参数槽 / dex 版本头 / **inject-loadlib 73 断言** / **mark-native 42 断言** | 按改动范围过滤，与构建**并行** |
+> | `test` job 第二批（~4min） | anti-diff 冒烟 / **dex 容量 33 断言** / packer 冒烟 / **stringenc 五套**（含 apktool 真汇编、密钥流 468 例、联动端到端） / **uncheck 端到端 + 载荷与配置 4 套**（含本轮 extractNativeLibs / payload-sync / hookLevel / layer 四个事故的回归） | 仅改代码时跑 |
 > | `test` job 第三批（~5min） | **so-lock 52 项** / sig-guard2 / mem-readable / lsgs-strings（需 `../nox` 源码；CI 用 `setup-toolchain` 的 `nox-source: true`，**ref 为 `main` 而非 tag**） | 仅改代码时跑 |
 > | 本地手工 | `javacheck`（需 `ndk-build`）/ `packer-wiring`（需 `zipalign`）/ **`sig-verify`（需真实已签名 APK 夹具）** | **CI 不跑**，改动后必须本地跑 |
 >
