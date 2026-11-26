@@ -26,6 +26,7 @@
 // 编译：见 payload/c/build-native.sh
 
 #include <jni.h>
+#include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -54,6 +55,13 @@ static char s_apk_path[PATH_MAX];
 static char s_rep_path[PATH_MAX];
 static size_t s_apk_len = 0;
 static volatile int s_installed = 0;
+
+/* hook 分层（2026-11-27）。数值越大注册的接口越多，每层是上一层的超集。
+ * 定义放在这里而不是枚举，是为了让 JNI 侧直接传 int，不做字符串解析。 */
+#define NC_HOOK_LEVEL_CORE  1   /* open/fopen/access/stat —— 商业 App 主路径 */
+#define NC_HOOK_LEVEL_FULL  2   /* + at 家族 + readlink/readlinkat */
+#define NC_HOOK_LEVEL_ALL   3   /* + openat2/statx/opendir（默认） */
+static int s_hook_level = NC_HOOK_LEVEL_ALL;
 
 static inline int is_target_apk(const char *path) {
     if (path == NULL || s_apk_len == 0) return 0;
@@ -96,6 +104,10 @@ static statx_t     orig_statx     = NULL;
 // ─────────────────────────── 代理实现 ───────────────────────────
 
 static int proxy_open(const char *path, int flags, ...) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_open == NULL) { errno = ENOSYS; return -1; }
+
     mode_t mode = 0;
     if (flags & O_CREAT) {
         va_list ap; va_start(ap, flags); mode = (mode_t) va_arg(ap, int); va_end(ap);
@@ -105,6 +117,10 @@ static int proxy_open(const char *path, int flags, ...) {
 }
 
 static int proxy_open64(const char *path, int flags, ...) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_open64 == NULL) { errno = ENOSYS; return -1; }
+
     mode_t mode = 0;
     if (flags & O_CREAT) {
         va_list ap; va_start(ap, flags); mode = (mode_t) va_arg(ap, int); va_end(ap);
@@ -115,6 +131,10 @@ static int proxy_open64(const char *path, int flags, ...) {
 
 // __open_2 是 fortify 版（无 mode 参数）—— 两个目标 so 都导入它
 static int proxy___open_2(const char *path, int flags) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig___open_2 == NULL) { errno = ENOSYS; return -1; }
+
     if (is_target_apk(path)) return orig___open_2(s_rep_path, flags);
     return orig___open_2(path, flags);
 }
@@ -131,6 +151,10 @@ static int proxy___open_2(const char *path, int flags) {
  *    其它 dirfd 下 path 是相对该目录的，与绝对路径 base.apk 不可能相等，
  *    直接透传（也避免误伤）。 */
 static int proxy_openat(int dirfd, const char *path, int flags, ...) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_openat == NULL) { errno = ENOSYS; return -1; }
+
     mode_t mode = 0;
     if (flags & O_CREAT) { va_list ap; va_start(ap, flags); mode = (mode_t) va_arg(ap, int); va_end(ap); }
     if (dirfd == AT_FDCWD && is_target_apk(path))
@@ -139,6 +163,10 @@ static int proxy_openat(int dirfd, const char *path, int flags, ...) {
 }
 
 static int proxy_openat64(int dirfd, const char *path, int flags, ...) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_openat64 == NULL) { errno = ENOSYS; return -1; }
+
     mode_t mode = 0;
     if (flags & O_CREAT) { va_list ap; va_start(ap, flags); mode = (mode_t) va_arg(ap, int); va_end(ap); }
     if (dirfd == AT_FDCWD && is_target_apk(path))
@@ -148,6 +176,10 @@ static int proxy_openat64(int dirfd, const char *path, int flags, ...) {
 
 /* __openat_2 是 fortify 版：没有 mode 参数（调用方保证不带 O_CREAT） */
 static int proxy___openat_2(int dirfd, const char *path, int flags) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig___openat_2 == NULL) { errno = ENOSYS; return -1; }
+
     if (dirfd == AT_FDCWD && is_target_apk(path))
         return orig___openat_2(dirfd, s_rep_path, flags);
     return orig___openat_2(dirfd, path, flags);
@@ -156,27 +188,43 @@ static int proxy___openat_2(int dirfd, const char *path, int flags) {
 /* openat2 是 Linux 5.6+/Android 11+ 的新接口，第三个参数是 struct open_how*。
  * 不解析该结构，只改路径；how 原样透传。 */
 static int proxy_openat2(int dirfd, const char *path, void *how, size_t size) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_openat2 == NULL) { errno = ENOSYS; return -1; }
+
     if (dirfd == AT_FDCWD && is_target_apk(path))
         return orig_openat2(dirfd, s_rep_path, how, size);
     return orig_openat2(dirfd, path, how, size);
 }
 
 static FILE *proxy_fopen(const char *path, const char *mode) {
+    if (orig_fopen == NULL) { errno = ENOSYS; return NULL; }
+
     if (is_target_apk(path)) return orig_fopen(s_rep_path, mode);
     return orig_fopen(path, mode);
 }
 
 static FILE *proxy_fopen64(const char *path, const char *mode) {
+    if (orig_fopen64 == NULL) { errno = ENOSYS; return NULL; }
+
     if (is_target_apk(path)) return orig_fopen64(s_rep_path, mode);
     return orig_fopen64(path, mode);
 }
 
 static int proxy_access(const char *path, int mode) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_access == NULL) { errno = ENOSYS; return -1; }
+
     if (is_target_apk(path)) return orig_access(s_rep_path, mode);
     return orig_access(path, mode);
 }
 
 static int proxy_faccessat(int dirfd, const char *path, int mode, int flags) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_faccessat == NULL) { errno = ENOSYS; return -1; }
+
     // 只有绝对路径才可能是目标 APK；相对路径（相对 dirfd）保持原样
     if (path != NULL && path[0] == '/' && is_target_apk(path)) {
         return orig_faccessat(dirfd, s_rep_path, mode, flags);
@@ -185,11 +233,19 @@ static int proxy_faccessat(int dirfd, const char *path, int mode, int flags) {
 }
 
 static int proxy_stat(const char *path, struct stat *buf) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_stat == NULL) { errno = ENOSYS; return -1; }
+
     if (is_target_apk(path)) return orig_stat(s_rep_path, buf);
     return orig_stat(path, buf);
 }
 
 static int proxy_lstat(const char *path, struct stat *buf) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_lstat == NULL) { errno = ENOSYS; return -1; }
+
     if (is_target_apk(path)) return orig_lstat(s_rep_path, buf);
     return orig_lstat(path, buf);
 }
@@ -200,6 +256,10 @@ static int proxy_lstat(const char *path, struct stat *buf) {
 // fd 实际指向 code_cache/sigfix-origin.apk —— readlink 一查就露馅
 // （路径对不上 base.apk）。代理：结果路径等于 rep_path 时改报 apk_path。
 static ssize_t proxy_readlink(const char *path, char *buf, size_t bufsiz) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_readlink == NULL) { errno = ENOSYS; return -1; }
+
     ssize_t r = orig_readlink(path, buf, bufsiz);
     if (r > 0 && (size_t) r == strlen(s_rep_path)
             && strncmp(buf, s_rep_path, (size_t) r) == 0) {
@@ -218,6 +278,10 @@ static ssize_t proxy_readlink(const char *path, char *buf, size_t bufsiz) {
 // 加固侧的 sig_find_apk_fd 正是用 readlinkat 反查 fd 真实路径 ——
 // 如果只挂 readlink，那一路就能识破重定向。
 static ssize_t proxy_readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_readlinkat == NULL) { errno = ENOSYS; return -1; }
+
     ssize_t r = orig_readlinkat(dirfd, path, buf, bufsiz);
     if (r > 0 && (size_t) r == strlen(s_rep_path)
             && strncmp(buf, s_rep_path, (size_t) r) == 0) {
@@ -235,6 +299,10 @@ static ssize_t proxy_readlinkat(int dirfd, const char *path, char *buf, size_t b
 // 返回结构体很复杂，但路径重定向只需要换路径，结构由内核填。
 static int proxy_statx(int dirfd, const char *path, int flags,
                        unsigned int mask, struct statx *buf) {
+    /* orig 为 NULL = shadowhook 没给回原函数指针（该符号在目标系统
+     * 不存在，或 hook 半成功）。退化为不重定向，而不是空指针崩溃。 */
+    if (orig_statx == NULL) { errno = ENOSYS; return -1; }
+
     if (dirfd == AT_FDCWD && is_target_apk(path))
         return orig_statx(dirfd, s_rep_path, flags, mask, buf);
     return orig_statx(dirfd, path, flags, mask, buf);
@@ -248,6 +316,8 @@ static int proxy_statx(int dirfd, const char *path, int flags,
 //    扫 code_cache 会发现注入痕迹。当前无证据表明它扫 code_cache，
 //    先透传并留好扩展点（若后续实测暴露，在此挂拦截）。
 static DIR *proxy_opendir(const char *path) {
+    if (orig_opendir == NULL) { errno = ENOSYS; return NULL; }
+
     return orig_opendir(path);
 }
 
@@ -280,32 +350,62 @@ static void patch_all(void) {
     }
     LOGI("shadowhook init ok (v%s)", shadowhook_get_version());
 
+    // ══ 分层注册（2026-11-27）═══════════════════════════════════════
+    //
+    // 为什么分层而不是全挂：18 个 hook 全部生效时，会波及**与签名校验无关**
+    // 的进程内所有代码。实测（JMComic / Capacitor WebView）：
+    //   Java + native 两层 → 图片与网络加载失败
+    //   仅 Java 层         → 一切正常
+    // 但没定位到具体是哪几个 hook 引起的。所以做成能力分层：
+    // 代码全留，只是按 profile 决定注册哪些，便于按 App 类型权衡。
+    //
+    // profile 由 JNI 入口传入（Java 侧从 sigfix.json 的 "hookProfile" 读），
+    // 取值：
+    //   U. 全量（默认，覆盖最广，副作用最大）
+    //   C  核心（open/fopen/access/stat 家族）—— 商业 App 的主要路径
+    //   A  核心 + at 家族 + readlink —— 加防 fd 反查
+    //
+    // ⚠️ 每一层都是【上一层的超集】，不会出现"开了 C 反而少了某个"的情况。
+    // ⚠️ 各函数实现一字未改 —— 只是注册与否。将来要改行为，改 proxy_xxx。
+    const int lv = s_hook_level;
+
+    // ── 第 1 层：核心（任何 native 校验都必须先打开 base.apk）──
     hook_one("open",      (void *) proxy_open,      (void **) &orig_open);
     hook_one("open64",    (void *) proxy_open64,    (void **) &orig_open64);
     hook_one("__open_2",  (void *) proxy___open_2,  (void **) &orig___open_2);
     hook_one("fopen",     (void *) proxy_fopen,     (void **) &orig_fopen);
     hook_one("fopen64",   (void *) proxy_fopen64,   (void **) &orig_fopen64);
     hook_one("access",    (void *) proxy_access,    (void **) &orig_access);
-    hook_one("faccessat", (void *) proxy_faccessat, (void **) &orig_faccessat);
     hook_one("stat",      (void *) proxy_stat,      (void **) &orig_stat);
-    hook_one("lstat",     (void *) proxy_lstat,     (void **) &orig_lstat);
-    // 2026-11-23 补全（对照 so 导入表）：
-    //   不同目标的 so 导入集各不相同，常见的有：
-    //   open/stat/lstat/mmap/read/opendir/readdir/access/fopen/readlink/__open_2。
-    // readlink 是 fd 路径一致性校验的关键漏点；opendir 先透传占位。
-    hook_one("readlink",  (void *) proxy_readlink,  (void **) &orig_readlink);
-    hook_one("opendir",   (void *) proxy_opendir,   (void **) &orig_opendir);
 
-    // 2026-11-24 补全 openat 家族 + 新式接口（对照加固侧的导入表）：
-    //   加固的 sig_check.c 实际导入的是 __openat_2（fortify 版），
-    //   而 readlinkat / openat2 / statx 是 6 路取证书里绕开 open 的手段。
-    //   只挂 open/open64/__open_2 会让这 5 条路线全部漏过。
-    hook_one("openat",     (void *) proxy_openat,     (void **) &orig_openat);
-    hook_one("openat64",   (void *) proxy_openat64,   (void **) &orig_openat64);
-    hook_one("__openat_2", (void *) proxy___openat_2, (void **) &orig___openat_2);
-    hook_one("openat2",    (void *) proxy_openat2,    (void **) &orig_openat2);
-    hook_one("readlinkat", (void *) proxy_readlinkat, (void **) &orig_readlinkat);
-    hook_one("statx",      (void *) proxy_statx,      (void **) &orig_statx);
+    if (lv < NC_HOOK_LEVEL_FULL) {
+        // 第 2 层以下是"边缘路径"。选 C 档时到此为止 —— WebView /
+        // Capacitor / Flutter 这类自带 IO 栈的 App 用这一档。
+        LOGI("hook level = core（%d 个），跳过边缘路径", lv);
+    } else {
+        // ── 第 2 层：at 家族 + fd 反查（防 sig_find_apk_fd 那类取证）──
+        hook_one("faccessat",  (void *) proxy_faccessat,  (void **) &orig_faccessat);
+        hook_one("lstat",      (void *) proxy_lstat,      (void **) &orig_lstat);
+        hook_one("openat",     (void *) proxy_openat,     (void **) &orig_openat);
+        hook_one("openat64",   (void *) proxy_openat64,   (void **) &orig_openat64);
+        hook_one("__openat_2", (void *) proxy___openat_2, (void **) &orig___openat_2);
+        // readlink / readlinkat：目标 so 可能 readlink("/proc/self/fd/N")
+        // 反查 fd 真实路径。加固侧 sig_check.c 正是用 readlinkat 这么做的。
+        // 代价：只要目标 App 自己也有代码 readlink 到 origin.apk 的 fd，
+        // 拿到的是伪造路径（实测未见此情况，但保留开关以便排除）。
+        hook_one("readlink",   (void *) proxy_readlink,   (void **) &orig_readlink);
+        hook_one("readlinkat", (void *) proxy_readlinkat, (void **) &orig_readlinkat);
+
+        // ── 第 3 层：Android 11+ 新接口（FULL 档才开）──
+        //   openat2 / statx 是 Linux 5.6+/API 30+ 接口，Chromium 会用。
+        //   opendir 目前是纯透传（实现里直接 return orig），挂上去只是占位，
+        //   留在这里是为了将来要拦"扫 code_cache 找注入痕迹"时有位置可填。
+        if (lv >= NC_HOOK_LEVEL_FULL) {
+            hook_one("openat2", (void *) proxy_openat2, (void **) &orig_openat2);
+            hook_one("statx",   (void *) proxy_statx,   (void **) &orig_statx);
+            hook_one("opendir", (void *) proxy_opendir, (void **) &orig_opendir);
+        }
+    }
 
     // 统计关键函数是否挂上：open / __open_2 / fopen 是目标 so 的主力，
     // 加上 access / stat 共 5 个。至少 3 个成功才算可用。
@@ -324,8 +424,18 @@ static void patch_all(void) {
 
 JNIEXPORT jboolean JNICALL
 Java_com_nc_uncheck_SigFix_nativeHookApkPath(JNIEnv *env, jclass clazz,
-                                             jstring apkPath, jstring repPath) {
+                                             jstring apkPath, jstring repPath,
+                                             jint level) {
     if (s_installed) return JNI_TRUE;
+
+    /* hook 分层（2026-11-27）：默认 ALL，调用方可降档。
+     * 为什么由 Java 传而不是编译期常量：同一个 so 要在不同 App 上复用，
+     * 而"该用哪档"取决于目标 App 的 IO 栈（WebView/Flutter 类要降档）。
+     * 越界值一律钳到 [CORE, ALL]，不报错 —— 这是尽力而为的降级，不是契约。 */
+    if (level < NC_HOOK_LEVEL_CORE) level = NC_HOOK_LEVEL_CORE;
+    if (level > NC_HOOK_LEVEL_ALL)  level = NC_HOOK_LEVEL_ALL;
+    s_hook_level = (int) level;
+    LOGI("hook level = %d（1=core 2=+at 3=all）", s_hook_level);
 
     const char *a = (*env)->GetStringUTFChars(env, apkPath, NULL);
     const char *b = (*env)->GetStringUTFChars(env, repPath, NULL);

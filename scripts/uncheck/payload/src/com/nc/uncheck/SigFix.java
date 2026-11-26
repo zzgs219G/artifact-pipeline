@@ -67,6 +67,12 @@ public final class SigFix {
 
     private static volatile boolean sDone;
 
+    /** hook 分层（2026-11-27）：1=核心 2=+at/readlink 3=全量（缺省）。
+     *  为什么可降档：18 个 hook 全挂会波及与校验无关的代码 —— 实测
+     *  JMComic(Capacitor WebView) 在两层模式下图片/网络加载失败，
+     *  仅 Java 层正常。详见 nativeHookApkPath 调用点的注释。 */
+    private static int sHookLevel = 3;
+
     private SigFix() {
     }
 
@@ -218,7 +224,11 @@ public final class SigFix {
             org.json.JSONObject o =
                     new org.json.JSONObject(new String(bos.toByteArray(), "UTF-8"));
             String c = o.optString("cert", "");
-            Log.i(TAG, "从 sigfix.json 读到证书: " + (c.isEmpty() ? "空" : c.length() + " 字符"));
+            /* hook 分层（2026-11-27）：同一次读取顺带取 hookLevel，
+             * 缺省 3=全量（与历史行为一致）。越界值由 native 侧钳位。 */
+            sHookLevel = o.optInt("hookLevel", 3);
+            Log.i(TAG, "从 sigfix.json 读到证书: " + (c.isEmpty() ? "空" : c.length() + " 字符")
+                    + "，hookLevel=" + sHookLevel);
             return c;
         } catch (Throwable t) {
             Log.e(TAG, "读 sigfix.json 失败", t);
@@ -306,7 +316,11 @@ public final class SigFix {
             System.load(so.getAbsolutePath());
             Log.i(TAG, "native 库已加载: " + so.getAbsolutePath());
 
-            boolean ok = nativeHookApkPath(apkPath, rep.getAbsolutePath());
+            /* hook 分层（2026-11-27）：level 从 sigfix.json 的 hookLevel 读，
+             * 缺省 3（全量）。1=核心 2=+at/readlink 3=全量。
+             * 为什么要能降档：18 个 hook 全挂会波及与校验无关的代码 ——
+             * 实测 JMComic(Capacitor) 两层模式下图片/网络加载失败。 */
+            boolean ok = nativeHookApkPath(apkPath, rep.getAbsolutePath(), sHookLevel);
             if (ok) {
                 sNativeDone = true;
                 Log.i(TAG, "native 重定向已生效: " + apkPath + " -> " + rep.getAbsolutePath());
@@ -385,7 +399,7 @@ public final class SigFix {
     }
 
     /** native 实现：安装 IO 重定向 hook。成功返回 true。 */
-    private static native boolean nativeHookApkPath(String apkPath, String repPath);
+    private static native boolean nativeHookApkPath(String apkPath, String repPath, int level);
 
     private static long assetSize(Context ctx, String name) throws Throwable {        android.content.res.AssetFileDescriptor fd = ctx.getAssets().openFd(name);
         try {

@@ -471,6 +471,11 @@ def run(in_apk, out_apk, keep_work=None, api=30):
         cfg = {
             'cert': cert_b64,
             'originalApp': original_app_java or '',
+            # hook 分层（2026-11-27）：1=核心 2=+at/readlink 3=全量（默认）。
+            # 为什么可降档：18 个 hook 全挂会波及与校验无关的代码 ——
+            # 实测 JMComic(Capacitor WebView) 两层模式下图片/网络加载失败，
+            # 仅 Java 层正常；降到核心档可兼顾覆盖与兼容。
+            'hookLevel': int(os.environ.get('USIGN_HOOK_LEVEL', '3')),
         }
         if os.environ.get('USIGN_NO_SIGFIX') == '1':
             cfg['cert'] = ''   # 诊断：让 SigFix.install 读不到证书而提前 return（Java hook 全禁）
@@ -478,7 +483,7 @@ def run(in_apk, out_apk, keep_work=None, api=30):
         replaced['assets/nc_sigfix/sigfix.json'] = cfg_bytes
         print(f'==> 投放 assets/nc_sigfix/sigfix.json'
               f'（cert {len(cert_b64)} 字符，originalApp='
-              f'{original_app_java or "(无)"}）')
+              f'{original_app_java or "(无)"}，hookLevel={cfg["hookLevel"]}）')
 
         # 6b) 把解包目录里**改写过的 AndroidManifest.xml** 写回产物。
         #
