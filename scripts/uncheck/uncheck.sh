@@ -43,7 +43,7 @@ usage() {
                   PackageManager 校验，Java 层就够了。
 
   （原 --full-origin 全量副本参数已于 2026-11-24 移除：该分支从未被
-    实现，恒走数据复用打包，见 docs/交接-2026-11-24.md §6.4）
+    实现，恒走数据复用打包 zip-reuse.py）
 EOF
   exit 2
 }

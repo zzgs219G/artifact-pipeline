@@ -411,15 +411,22 @@ vm + mba + param_aggregate + vm_flatten
 | ❌ 给开关改名（"不显眼的名字"）| ❌ 没用 —— `strings` 看的是 ASCII，改名不改变可见性 |
 | ❌ 用 Android 的 `debuggable` | ❌ `protect.sh` 已强制 `false`（安全要求，不能为调试改回去）|
 
-**当前实现**：`nc_guard_report.c` 的 `ncg_debug_log_path()` 整体包在
-`#ifdef NCGUARD_DEBUG_REPORT` 里；`lib-ndk.sh` 读 `DEBUG_REPORT` 环境变量
-决定是否加宏。出调试包：
+**当前实现**（2026-11-25 起）：自检报告**无条件编入所有包**，
+原 `#ifdef NCGUARD_DEBUG_REPORT` / `DEBUG_REPORT=1` / `--debug-report`
+全部废止（参数保留但无作用，见 `scripts/lib/lib-ndk.sh:100` 的注释）。
+
+**唯一的开关是运行期哨兵**：
 
 ```bash
-python3 scripts/trigger_build.py app.apk --sigcheck --vmp --debug-report
+adb shell 'touch /storage/emulated/0/xixin_debug'    # 下次启动写报告
+adb shell "cat /storage/emulated/0/Android/data/<包名>/files/ncguard_log.md"
 ```
 
-详见 `docs/调试包怎么出.md`。
+判据与报告格式见 `docs/发布与验证流程.md` 的「怎么看自检报告」一节。
+
+> 代价如实：哨兵路径字符串会进 `.rodata`（`strings` 可见）。
+> 换来的是「任何包都能排障」——不用为了看报告重出一个特定构建，
+> 而线上问题往往拿不到那个构建。
 
 ---
 

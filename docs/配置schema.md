@@ -92,6 +92,7 @@ configs/v1/config-schema.json          ← 唯一真相源（UI + 校验 + 执�
 | `arg_value` | ❌ | 仅 `value_kind=arg_value`，与 `arg_on` 成对（见 §3.2） |
 | `options` | ❌ | 仅 `type=select`/`choice`，`[{value,label},...]` |
 | `visible_when` | ❌ | 子项依赖 `{"key": "<同模块子项>", "equals": "<值>"}`，见 §5.5 |
+| `hidden` | ❌ | 只允许 `true`。UI 不渲染该子项，但 resolver 仍认这个键。用于「当前无作用对象、暂时不让用户选」的开关（如 `dex2c_stub`）。见 §5.6 |
 
 ### 2.1 `type` 与 `value_kind` 是**两套正交语义**
 
@@ -413,9 +414,48 @@ if dep_actual is not None and dep_actual != dep_expect:
 （用户先选 Java 桩勾上它，再切纯净 C 桩，旧版 App 不会清键）。
 报错会让**原本能跑的构建突然失败** —— 与 `choice` 的旧布尔兼容同一类处理。
 
-**当前唯一使用者**：`stringenc.dex2c_stub`（`equals: "java"`）。
-`stub_impl` 选「纯 C 桩」时它整行消失 —— 因为纯 C 桩的算法已在 so 里，
-不需要"抽进 so"这个动作，勾了只会让 `protect.sh` 报互斥错。
+**当前没有使用者**。曾用于 `stringenc.dex2c_stub`（`equals: "java"`），
+2026-11-22 Java 桩下线后该依赖随之移除 —— 它已改用 `hidden`，见 §5.6。
+
+---
+
+### 5.6 无条件隐藏：`hidden`（2026-11-27 已实现）
+
+```jsonc
+{ "key": "dex2c_stub",
+  "hidden": true, ... }
+```
+
+语义：**UI 整行不渲染，但 `protect_config` 里仍然认这个键**，resolver 照常
+`--dex2c-stub`。与 `visible_when` 的区别是「有没有生效条件」：
+
+| | `visible_when` | `hidden` |
+|---|---|---|
+| 语义 | 依赖某取值**才出现** | **无条件**不出现（当前无作用对象） |
+| 依赖 | 需要同模块一个 `choice` 子项 | 无 |
+| 何时用 | 两个选项互斥、只有其一时才有意义 | 接口留着但暂时没东西可作用 |
+
+**为什么 `dex2c_stub` 不能用 `visible_when` 隐藏**（2026-11-27 实测）：
+
+1. 它原本依赖的 `stub_impl` 已随 Java 桩下线**被删除** → 指向不存在的 key
+2. 更关键：jian_box 的 `childVisible()` 对「依赖键取不到值」是 **fail-open**
+   （`ProtectConfigSchema.kt:262` `actual == null || ...` → 显示）。
+   指向不存在的 key **不会隐藏，反而恒显示**
+3. 它现在没有生效条件 —— 是"永久待命"，不是"满足条件才出现"
+
+**`check-schema.py` 的三条断言**：
+
+| # | 约束 | 违反后果 |
+|---|---|---|
+| 1 | 只允许 `true`（要显示就删掉该字段，别写 `false`） | 写 `false` 会让读者以为它可能是动态的 |
+| 2 | 不能同时有 `required` | UI 不渲染 → 用户无法填必填项 → 提交必然校验失败 |
+| 3 | 不能与 `visible_when` 共存 | 一个无条件隐藏、一个有条件显示，语义冲突 |
+
+**当前唯一使用者**：`stringenc.dex2c_stub`。
+Java 解密桩 2026-11-22 已归档（`docs/备份/java桩-归档-2026-11-22/`），
+`--stringenc` 现在强制纯 C 桩，而 C 桩没有 Java 内核可转译 ——
+勾了会 fail-fast。CLI 与 `LINK_STUB` 联动实现**全部保留**，
+留给将来的 Java 插桩模块。
 
 ## 6. 消费者各自会拦什么（三层 fail-fast）
 
