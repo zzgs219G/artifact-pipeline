@@ -137,6 +137,15 @@ static volatile unsigned long nc_prof_cacheget = 0;
 static volatile unsigned long nc_prof_mallocns = 0;
 static volatile unsigned long nc_prof_newstr = 0;
 static volatile unsigned long nc_prof_cacheput = 0;
+/* 2026-11-26：区分「每次调用都慢」与「某次卡住」——
+ * 只记累计耗时会把两者混在一起，修法完全不同：
+ *   均匀慢 → 探测器/哈希结构问题
+ *   单次卡 → 阻塞等待（JNI/GC/锁）
+ * worst_us 记单次最坏耗时，full_scan 记「扫满整表仍未命中」的次数，
+ * probes 记累计探测槽数（÷calls 得平均探测深度）。 */
+static volatile unsigned long nc_prof_worst_us = 0;
+static volatile unsigned long nc_prof_full_scan = 0;
+static volatile unsigned long nc_prof_probes = 0;
 
 static unsigned long nc_prof_now_ns(void)
 {
@@ -157,6 +166,14 @@ void nc_strdec_profile_dump(void)
                         nc_prof_cacheget / 1e6, nc_prof_ns / 1e6,
                         nc_prof_mallocns / 1e6, nc_prof_newstr / 1e6,
                         nc_prof_cacheput / 1e6, nc_prof_keyns / 1e6);
+    __android_log_print(ANDROID_LOG_INFO, NC_SD_TAG,
+                        "prof2: worst=%.1fms fullscan=%lu probes=%lu avg=%.1f",
+                        nc_prof_worst_us / 1000.0,
+                        nc_prof_full_scan,
+                        nc_prof_probes,
+                        nc_prof_calls
+                            ? (double) nc_prof_probes / (double) nc_prof_calls
+                            : 0.0);
 }
 #endif
 
@@ -196,26 +213,45 @@ static jstring nc_cache_get(JNIEnv *env, const char *payload, size_t n)
     }
     const uint64_t h = nc_fnv1a(payload, n);
     size_t idx = (size_t)(h % NC_CACHE_CAP);
+#ifdef NC_STRDEC_PROFILE
+    size_t _probe_done = 0;
+#endif
     for (size_t probe = 0; probe < NC_CACHE_CAP; probe++) {
         const nc_cache_slot *s = &nc_cache[idx];
+#ifdef NC_STRDEC_PROFILE
+        _probe_done++;
+#endif
         if (s->hash == 0) {
+#ifdef NC_STRDEC_PROFILE
+            nc_prof_probes += _probe_done;
+#endif
             return NULL;                /* 空槽 = 未命中（开放寻址可提前终止）*/
         }
         if (s->hash == h) {
             /* hash 相同还要比内容：hash 碰撞是可能的，不能只比 hash */
             const char *k = (*env)->GetStringUTFChars(env, s->key, NULL);
             if (k == NULL) {
+#ifdef NC_STRDEC_PROFILE
+                nc_prof_probes += _probe_done;
+#endif
                 return NULL;
             }
             jsize kl = (*env)->GetStringUTFLength(env, s->key);
             int same = (kl == (jsize)n) && (memcmp(k, payload, n) == 0);
             (*env)->ReleaseStringUTFChars(env, s->key, k);
             if (same) {
+#ifdef NC_STRDEC_PROFILE
+                nc_prof_probes += _probe_done;
+#endif
                 return s->val;
             }
         }
         idx = (idx + 1) % NC_CACHE_CAP;
     }
+#ifdef NC_STRDEC_PROFILE
+    nc_prof_probes += _probe_done;
+    nc_prof_full_scan++;
+#endif
     return NULL;
 }
 
@@ -505,7 +541,13 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
 #endif
     jstring hit = nc_cache_get(env, pchars, (size_t)plen);
 #ifdef NC_STRDEC_PROFILE
-    nc_prof_cacheget += nc_prof_now_ns() - _t_cg;
+    {
+        unsigned long _d = nc_prof_now_ns() - _t_cg;
+        nc_prof_cacheget += _d;
+        if (_d / 1000 > nc_prof_worst_us) {
+            nc_prof_worst_us = _d / 1000;   /* 单次最坏（微秒） */
+        }
+    }
 #endif
     if (hit != NULL) {
         (*env)->ReleaseStringUTFChars(env, payload, pchars);
