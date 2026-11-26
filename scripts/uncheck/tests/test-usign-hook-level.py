@@ -64,8 +64,9 @@ chk("定义了三个档位常量",
 chk("有 s_hook_level 变量", "s_hook_level" in c)
 chk("核心档有 early return（不注册边缘 hook）",
     re.search(r'if\s*\(lv\s*<\s*NC_HOOK_LEVEL_FULL\)', c) is not None)
-chk("全量档才注册 openat2/statx/opendir",
-    re.search(r'if\s*\(lv\s*>=\s*NC_HOOK_LEVEL_FULL\)[\s\S]{0,400}openat2', c) is not None)
+chk("openat2/statx/opendir 各自独立成档（4/5/6）",
+    all(re.search(rf'if\s*\(lv\s*>=\s*{n}\)[\s\S]{{0,200}}{fn}', c) is not None
+        for n, fn in ((4, 'openat2'), (5, 'statx'), (6, 'opendir'))))
 # 核心档的 7 个函数必须在 if 之前注册（无条件）
 core_block = c.split("if (lv < NC_HOOK_LEVEL_FULL)")[0]
 for fn in ("open", "open64", "__open_2", "fopen", "fopen64", "access", "stat"):
@@ -80,7 +81,8 @@ chk("越界值在 native 侧钳位", "if (level < NC_HOOK_LEVEL_CORE)" in c and 
 
 print("\n[④ 产物侧：run.py 写 hookLevel]")
 chk("cfg 里含 hookLevel", "'hookLevel'" in r)
-chk("从环境变量读且有默认值", "USIGN_HOOK_LEVEL" in r and "'3'" in r)
+chk("从环境变量读且有默认值 6（=全量，与历史行为一致）",
+    "USIGN_HOOK_LEVEL" in r and "'6'" in r)
 
 print("\n[⑤ shell 层]")
 sh = (ROOT / "scripts/uncheck/uncheck.sh").read_text(encoding="utf-8")

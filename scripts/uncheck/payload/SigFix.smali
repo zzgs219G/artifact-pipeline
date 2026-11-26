@@ -20,7 +20,9 @@
 
 .field private static final TAG:Ljava/lang/String; = "SigFix"
 
-.field private static volatile sDone:Z
+.field private static volatile sDone:Z = false
+
+.field private static sHookLevel:I = 0x6
 
 .field private static volatile sNativeDone:Z
 
@@ -994,7 +996,9 @@
 
     move-result-object p0
 
-    invoke-static {v6, p0}, Lcom/nc/uncheck/SigFix;->nativeHookApkPath(Ljava/lang/String;Ljava/lang/String;)Z
+    sget v0, Lcom/nc/uncheck/SigFix;->sHookLevel:I
+
+    invoke-static {v6, p0, v0}, Lcom/nc/uncheck/SigFix;->nativeHookApkPath(Ljava/lang/String;Ljava/lang/String;I)Z
 
     move-result p0
 
@@ -1053,7 +1057,7 @@
     return-void
 .end method
 
-.method private static native nativeHookApkPath(Ljava/lang/String;Ljava/lang/String;)Z
+.method private static native nativeHookApkPath(Ljava/lang/String;Ljava/lang/String;I)Z
 .end method
 
 .method private static readCertFromConfig(Landroid/content/Context;)Ljava/lang/String;
@@ -1118,6 +1122,16 @@
 
     move-result-object p0
 
+    const-string v4, "hookLevel"
+
+    const/4 v5, 0x6
+
+    invoke-virtual {v3, v4, v5}, Lorg/json/JSONObject;->optInt(Ljava/lang/String;I)I
+
+    move-result v3
+
+    sput v3, Lcom/nc/uncheck/SigFix;->sHookLevel:I
+
     new-instance v3, Ljava/lang/StringBuilder;
 
     invoke-direct {v3}, Ljava/lang/StringBuilder;-><init>()V
@@ -1163,6 +1177,18 @@
 
     :goto_1
     invoke-virtual {v3, v4}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v3
+
+    const-string v4, "\uff0chookLevel="
+
+    invoke-virtual {v3, v4}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v3
+
+    sget v4, Lcom/nc/uncheck/SigFix;->sHookLevel:I
+
+    invoke-virtual {v3, v4}, Ljava/lang/StringBuilder;->append(I)Ljava/lang/StringBuilder;
 
     move-result-object v3
 

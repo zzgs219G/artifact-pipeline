@@ -67,11 +67,11 @@ public final class SigFix {
 
     private static volatile boolean sDone;
 
-    /** hook 分层（2026-11-27）：1=核心 2=+at/readlink 3=全量（缺省）。
+    /** hook 分层（2026-11-27）：1=核心 2=+at/readlink 3=同2 4=+openat2 5=+statx 6=+opendir(缺省)。
      *  为什么可降档：18 个 hook 全挂会波及与校验无关的代码 —— 实测
      *  JMComic(Capacitor WebView) 在两层模式下图片/网络加载失败，
      *  仅 Java 层正常。详见 nativeHookApkPath 调用点的注释。 */
-    private static int sHookLevel = 3;
+    private static int sHookLevel = 6;
 
     private SigFix() {
     }
@@ -226,7 +226,7 @@ public final class SigFix {
             String c = o.optString("cert", "");
             /* hook 分层（2026-11-27）：同一次读取顺带取 hookLevel，
              * 缺省 3=全量（与历史行为一致）。越界值由 native 侧钳位。 */
-            sHookLevel = o.optInt("hookLevel", 3);
+            sHookLevel = o.optInt("hookLevel", 6);
             Log.i(TAG, "从 sigfix.json 读到证书: " + (c.isEmpty() ? "空" : c.length() + " 字符")
                     + "，hookLevel=" + sHookLevel);
             return c;
@@ -317,7 +317,7 @@ public final class SigFix {
             Log.i(TAG, "native 库已加载: " + so.getAbsolutePath());
 
             /* hook 分层（2026-11-27）：level 从 sigfix.json 的 hookLevel 读，
-             * 缺省 3（全量）。1=核心 2=+at/readlink 3=全量。
+             * 缺省 6（全量）。1=核心 2=+at/readlink 4/5/6 逐个加新接口。
              * 为什么要能降档：18 个 hook 全挂会波及与校验无关的代码 ——
              * 实测 JMComic(Capacitor) 两层模式下图片/网络加载失败。 */
             boolean ok = nativeHookApkPath(apkPath, rep.getAbsolutePath(), sHookLevel);

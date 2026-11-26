@@ -60,7 +60,12 @@ static volatile int s_installed = 0;
  * 定义放在这里而不是枚举，是为了让 JNI 侧直接传 int，不做字符串解析。 */
 #define NC_HOOK_LEVEL_CORE  1   /* open/fopen/access/stat —— 商业 App 主路径 */
 #define NC_HOOK_LEVEL_FULL  2   /* + at 家族 + readlink/readlinkat */
-#define NC_HOOK_LEVEL_ALL   3   /* + openat2/statx/opendir（默认） */
+/* 3 = 下面三个逐个叠加的起点（等价旧"全量"）。4/5/6 是定位用的细分档，
+ * 每档只多一个接口 —— 见 patch_all 里第 3~5 层的说明。 */
+#define NC_HOOK_LEVEL_STEP  3   /* 档 3：与档 2 相同（兼容旧值） */
+#define NC_HOOK_LEVEL_OPENAT2 4 /* + openat2 */
+#define NC_HOOK_LEVEL_STATX   5 /* + statx */
+#define NC_HOOK_LEVEL_ALL   6   /* + opendir（默认，覆盖最广） */
 static int s_hook_level = NC_HOOK_LEVEL_ALL;
 
 static inline int is_target_apk(const char *path) {
@@ -325,14 +330,43 @@ static DIR *proxy_opendir(const char *path) {
 
 // xhook_register 的 pattern 传 ".*" —— 匹配所有已加载和后续加载的 so。
 // 回调里靠 is_target_apk 判断，不匹配的立即透传，开销可忽略。
-static void hook_one(const char *name, void *proxy, void **orig) {
+/* 有些"失败"是预期内的，降到 INFO 并用中性措辞，避免日志里出现红色 E
+ * 让人以为出了问题（2026-11-27）：
+ *
+ *   · errno 16 SHADOWHOOK_ERRNO_DUP = 该符号与本体重名同址。
+ *     真机 libc 实测：open@0x8f150 == open64@0x8f150、
+ *     openat@0x8f410 == openat64@0x8f410、fopen@0xa3530 == fopen64@0xa3530。
+ *     本体先注册已占用该地址，别名再注册必报 16 —— 功能完整。
+ *
+ *   · errno 18 SHADOWHOOK_ERRNO_ELF = 该符号在 libc 里不存在。
+ *     典型是 openat2（内核有、bionic 无封装），见 patch_all 的说明。
+ */
+/* ⚠️ 这两个编号来自 shadowhook 的 sh_errno.c 消息表，不是 shadowhook.h 的
+ * SHADOWHOOK_ERRNO_DUP(=36，那是 init/fini 回调的重复码) —— 两套编号不同，
+ * 别混用。这里用 US_ 前缀避免与头文件宏撞名。 */
+#define US_SH_ERRNO_DUP  16   /* "Duplicate shared hook" */
+#define US_SH_ERRNO_ELF  18   /* "Find symbol in ELF failed" */
+
+static void hook_one_opt(const char *name, void *proxy, void **orig,
+                         const char *why) {
     void *stub = shadowhook_hook_sym_name("libc.so", name, proxy, orig);
     if (stub != NULL) {
         LOGI("hooked: %s", name);
-    } else {
-        int e = shadowhook_get_errno();
-        LOGE("hook fail: %s (%d %s)", name, e, shadowhook_to_errmsg(e));
+        return;
     }
+    int e = shadowhook_get_errno();
+    if (e == US_SH_ERRNO_DUP || e == US_SH_ERRNO_ELF
+            || why != NULL) {
+        /* why != NULL 表示调用方已声明"这个挂了也不算失败" */
+        LOGI("skip: %s (%d %s%s%s)", name, e, shadowhook_to_errmsg(e),
+             why ? " - " : "", why ? why : "");
+        return;
+    }
+    LOGE("hook fail: %s (%d %s)", name, e, shadowhook_to_errmsg(e));
+}
+
+static void hook_one(const char *name, void *proxy, void **orig) {
+    hook_one_opt(name, proxy, orig, NULL);
 }
 
 static void patch_all(void) {
@@ -371,10 +405,12 @@ static void patch_all(void) {
 
     // ── 第 1 层：核心（任何 native 校验都必须先打开 base.apk）──
     hook_one("open",      (void *) proxy_open,      (void **) &orig_open);
-    hook_one("open64",    (void *) proxy_open64,    (void **) &orig_open64);
+    hook_one_opt("open64",    (void *) proxy_open64,    (void **) &orig_open64,
+                 "open 的别名，同址已挂");
     hook_one("__open_2",  (void *) proxy___open_2,  (void **) &orig___open_2);
     hook_one("fopen",     (void *) proxy_fopen,     (void **) &orig_fopen);
-    hook_one("fopen64",   (void *) proxy_fopen64,   (void **) &orig_fopen64);
+    hook_one_opt("fopen64",   (void *) proxy_fopen64,   (void **) &orig_fopen64,
+                 "fopen 的别名，同址已挂");
     hook_one("access",    (void *) proxy_access,    (void **) &orig_access);
     hook_one("stat",      (void *) proxy_stat,      (void **) &orig_stat);
 
@@ -387,7 +423,8 @@ static void patch_all(void) {
         hook_one("faccessat",  (void *) proxy_faccessat,  (void **) &orig_faccessat);
         hook_one("lstat",      (void *) proxy_lstat,      (void **) &orig_lstat);
         hook_one("openat",     (void *) proxy_openat,     (void **) &orig_openat);
-        hook_one("openat64",   (void *) proxy_openat64,   (void **) &orig_openat64);
+        hook_one_opt("openat64",   (void *) proxy_openat64,   (void **) &orig_openat64,
+                     "openat 的别名，同址已挂");
         hook_one("__openat_2", (void *) proxy___openat_2, (void **) &orig___openat_2);
         // readlink / readlinkat：目标 so 可能 readlink("/proc/self/fd/N")
         // 反查 fd 真实路径。加固侧 sig_check.c 正是用 readlinkat 这么做的。
@@ -396,13 +433,36 @@ static void patch_all(void) {
         hook_one("readlink",   (void *) proxy_readlink,   (void **) &orig_readlink);
         hook_one("readlinkat", (void *) proxy_readlinkat, (void **) &orig_readlinkat);
 
-        // ── 第 3 层：Android 11+ 新接口（FULL 档才开）──
-        //   openat2 / statx 是 Linux 5.6+/API 30+ 接口，Chromium 会用。
-        //   opendir 目前是纯透传（实现里直接 return orig），挂上去只是占位，
-        //   留在这里是为了将来要拦"扫 code_cache 找注入痕迹"时有位置可填。
-        if (lv >= NC_HOOK_LEVEL_FULL) {
-            hook_one("openat2", (void *) proxy_openat2, (void **) &orig_openat2);
+        // ── 第 3~5 层：Android 11+ 新接口，逐个加（2026-11-27）──
+        //
+        // 为什么拆成一个接口一档：实测 JMComic(Capacitor WebView) 在
+        // 档 1(7 个) / 档 2(14 个) 下图片和网络都正常，档 3(18 个) 坏。
+        // 所以问题一定在下面这 3 个里的某一个。一档加一个就能一次定位，
+        // 比反复二分省事。
+        //
+        // ⚠️ 定位完成后应该把这三档收敛回去（保留发现的坏接口单独成档，
+        //    其余合并），否则档位会一直膨胀。收敛前别在 UI 里暴露 4/5/6。
+        if (lv >= 4) {
+            /* ⚠️ 不注册 openat2（2026-11-27）。
+             *
+             * 真机 libc 实测：open/openat/fopen 及其 64 位别名都在，但
+             * **openat2 不存在**（NDK 的 API 23/29/30/35 sysroot 全无此符号）。
+             * 它是内核 Linux 5.6+ 的系统调用，bionic 从未给它做 libc 封装 ——
+             * 应用要调只能自己写 syscall(__NR_openat2, ...)，不经过 libc 符号，
+             * 我们也就 hook 不到。
+             *
+             * 注册它的唯一效果是每次启动多一次 dlsym 失败 + 一条日志。
+             * proxy_openat2 / orig_openat2 的实现全部保留：万一将来 bionic
+             * 加了封装，把下面这行取消注释即可（档位语义不变）。
+             */
+            /* hook_one("openat2", (void *) proxy_openat2, (void **) &orig_openat2); */
+        }
+        if (lv >= 5) {
             hook_one("statx",   (void *) proxy_statx,   (void **) &orig_statx);
+        }
+        if (lv >= 6) {
+            // opendir 目前是纯透传（proxy_opendir 直接 return orig_opendir），
+            // 挂上去只是占位，留位置给将来"拦扫 code_cache 找注入痕迹"。
             hook_one("opendir", (void *) proxy_opendir, (void **) &orig_opendir);
         }
     }

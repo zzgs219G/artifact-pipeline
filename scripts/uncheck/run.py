@@ -471,11 +471,13 @@ def run(in_apk, out_apk, keep_work=None, api=30):
         cfg = {
             'cert': cert_b64,
             'originalApp': original_app_java or '',
-            # hook 分层（2026-11-27）：1=核心 2=+at/readlink 3=全量（默认）。
+            # hook 分层（2026-11-27）：1=核心 2=+at/readlink
+            # 3=与2同(兼容旧值) 4=+openat2 5=+statx 6=+opendir(默认=全量)。
+            # 4/5/6 是为定位"哪个新接口导致 WebView 网络异常"而拆的细分档。
             # 为什么可降档：18 个 hook 全挂会波及与校验无关的代码 ——
             # 实测 JMComic(Capacitor WebView) 两层模式下图片/网络加载失败，
             # 仅 Java 层正常；降到核心档可兼顾覆盖与兼容。
-            'hookLevel': int(os.environ.get('USIGN_HOOK_LEVEL', '3')),
+            'hookLevel': int(os.environ.get('USIGN_HOOK_LEVEL', '6')),
         }
         if os.environ.get('USIGN_NO_SIGFIX') == '1':
             cfg['cert'] = ''   # 诊断：让 SigFix.install 读不到证书而提前 return（Java hook 全禁）
@@ -484,6 +486,38 @@ def run(in_apk, out_apk, keep_work=None, api=30):
         print(f'==> 投放 assets/nc_sigfix/sigfix.json'
               f'（cert {len(cert_b64)} 字符，originalApp='
               f'{original_app_java or "(无)"}，hookLevel={cfg["hookLevel"]}）')
+
+        # 6b-0) extractNativeLibs 必须是 true（2026-11-27 补，与 ApkForge 对齐）
+        #
+        # 为什么：我们往 lib/<abi>/ 注入 libusign.so，而 SigFix 用的是
+        #   System.load(nativeLibraryDir + "/libusign.so")  —— 需要磁盘上的实体文件。
+        # extractNativeLibs="false" 时系统安装阶段【不解压】，nativeLibraryDir
+        # 是个空目录，System.load 必然失败 → 打一行 warn 就跳过 native 层，
+        # 而构建和安装全程没有任何报错。
+        #
+        # 实测代价（2026-11-27）：用这套 Python 脚本给用户出了 6 轮档位测试包，
+        # native hook 一次都没加载过，据此得出的档位结论全部作废。
+        #
+        # 为什么用 patch-extractnativelibs.py 而不是重建 AXML：它原位改
+        # BOOLEAN 属性的 data（false=0 → true=0xFFFFFFFF），文件大小与所有
+        # 偏移不变，不碰字符串池。属性不存在时它 exit 1 —— 那种包很少见
+        # （Android 6+ aapt 会显式写出 false），真遇到就明确失败，不静默放过。
+        if os.environ.get('USIGN_NO_NATIVE') != '1':
+            import subprocess as _sp
+            _mf = os.path.join(decompiled, 'AndroidManifest.xml')
+            _r = _sp.run(
+                [sys.executable,
+                 os.path.join(_ROOT, 'scripts/repack/patch-extractnativelibs.py'),
+                 _mf],
+                capture_output=True, text=True)
+            _out = (_r.stdout + _r.stderr).strip()
+            if _r.returncode != 0:
+                raise RuntimeError(
+                    'extractNativeLibs 改写失败（native 层将无法加载，'
+                    '请勿忽略）：\n' + _out +
+                    '\n如果该包确实没写这个属性，需要给它补一个 —— '
+                    '见 ApkForge 的 AxmlEditor.setBooleanAttrOnApplication。')
+            print(f'==> extractNativeLibs: {_out or "已是 true"}')
 
         # 6b) 把解包目录里**改写过的 AndroidManifest.xml** 写回产物。
         #

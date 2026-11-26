@@ -18,7 +18,7 @@ _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WANT_UNCHECK=0
 JAVA_ONLY=0
-HOOK_LEVEL=3
+HOOK_LEVEL=6
 
 log_info() { printf '\033[32m[uncheck]\033[0m %s\n' "$*"; }
 log_warn() { printf '\033[33m[uncheck]\033[0m %s\n' "$*"; }
@@ -29,10 +29,13 @@ usage() {
 用法: uncheck.sh <输入.apk> <输出_未签名.apk> --uncheck
 
   --uncheck       执行去校验（必填）
-  --hook-level N  native hook 分层 1~3（默认 3，需 native 层生效）
+  --hook-level N  native hook 分层 1~6（默认 6，需 native 层生效）
                     1 核心(open/fopen/access/stat)
                     2 = 1 + at 家族 + readlink（防 fd 反查）
-                    3 = 2 + openat2/statx/opendir（默认，覆盖最广）
+                    3 = 2（兼容旧值）
+                    4 = 3 + openat2
+                    5 = 4 + statx
+                    6 = 5 + opendir（默认，覆盖最广）
   --java-only     只做 Java 层（不投放 libusign.so）
                   默认是「Java + native」两层。某些 App（尤其 WebView /
                   Capacitor / Flutter 类）被 native 层 libc 重定向影响后
