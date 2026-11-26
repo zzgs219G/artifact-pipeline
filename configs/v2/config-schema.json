@@ -24,13 +24,13 @@
             {
               "value": "both",
               "label": "完整",
-              "desc": "通过系统接口查签名、直接读 APK 文件，两种都能绕。",
+              "desc": "查签名、读 APK 文件，两条路都能绕。",
               "arg_on": ""
             },
             {
               "value": "java",
               "label": "仅 Java 层",
-              "desc": "只绕通过系统接口查签名的；直接读 APK 文件的绕过不了。",
+              "desc": "只拦查签名；读 APK 文件的拦不住。",
               "arg_on": "--java-only"
             }
           ]

@@ -18,6 +18,7 @@ GitHub Actions 脚本集合，按配置顺序执行构建步骤。
 | **模块之间怎么联动** | [docs/模块联动关系.md](docs/模块联动关系.md) |
 | **去签名校验模块**（`scripts/uncheck/`，**不是加固**） | [scripts/uncheck/README.md](scripts/uncheck/README.md) |
 | **签名校验接手的缺口与补法**（native 层 / IO 重定向 / 未验证项） | [docs/签名校验接手文档.md](docs/签名校验接手文档.md) |
+| **注入点怎么选**（进程启动时序 / attachBaseContext / Provider / appComponentFactory） | [docs/Android进程启动时序.md](docs/Android进程启动时序.md) |
 
 ### ⚠️ 本仓库有两条方向相反的线
 
