@@ -219,11 +219,14 @@ WANT_DEX2C_STUB=0     # 联动子复选框:把解密桩内核 dn() 也抽进 dex
 #   · nc_fnv1a               ↑ 两者各自调用一次 → 11.5 万次；按字节做 64 位乘法
 #   · nc_jni_fail            失败兜底
 #   · nc_ensure_key          每次解密首选短路（读 flag），一旦未就绪则跑一次密钥链
-#   · nc_strdec_fail_count   诊断计数（Java 侧可读）
-# 不列哪些（每个进程只跑一次 → 混淆到 1ms 也只有 4ms，留着换保护）：
+# 不列哪些（每个进程只跑一次 → 混淆到 1ms 也只有几 ms，留着换保护）：
 #   nc_set_key_with_cert / nc_find_shell_symbol / nc_phdr_cb / nc_find_apk_path
 #   —— 密钥查找链，攻击者最想读，低频，混淆无性能代价。
-NC_OBF_HOT_FUNCS='nc_strdec_jni_decrypt|nc_jstr_chars|nc_cache_get|nc_cache_put|nc_jni_fail|nc_fnv1a|nc_ensure_key|nc_strdec_fail_count'
+#
+# ⚠️ 判据必须自洽：白名单里的成员要在热路径闭包内，否则就是白拿混淆豁免。
+#    nc_strdec_fail_count 曾被列在这里 —— 它是诊断计数（读 nc_fail_count），
+#    没人调用（头文件无声明、Java/C 侧零调用点），2026-11-26 移出。
+NC_OBF_HOT_FUNCS='nc_strdec_jni_decrypt|nc_jstr_chars|nc_cache_get|nc_cache_put|nc_jni_fail|nc_fnv1a|nc_ensure_key'
 # --stringenc-native（2026-11-09）：解密桩改成纯 C 实现。
 #   java（默认）：现有 StrDec.java 桩，零漂移
 #   native      ：算法在 csrc/nc_strdec.c，编进 libnc.so，dex 侧只有 native 声明
