@@ -650,6 +650,18 @@ if [[ -f "$JNI_C" ]]; then
   # ④ 字节上限守卫存在（防 key 副本撑爆内存）——数实际使用点，不含注释
   chk "key 副本有总量上限守卫" \
       "$(grep -v '^\s*\*' "$JNI_C" | grep -c 'nc_cache_bytes >= NC_CACHE_BYTES_MAX' || true)" "1"
+  # ⑤ 所有热路径小函数都必须在免混淆白名单里
+  #    ⚠️ 2026-11-26 真机血案：nc_cache_get/put 在白名单里，但它们调的
+  #    nc_fnv1a 不在 —— 它按字节做 64 位乘法，被 mba 膨胀 10+ 倍，
+  #    111835 次调用 × 两条路径各一次哈希 = 主页卡 8 秒。
+  #    纪律：白名单要按【调用链】而不是按【入口函数】列。
+  _wl_pat="$(grep -oE '\(nc_strdec_jni_decrypt\|[^)]*\)' "$ROOT/scripts/pipelines/protect.sh" | head -1)"
+  for _fn in nc_fnv1a nc_cache_get nc_cache_put nc_jstr_chars; do
+    case "$_wl_pat" in
+      *"|$_fn|"*|*"($_fn|"*) chk "免混淆白名单含 $_fn" "yes" "yes" ;;
+      *) bad "免混淆白名单缺 $_fn（混淆会把它膨胀 10+ 倍）" ;;
+    esac
+  done
 else
   bad "找不到 $JNI_C"
 fi

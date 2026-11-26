@@ -1835,7 +1835,7 @@ if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
 
     # JNI 服务层：同样明文 + 免混淆（热路径 5 函数 + 密钥链函数）
     python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec_jni.c" \
-      --pattern '^[ \t]*((?:static[ \t]+)?[A-Za-z_][A-Za-z0-9_ \*]*[ \t]+\**((nc_strdec_jni_decrypt|nc_jstr_chars|nc_cache_get|nc_cache_put|nc_jni_fail|nc_ensure_key|nc_find_shell_symbol|nc_phdr_cb|nc_find_apk_path|nc_strdec_fail_count))[ \t]*\()' \
+      --pattern '^[ \t]*((?:static[ \t]+)?[A-Za-z_][A-Za-z0-9_ \*]*[ \t]+\**((nc_strdec_jni_decrypt|nc_jstr_chars|nc_cache_get|nc_cache_put|nc_jni_fail|nc_fnv1a|nc_ensure_key|nc_find_shell_symbol|nc_phdr_cb|nc_find_apk_path|nc_strdec_fail_count))[ \t]*\()' \
       --section .text \
       --annotate '+no_obf' \
       -v 2>&1 | sed 's/^/  [mark] /' || {
