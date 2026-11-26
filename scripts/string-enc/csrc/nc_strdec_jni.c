@@ -265,7 +265,13 @@ static const char *nc_jstr_chars(JNIEnv *env, jstring s, jsize *out_len)
 /* ── 缓存查找 ──────────────────────────────────────────────────────── */
 static jstring nc_cache_get(JNIEnv *env, const char *payload, size_t n)
 {
-    (void) env;                         /* 命中路径零 JNI：env 只给 put 用 */
+    (void) env; (void) payload; (void) n;
+    /* ⚠️ 2026-11-26 判定实验（临时）：缓存读完全禁用。
+     * 目的：不看任何 profiler，只看窗口时间 ——
+     *   8 秒消失 → cache_get 有罪
+     *   8 秒还在 → cache_get 无罪，前几轮归因全部作废
+     * 实验后必须恢复。 */
+    return NULL;
     if (nc_cache_n == 0) {
         return NULL;
     }
