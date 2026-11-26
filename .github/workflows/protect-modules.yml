@@ -270,9 +270,19 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: bash scripts/anti-diff/tests/test-smoke.sh
 
-      - name: dex 容量检测（33 断言，含报错五十九回归）
+      - name: dex 容量检测（含报错五十九回归）
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/repack/tests/test_dex_capacity.py
+
+      # 2026-11-27 补：以下四套早已写好、本地全绿，但从未接入 CI
+      # （同 AGENTS.md §2.3 的「写了没跑」—— 没注册的测试连 skipped 都不显示）。
+      - name: 此前未接入 CI 的四套（dex 重排 / profileable / 不透明失败 / 探针逻辑）
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          python3 scripts/repack/tests/test_dex_rebalance.py
+          python3 scripts/repack/tests/test-profileable-inject.py
+          python3 scripts/string-enc/tests/test-cstrdec-opaque-fail.py
+          bash    scripts/guard/tests/test-probe-logic.sh
 
       # ⚠️ step 名称不写断言数：这个数字历史上写过 20 → 23，实际已是 42。
       #    凡"断言数/行数/套数"这类可枚举事实抄进名字，就必然随时间失真
