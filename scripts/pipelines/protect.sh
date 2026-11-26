@@ -1795,7 +1795,6 @@ fi
 #   nc_strdec_has_key      只是读一个 flag
 #   nc_strdec_set_key      只在 <clinit> 调一次
 if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
-  echo "[mark] 段标记：纯 C 解密桩【算法层】→ .ncx"
   # ── 解密桩整体明文 + 免混淆（2026-11-26，性能定案）────────────────
   #
   # 实测（ART 方法采样 + /proc CPU ticks，同 App 同输入对照）：
