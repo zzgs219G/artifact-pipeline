@@ -4,19 +4,19 @@
     "uncheck"
   ],
   "label": "去签名校验",
-  "desc": "把 APK 改成「签名校验必然通过」的包。产物未签名，用你自己的 keystore 签。",
+  "desc": "签名校验必然通过。产物未签名，需自行签名。",
   "modules": [
     {
       "key": "uncheck",
       "label": "去签名校验",
-      "desc": "绕过 App 的签名校验。默认两层（Java 代理 + native 读 APK 重定向）。",
+      "desc": "绕过 App 的签名校验。",
       "type": "parent",
       "default": true,
       "arg": "--uncheck",
       "children": [
         {
           "key": "layer",
-          "label": "去校验层次",
+          "label": "层次",
           "type": "radio",
           "value_kind": "choice",
           "default": "both",
@@ -24,13 +24,13 @@
             {
               "value": "both",
               "label": "Java + native",
-              "desc": "两层全做（默认）。",
+              "desc": "默认。",
               "arg_on": ""
             },
             {
               "value": "java",
-              "label": "仅 Java 层",
-              "desc": "WebView 类 App 图片/网络异常时选这个。",
+              "label": "仅 Java",
+              "desc": "WebView 类 App 出问题时用。",
               "arg_on": "--java-only"
             }
           ]
