@@ -24,13 +24,13 @@
             {
               "value": "both",
               "label": "完整",
-              "desc": "Java 层 + 读取 APK 重定向。覆盖面最广。",
+              "desc": "通过系统接口查签名、直接读 APK 文件，两种都能绕。",
               "arg_on": ""
             },
             {
               "value": "java",
               "label": "仅 Java 层",
-              "desc": "只走 PackageManager，不接管文件读取。",
+              "desc": "只绕通过系统接口查签名的；直接读 APK 文件的绕过不了。",
               "arg_on": "--java-only"
             }
           ]
