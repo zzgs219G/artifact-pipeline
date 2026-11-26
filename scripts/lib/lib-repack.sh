@@ -39,7 +39,7 @@ repack_unpack() {
   # ⚠️ -r（不解资源）是历史默认：快，但 manifest 保持二进制 AXML。
   # 2026-11-26 加 WANT_PROFILEABLE 分支：profileable 注入需要【文本】
   # manifest + 完整资源上下文回编（手拼二进制 6 轮全败，见
-  # axml-add-profileable.py 的教训）。只有这个开关要文本态。
+  # 手拼 AXML 六轮全败的教训）。只有这个开关要文本态。
   # 云端 aapt2 正常，完整解码多花 2~3 分钟可接受。
   if [[ "${WANT_PROFILEABLE:-0}" == "1" ]]; then
     java -jar "$APKTOOL_JAR" d -f --no-debug-info -o "$out" "$apk"
@@ -114,20 +114,18 @@ repack_force_extractnativelibs() {
 #   就是官方的采样许可开关（Android 10+），加了它 adb 能直接对包做
 #   函数级 CPU 采样 —— 排障专用，正式产物不要加。
 #
-# 实现：scripts/repack/axml-add-profileable.py 直接做二进制 AXML 注入
-#   （字符串池扩容 + 在 <application> 内插入 START/END 元素对）。
-#   为什么不用 apktool 文本中转：apktool b 回编时用 aapt2 重编 manifest，
-#   无视解包态的二进制文件（v5 实测注入丢失）；且最小 zip 缺 res/
-#   时 aapt2 对 icon/theme 空引用报错。直接对成品 APK 的 manifest 条目
-#   做字节级注入，全部 194 元素 aapt 解析通过（v6 实测）。
+# 实现：走 apktool 完整解码（文本 manifest）→ 插一行 → 正常回编。
+#   为什么不用二进制手拼（2026-11-26 已删除那条路的实现）：AXML 要同时
+#   满足字符串池 / resource map / 元素 ns / attrExt 布局四层约束，错一层
+#   全损。实测 6 轮全败（MT 显示 <android:profileable/> 损坏形态）。
+#   aapt2 在云端正常，让它走完整链路，多花 2~3 分钟换确定性。
 repack_add_profileable() {
   local decompiled="$1"
   local mf="$decompiled/AndroidManifest.xml"
   [[ -f "$mf" ]] || { log_warn "AndroidManifest.xml 不存在，跳过 profileable"; return 1; }
 
   # 仅完整解码（WANT_PROFILEABLE=1 时 repack_unpack 走此路径）下 manifest
-  # 是文本；二进制态(-r)无法安全注入（手拼 AXML 6 轮全败，见
-  # axml-add-profileable.py 的教训记录）。
+  # 是文本；二进制态(-r)无法安全注入（手拼 AXML 6 轮全败）。
   if head -c 4 "$mf" | grep -q $'\x03\x00\x08\x00'; then
     log_err "[profileable] manifest 是二进制 AXML（repack_unpack 未走完整解码）——"
     log_err "  注入需要文本态。检查 WANT_PROFILEABLE 分支是否生效。"
@@ -137,14 +135,35 @@ repack_add_profileable() {
     log_info "[profileable] 已存在，跳过"
     return 0
   fi
+  # ⚠️⚠️ 2026-11-26 修正：<profileable> 是 <application> 的【子元素】。
+  #   旧实现插在 `<application` 之前 → 变成 <manifest> 的直接子元素，
+  #   aapt2 判为未知元素（静默忽略或报错），采样许可根本没生效，
+  #   而当时没有任何测试或产物断言能发现这一点。
+  #   正确插法：定位 <application ...> 标签的闭合尖括号，插在其后。
   python3 - "$mf" <<'PY'
-import sys
+import re, sys
 p = sys.argv[1]
 s = open(p, encoding='utf-8').read()
-i = s.index('<application')
-s = s[:i] + '    <profileable android:shell="true"/>\n    ' + s[i:]
+m = re.search(r'<application\b', s)
+if not m:
+    sys.exit("[profileable] manifest 里没有 <application>，无法注入")
+j = s.find('>', m.end())
+if j < 0:
+    sys.exit("[profileable] <application> 标签未闭合")
+s = s[:j + 1] + '\n        <profileable android:shell="true"/>' + s[j + 1:]
 open(p, 'w', encoding='utf-8').write(s)
-print("[profileable] 已注入文本 manifest")
+print("[profileable] 已注入 <application> 内")
+PY
+  # 产物侧断言：注入后必须真的落在 <application> 与 </application> 之间
+  python3 - "$mf" <<'PY' || return 1
+import re, sys
+s = open(sys.argv[1], encoding='utf-8').read()
+m = re.search(r'<application\b[^>]*>(.*?)</application>', s, re.S)
+if not m:
+    sys.exit("[profileable] 解析不到 <application> 体，注入无效")
+if '<profileable' not in m.group(1):
+    sys.exit("[profileable] <profileable> 不在 <application> 内（aapt 会忽略）")
+print("[profileable] 已确认在 <application> 子元素位置")
 PY
   log_info "[profileable] 注入完成（回编由 apktool/aapt2 完成，二进制细节不手拼）"
 }

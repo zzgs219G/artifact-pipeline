@@ -650,18 +650,35 @@ if [[ -f "$JNI_C" ]]; then
   # ④ 字节上限守卫存在（防 key 副本撑爆内存）——数实际使用点，不含注释
   chk "key 副本有总量上限守卫" \
       "$(grep -v '^\s*\*' "$JNI_C" | grep -c 'nc_cache_bytes >= NC_CACHE_BYTES_MAX' || true)" "1"
-  # ⑤ 所有热路径小函数都必须在免混淆白名单里
+  # ⑤ 免混淆白名单 = 从生产源码【派生】调用链闭包，逐成员校验。
+  #
   #    ⚠️ 2026-11-26 真机血案：nc_cache_get/put 在白名单里，但它们调的
-  #    nc_fnv1a 不在 —— 它按字节做 64 位乘法，被 mba 膨胀 10+ 倍，
-  #    111835 次调用 × 两条路径各一次哈希 = 主页卡 8 秒。
-  #    纪律：白名单要按【调用链】而不是按【入口函数】列。
-  _wl_pat="$(grep -oE '\(nc_strdec_jni_decrypt\|[^)]*\)' "$ROOT/scripts/pipelines/protect.sh" | head -1)"
-  for _fn in nc_fnv1a nc_cache_get nc_cache_put nc_jstr_chars; do
-    case "$_wl_pat" in
-      *"|$_fn|"*|*"($_fn|"*) chk "免混淆白名单含 $_fn" "yes" "yes" ;;
-      *) bad "免混淆白名单缺 $_fn（混淆会把它膨胀 10+ 倍）" ;;
-    esac
-  done
+  #    nc_fnv1a 不在 —— 它按字节做 64 位乘法，被 mba 膨胀后主页卡 8 秒。
+  #
+  #    ⚠️⚠️ 为什么不用「grep 白名单文本里有没有 fnv1a」这种断言：
+  #    实测把 nc_strdec_jni.c 里 nc_fnv1a 全部改名，旧断言【仍然全绿】——
+  #    它只证明 protect.sh 的文本里有这四个字，不证明标记真的插上了函数头。
+  #    按 AGENTS.md §2.2：删掉被它测的生产逻辑仍通过 = 它什么都没测。
+  #
+  #    现在的判据（三条，全部从生产派生）：
+  #      ① protect.sh 里白名单只定义一次（防两份副本静默漂移）
+  #      ② 白名单里每个名字都必须是 nc_strdec_jni.c 里真实存在的函数
+  #         （防拼错 —— 拼错的成员永远不会被标记，且没人发现）
+  #      ③ 从 decrypt 出发的调用链闭包必须全在白名单里（防漏列）
+  if [[ -f "$JNI_C" ]] && command -v python3 >/dev/null 2>&1; then
+    _wl_out=$(python3 "$ROOT/scripts/string-enc/tests/check-obf-whitelist.py" \
+                "$JNI_C" "$ROOT/scripts/pipelines/protect.sh" 2>&1)
+    _wl_rc=$?
+    if [[ $_wl_rc -eq 0 ]]; then
+      chk "免混淆白名单 = 调用链闭包（派生校验）" "ok" "ok"
+      echo "$_wl_out" | sed 's/^/     /'
+    else
+      bad "免混淆白名单校验失败："
+      echo "$_wl_out" | sed 's/^/       /'
+    fi
+  else
+    bad "找不到 $JNI_C 或 python3，无法校验白名单"
+  fi
 else
   bad "找不到 $JNI_C"
 fi

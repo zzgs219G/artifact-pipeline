@@ -199,6 +199,31 @@ EXCLUDE_ABI=""          # 带值参数标准件(报错四十四):--exclude-abi �
 WANT_STRINGENC=0; STRING_RULES=""
 WANT_ANTIDIFF=0
 WANT_DEX2C_STUB=0     # 联动子复选框:把解密桩内核 dn() 也抽进 dex2c(见 STEP2 顺序手术)
+
+# ── 解密桩免混淆白名单（单一真相源，2026-11-26）─────────────────────────
+# ⚠️ 为什么单独抽成变量：2026-11-26 主页卡 8 秒的唯一根因，就是这段正则
+#   出现在 protect.sh 里【两份副本】，各自列了不同的函数集：
+#     第一份 11 个（含密钥链 ensure_key/find_apk_path/phdr_cb/find_shell_symbol）
+#     第二份  5 个（不含 nc_fnv1a）
+#   两份都在跑，so_section_mark 幂等 → 后者静默无效，而 fnv1a 谁都没列。
+#   后果：① 主页卡 8 秒（fnv1a 被 mba 膨胀 10+ 倍）；
+#         ② 密钥链被意外免混淆（与设计意图相反，无人发现）。
+#   纪律：只此一处定义，正则只写函数名，别处只能引用变量。
+#   回归：scripts/string-enc/tests/test-cstrdec.sh 的「免混淆白名单」段
+#        用【调用链闭包】派生校验，删任意一个成员即变红。
+#
+# 列哪些（判据：调用频率 × 有无循环，不是"感觉重要"）：
+#   · nc_strdec_jni_decrypt  每次解密入口
+#   · nc_jstr_chars          每次解密取串
+#   · nc_cache_get/put       每次解密查/写缓存
+#   · nc_fnv1a               ↑ 两者各自调用一次 → 11.5 万次；按字节做 64 位乘法
+#   · nc_jni_fail            失败兜底
+#   · nc_ensure_key          每次解密首选短路（读 flag），一旦未就绪则跑一次密钥链
+#   · nc_strdec_fail_count   诊断计数（Java 侧可读）
+# 不列哪些（每个进程只跑一次 → 混淆到 1ms 也只有 4ms，留着换保护）：
+#   nc_set_key_with_cert / nc_find_shell_symbol / nc_phdr_cb / nc_find_apk_path
+#   —— 密钥查找链，攻击者最想读，低频，混淆无性能代价。
+NC_OBF_HOT_FUNCS='nc_strdec_jni_decrypt|nc_jstr_chars|nc_cache_get|nc_cache_put|nc_jni_fail|nc_fnv1a|nc_ensure_key|nc_strdec_fail_count'
 # --stringenc-native（2026-11-09）：解密桩改成纯 C 实现。
 #   java（默认）：现有 StrDec.java 桩，零漂移
 #   native      ：算法在 csrc/nc_strdec.c，编进 libnc.so，dex 侧只有 native 声明
@@ -1795,97 +1820,66 @@ fi
 #   nc_strdec_has_key      只是读一个 flag
 #   nc_strdec_set_key      只在 <clinit> 调一次
 if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
-  # ── 解密桩整体明文 + 免混淆（2026-11-26，性能定案）────────────────
+  # ── 解密桩免混淆标记（2026-11-26 定案，单一真相源见文件头 NC_OBF_HOT_FUNCS）──
   #
-  # 实测（ART 方法采样 + /proc CPU ticks，同 App 同输入对照）：
-  #   全开（VMP+混淆压解密）  pool-10 线程 6.48s CPU
-  #   仅 vm（无三混淆无桩VMP） pool-10 线程 0.06s CPU
-  #   → 差 108 倍，全部花在解密调用的 native 包装上
-  #     （VMP 解释分发 + mba 算术膨胀 + param_aggregate + vm_flatten 状态机）
-  #   main 线程同期 94% 在等绘制（转圈圈），网络请求晚发 8 秒。
+  # 为什么要免混淆（真机实测，同输入对照）：
+  #   全开混淆压解密 → pool-10 线程 6.48s CPU
+  #   跳过混淆       → 0.06s CPU
+  #   主页解密 3000+ 条字符串，每条完整走一遍服务层，单函数被 mba +
+  #   vm_flatten 撑大 3~5 倍 → 累积出 8 秒卡顿（网络请求晚发）。
   #
-  # 决策：解密桩（算法 + 服务层）整体明文 + 免混淆。
-  #   · 算法是公开的 splitmix64 / ChaCha20 —— 混淆它不增加攻击成本
-  #   · 真正的秘密是密钥：壳 so 的 ncg_strkey()（运行期派生），
-  #     编译期常量分支在包壳时不编进来 —— 密钥保护不变
-  #   · .ncxr 密钥常量保留
+  # 安全代价如实：这些函数不含秘密。
+  #   · 秘密是密钥（壳 so 的 ncg_strkey 运行期派生 + .ncxr 常量），不是算法
+  #   · 算法是公开的 splitmix64 / ChaCha20，混淆它不增加攻击成本
+  #   · 密钥查找链（set_key_with_cert/find_shell_symbol/phdr_cb/find_apk_path）
+  #     【不】在白名单里，保留混淆 —— 那是攻击者最想读的部分，且每进程只跑一次
   #   · sigcheck 等其它模块的 .ncx/VMP 保护不变
-  #
-  #代价如实：objdump 可读解密算法与密钥流结构（README 已记录的已知边界：
-  # NKEYS=1 时拿到算法+猜中一条明文即可反推种子）。性能收益 6.4 秒。
-  if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
-    echo "[mark] 解密桩 → .text 明文 + annotate(\"+no_obf\")（2026-11-26 性能定案）"
-    # 6 个算法函数：不进 .ncx（留 .text）+ 免混淆
-    python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec.c" \
-      --pattern '^[ \t]*((?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_strdec_decrypt|nc_strdec_b64_decode|nc_strdec_utf8_to_utf16|nc_block_ks|nc_mix64|nc_chacha20_keystream64)[ \t]*\()' \
-      --section .text \
-      --annotate '+no_obf' \
-      -v 2>&1 | sed 's/^/  [mark] /' || {
-      echo "❌ 解密桩明文+免混淆标记失败" >&2
-      exit 1
-    }
-    _cstub_marked=$(grep -cF 'annotate("+no_obf")' "$_cstub_jni_dst/nc_strdec.c" 2>/dev/null || true)
-    _cstub_marked="${_cstub_marked:-0}"
-    if [[ -z "$_cstub_marked" || "$_cstub_marked" -lt 6 ]]; then
-      echo "❌ 解密桩 no_obf 只命中 ${_cstub_marked:-0} 处（应为 6）" >&2
-      echo "   → nc_strdec.c 函数头形态变了，正则已脱节" >&2
-      exit 1
-    fi
-    echo "[mark] 完成：$_cstub_marked 处明文+免混淆（解密桩算法层）"
+  # 已知边界：objdump 可读解密算法与密钥流结构（README 已记录）。
+  echo "[mark] 解密桩 → .text 明文 + annotate(\"+no_obf\")（2026-11-26 性能定案）"
 
-    # JNI 服务层：同样明文 + 免混淆（热路径 5 函数 + 密钥链函数）
-    python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec_jni.c" \
-      --pattern '^[ \t]*((?:static[ \t]+)?[A-Za-z_][A-Za-z0-9_ \*]*[ \t]+\**((nc_strdec_jni_decrypt|nc_jstr_chars|nc_cache_get|nc_cache_put|nc_jni_fail|nc_fnv1a|nc_ensure_key|nc_find_shell_symbol|nc_phdr_cb|nc_find_apk_path|nc_strdec_fail_count))[ \t]*\()' \
-      --section .text \
-      --annotate '+no_obf' \
-      -v 2>&1 | sed 's/^/  [mark] /' || {
-      echo "❌ JNI 服务层 no_obf 标记失败（不阻断）" >&2
-    }
-    _jni_marked=$(grep -cF 'annotate("+no_obf")' "$_cstub_jni_dst/nc_strdec_jni.c" 2>/dev/null || true)
-    echo "[mark] JNI 服务层：$_jni_marked 处明文+免混淆"
-    # ⚠️ 密钥常量 nc_strdec_key_cipher 仍在 .ncxr（源码硬编码 section 属性），
-    #    密钥保护不变。
+  # ① 算法层（nc_strdec.c）：解密主流程 + 它调用链上的全部实现。
+  #    ⚠️ 闭包必须显式列全：nc_chacha20_keystream64 → chacha20_core/block_head
+  #       会在 -Oz 下被内联（实测符号表无它们），但一旦编译器改主意留成独立
+  #       函数，就得靠这里覆盖。见 tests/test-cstrdec.sh 的闭包断言。
+  python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec.c" \
+    --pattern '^[ \t]*((?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_strdec_decrypt|nc_strdec_b64_decode|nc_strdec_utf8_to_utf16|nc_block_ks|nc_mix64|nc_chacha20_keystream64)[ \t]*\()' \
+    --section .text \
+    --annotate '+no_obf' \
+    -v 2>&1 | sed 's/^/  [mark] /' || {
+    echo "❌ 解密桩明文+免混淆标记失败" >&2
+    exit 1
+  }
+  _cstub_marked=$(grep -cF 'annotate("+no_obf")' "$_cstub_jni_dst/nc_strdec.c" 2>/dev/null || true)
+  if [[ "${_cstub_marked:-0}" -lt 6 ]]; then
+    echo "❌ 解密桩 no_obf 只命中 ${_cstub_marked:-0} 处（应为 6）" >&2
+    echo "   → nc_strdec.c 函数头形态变了，正则已脱节" >&2
+    exit 1
   fi
+  echo "[mark] 算法层：$_cstub_marked 处"
 
-  # ── JNI 服务层（nc_strdec_jni.c）→ annotate("+no_obf")（2026-11-26）──
-  #
-  # 为什么：三个混淆 pass（mba/param_aggregate/vm_flatten）是编译期的，
-  #   按函数处理，不看它落在哪个段 —— .ncx 段级跳过（AMICE_OBF_SKIP_
-  #   SECTIONS）只保护算法层，管不了本文件这些留在 .text 的函数。
-  # 真机实测（同输入、四项全开、桩 VMP 关）：
-  #   服务层被混淆 11.57s CPU / 混淆跳过 2.89s → 混淆贡献 ≈ 8.7s。
-  #   主页解密 3000+ 条字符串 × 每条完整走一遍服务层（查缓存/JNI 取串/
-  #   分配内存），单函数被 mba+vm_flatten 撑大 3~5 倍 → 累积出 8.7s。
-  # 安全代价（如实）：这些函数不含秘密 —— 秘密是密钥（壳 so 的
-  #   ncg_strkey / .ncxr 常量）与算法（公开的 splitmix64/ChaCha20）。
-  #   服务层只是"搬运工"，混淆它防不了任何攻击，只拖慢每次解密。
-  #
-  # 范围 = 热路径 5 个：入口 / 取串 / 缓存读写 / 失败兜底。
-  # 不标（保留混淆）：nc_ensure_key / nc_find_shell_symbol / nc_phdr_cb /
-  #   nc_find_apk_path / nc_set_key_with_cert / nc_strdec_jni_set_key ——
-  #   密钥查找链，低频（仅首次），有真实防护价值。
-  echo "[mark] JNI 服务层 → annotate(\"+no_obf\")（热路径 5 函数，防 8.7s 混淆税）"
-  # ⚠️ 正则两处纪律（首次实跑踩过）：
-  #   ① 尾部 [ \t]*\( 必须紧跟函数名 —— 否则命中 nc_jni_fail 的【调用行】
-  #      （`return nc_jni_fail(env, NULL);`），把 attribute 插进函数体语句
-  #      之间 → 编译错误。用「行首到函数名之间只允许 static/类型/星号」
-  #      的贪 nhi_characterization 排除 return 前缀。
-  #   ② 显式排除含 return 的行（双保险）。
+  # ② JNI 服务层（nc_strdec_jni.c）：函数集来自 NC_OBF_HOT_FUNCS（单一真相源）。
+  #    ⚠️ 正则纪律：尾部 [ \t]*\( 必须紧跟函数名，否则命中 nc_jni_fail 的
+  #       【调用行】（`return nc_jni_fail(...)`），把 attribute 插进函数体
+  #       语句之间 → 编译错误。
   python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec_jni.c" \
-    --pattern '^[ \t]*((?:static[ \t]+)?[A-Za-z_][A-Za-z0-9_ \*]*[ \t]+\**((nc_strdec_jni_decrypt|nc_jstr_chars|nc_cache_get|nc_cache_put|nc_jni_fail))[ \t]*\()' \
+    --pattern "^[ \t]*((?:static[ \t]+)?[A-Za-z_][A-Za-z0-9_ \\*]*[ \t]+\\**($NC_OBF_HOT_FUNCS))[ \t]*\\(" \
     --section ".text" \
     --annotate "+no_obf" \
     -v 2>&1 | sed 's/^/  [mark] /' || {
     echo "❌ JNI 服务层 no_obf 标记失败（不阻断构建，只影响性能）" >&2
   }
+  # 命中数必须精确等于白名单成员数 —— 少于 = 正则脱节（静默变成 8 秒卡顿）
   _jni_marked=$(grep -cF 'annotate("+no_obf")' "$_cstub_jni_dst/nc_strdec_jni.c" 2>/dev/null || true)
-  _jni_marked="${_jni_marked:-0}"
-  if [[ "$_jni_marked" -lt 5 ]]; then
-    echo "❌ JNI 服务层 no_obf 只命中 ${_jni_marked} 处（应为 5：decrypt入口/jstr_chars/cache_get/cache_put/jni_fail）" >&2
-    echo "   → nc_strdec_jni.c 的函数头形态变了，正则已脱节（不阻断，但主页会慢 8.7s）" >&2
-  else
-    echo "[mark] 完成：$_jni_marked 处 +no_obf（JNI 服务层热路径）"
+  _jni_want=$(printf '%s' "$NC_OBF_HOT_FUNCS" | tr '|' '\n' | grep -c .)
+  if [[ "${_jni_marked:-0}" -ne "$_jni_want" ]]; then
+    echo "❌ JNI 服务层 no_obf 命中 ${_jni_marked:-0} 处，白名单有 $_jni_want 个成员" >&2
+    echo "   → 函数头形态变了或白名单里有不存在的函数名，正则已脱节" >&2
+    echo "   → 不修就会静默退化为主页 8 秒卡顿（2026-11-26 事故形态）" >&2
+    exit 1
   fi
+  echo "[mark] JNI 服务层：$_jni_marked 处（= 白名单 $_jni_want 个成员）"
+  # ⚠️ 密钥常量 nc_strdec_key_cipher 仍在 .ncxr（源码硬编码 section 属性），
+  #    密钥保护不变。
 fi
 
 log_step 4 6 "NDK 编译"
@@ -2664,7 +2658,8 @@ if [[ $WANT_SIGCHECK -eq 1 || $WANT_TRANSPILE -eq 1 || $WANT_ENVCHECK -eq 1 \
   # profileable 注入（2026-11-26，--profileable 调试开关）：shell 采样许可。
   # ⚠️ 必须在【文本 manifest】上注入（WANT_PROFILEABLE=1 时 repack_unpack
   #    走完整解码）。回编由 apktool/aapt2 完成，二进制细节不手拼
-  #    （手拼 AXML 6 轮全败的教训见 axml-add-profileable.py）。
+  #    （教训：AXML 二进制细节绝不手拼 —— 字符串池/resource map/元素 ns/
+  #     attr 布局四层约束，错一层全损，6 轮全败。让 aapt2 走完整链路。）
   if [[ $WANT_PROFILEABLE -eq 1 ]]; then
     repack_add_profileable "$WORK/decompiled" \
       || log_warn "[profileable] 注入失败（产物可正常使用，只是无法 shell 采样）"
