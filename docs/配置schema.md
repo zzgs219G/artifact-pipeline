@@ -175,7 +175,9 @@ value_kind = 怎么执行      （resolve-config.py 唯一关心的）
 
 ### 3.4 `choice` —— 从 `options` 里选一个
 
-> 状态：**已实现**（2026-11-09）。首个使用者：`stringenc.stub_impl`。
+> 状态：**已实现**（2026-11-09）。首个使用者曾是 `stringenc.stub_impl`（**已下线**，
+> 2026-11-22 Java 桩归档时删除）。下面用它作示例是因为它同时演示了 `select` +
+> 默认项 + `arg_on` 三个要点 —— **照抄结构可以，但别以为这个子项还在**。
 
 ```jsonc
 { "key": "stub_impl", "label": "解密桩实现", "type": "select",
@@ -333,13 +335,15 @@ keys == ["sigcheck", "dex2c", "vmp", "stringenc",
 
 **① 大控件放最后。** `type=text` + `multiline`（类名规则）会占掉半屏，
 如果排在最前，下面的复选框会被挤出可视区，用户以为"没有这个选项"。
-`stringenc` 的实际顺序是：
+`stringenc` 的实际顺序是（2026-11-27 现状，`stub_impl` 与 `algo` 均已下线）：
 
 ```
-1. stub_impl     (select)     ← 主选择，决定下面有什么
-2. dex2c_stub    (checkbox)   ← 依赖 stub_impl=java，但目前 UI 不隐藏
-3. rules_file    (text)       ← 大文本框放最后
+1. dex2c_stub    (checkbox，hidden:true)  ← 无作用对象，UI 不渲染
+2. rules_file    (text)                   ← 大文本框放最后
 ```
+
+> 历史顺序曾是 `stub_impl`(select) → `dex2c_stub`(checkbox) → `rules_file`，
+> 下面 ② 那条教训就是从那次排序变更来的，仍然成立。
 
 **② 不要把 `rules_file` 排到别的子项之前就以为"只是改 UI"。**
 `protect.sh` 解析 `--stringenc` / `--dex2c` 的值时有守卫：

@@ -530,13 +530,13 @@ amice 源码不在本仓库，引用行号为 2026-11-26 核对时的状态）�
 - `armeabi-v7a` 真机（本机只有 arm64，v7a 仅离线编译验证）
 - **纯 `--stringenc-native`（不带 `--sigcheck`）会崩** —— 该组合下 `.ncx`
   只有算法（1120 字节）、缺 `.ncxr`，锁箱解锁链不完整。**必须配 `--sigcheck`。**
-- `--stringenc-native` 与 `--dex2c-stub` 的互斥目前只在 CLI/protect.sh 层拦截，
-  **UI 层仍可同时勾**（靠 fail-fast 兜底）。`stub_impl` 已从 flag 改成
-  `value_kind=choice`（下拉框），`dex2c_stub` 用 `visible_when` 在纯 C 桩时
-  整行消失 —— 但**两者之间没有互斥约束**（schema 没有表达「互斥」的能力，
-  `required.unless` 只能表达必填豁免）。详见 `docs/配置schema.md` §5.5。
+- `--stringenc-native` 与 `--dex2c-stub` 的互斥在 CLI/protect.sh 层拦截。
+  **2026-11-27 现状**：`stub_impl` 已从 schema 删除（Java 桩 2026-11-22 归档），
+  `--stringenc` 直接隐含 `--stringenc-native`；`dex2c_stub` 因失去作用对象
+  改为 `hidden: true`（UI 不渲染，CLI 仍可用）。详见 `docs/配置schema.md` §5.6。
 - ~~算法可选框（splitmix64 / ChaCha20）未实现~~ → **2026-11-09 已实现**：
-  `stringenc.algo`（横向单选，`visible_when{stub_impl,c}`）。
+  `stringenc.algo`（横向单选；原 `visible_when{stub_impl,c}` 依赖已随
+  `stub_impl` 一起删除，现在是恒显示）。
   ChaCha20 抗「猜中一条明文反推全包」，体积零增长（offset 当 counter）。
   块粒度 8→64 字节带来 **7.6~8.3×** 加速（理论值精确 8.0×：旧版每 8 字节
   重跑一次 20 轮，白算 7/8），整包增量 0.15~0.77 ms。

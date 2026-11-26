@@ -228,11 +228,12 @@ WANT_DEX2C_STUB=0     # 联动子复选框:把解密桩内核 dn() 也抽进 dex
 #    nc_strdec_fail_count 曾被列在这里 —— 它是诊断计数（读 nc_fail_count），
 #    没人调用（头文件无声明、Java/C 侧零调用点），2026-11-26 移出。
 NC_OBF_HOT_FUNCS='nc_strdec_jni_decrypt|nc_jstr_chars|nc_cache_get|nc_cache_put|nc_jni_fail|nc_fnv1a|nc_ensure_key'
-# --stringenc-native（2026-11-09）：解密桩改成纯 C 实现。
-#   java（默认）：现有 StrDec.java 桩，零漂移
-#   native      ：算法在 csrc/nc_strdec.c，编进 libnc.so，dex 侧只有 native 声明
-# 与 --dex2c-stub 互斥（那需要 Java 内核才能转译）。
-STUB_IMPL="java"
+# 解密桩实现。2026-11-27：Java 桩已归档（docs/备份/java桩-归档-2026-11-22/），
+#   纯 C 桩是唯一实现 —— 默认值随之改为 native（原为 "java"，已成不可达死值）。
+#   `--stringenc` 系列参数都会把它置成 native；这个变量现在只被下面的
+#   --dex2c-stub fail-fast 判据读取（真正传给 encrypt-strings.py 的是
+#   文件末尾硬编码的 `--stub-impl native`）。
+STUB_IMPL="native"
 WANT_NATIVE_STUB=0
 # --stringenc-chacha20（2026-11-09）：纯 C 桩的密钥流算法换成 ChaCha20。
 #   （默认）    ：splitmix64 —— 快，但可逆（猜中一条明文可反推密钥解全包）

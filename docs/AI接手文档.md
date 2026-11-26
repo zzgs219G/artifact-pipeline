@@ -509,7 +509,7 @@ CI 的 `setup-toolchain` action 会校验，源码形态会直接失败：
 
 | 项 | 状态 |
 |---|---|
-| **UI 层不拦 `stub_impl` × `dex2c_stub` 互斥** | 两者在 UI 上仍可同时选，靠 `trigger_build.py` / `protect.sh` / `resolve-config` 三层 fail-fast 兜底。schema 没有表达"互斥"的能力（`required.unless` 只能表达"必填豁免"）。要真拦需 `ProtectConfigSchema.validate()` 支持跨字段约束 |
+| **UI 层不拦 `dex2c_stub` × 纯 C 桩的互斥** | `dex2c_stub` 已从 UI 隐藏（`hidden: true`，2026-11-27），但若有人直传 CLI，仍靠 `trigger_build.py` / `protect.sh` 两层 fail-fast 兜底。schema 没有表达"互斥"的能力（`required.unless` 只能表达"必填豁免"） |
 | `armeabi-v7a` 真机验证 | 本机只有 arm64 |
 | 本地 Termux 产出坏 so 的根因 | 22 字节 SIMD 栈偏移差异，原因未查清。见 §8.4.1 |
 | **ChaCha20 真机耗时** | 未单独测量。TotalTime 差异在噪声内 —— 只能说"没有可测的代价"，不能说"更快" |
@@ -520,9 +520,8 @@ CI 的 `setup-toolchain` action 会校验，源码形态会直接失败：
 | 别做 | 原因 |
 |---|---|
 | **本地 Termux 构建后装机验证** | 产物必 SIGILL，连纯 sigcheck 也崩。见 §8.4.1 |
-| 删 Java 桩 | `--dex2c-stub` 联动只能走它；且是所有现有用户的默认路径 |
+| 删 Java 桩代码 | **已归档**（2026-11-22，`docs/备份/java桩-归档-2026-11-22/`），`stub_impl` 选项已从 schema 删除。`--dex2c-stub` 联动实现保留给将来的 Java 插桩模块 |
 | 给 `nc_strdec.c` 加计算量来"提升强度" | 加轮数不解决可逆性，白慢 |
-| 在 `stub_impl` 上再加一个 flag | 那是单选语义，加 flag 只会更乱 |
 | **跨 so 的 dlsym 契约只验一侧** | 符号名必须两侧用同一份字面量核对。壳侧漏 `extern "C"` → mangling 成 `_Z10ncg_strkeyv` → dlsym 静默失败，全程没有任何报错（v1.6.0 实测） |
 | **改宿主测试覆盖不到的文件后只跑宿主测试** | `nc_strdec_jni.c`（JNI 层）宿主编不到。2026-11-10 精简注释时误删一个 `#define`，346 项宿主测试全绿、NDK 编译直接炸。**改到这类文件必须补一次真实编译** |
 | **「包壳时也留编译期常量」** | 常量与壳两条密钥来源同时存在 → 去掉壳 so 会回退到常量 → 照样能解 → 「去不掉壳」失效。`protect.sh` 按 `WANT_PACKER` 分支就是为了这个 |
