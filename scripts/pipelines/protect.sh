@@ -206,7 +206,7 @@ WANT_DEX2C_STUB=0     # 联动子复选框:把解密桩内核 dn() 也抽进 dex
 #     第一份 11 个（含密钥链 ensure_key/find_apk_path/phdr_cb/find_shell_symbol）
 #     第二份  5 个（不含 nc_fnv1a）
 #   两份都在跑，so_section_mark 幂等 → 后者静默无效，而 fnv1a 谁都没列。
-#   后果：① 主页卡 8 秒（fnv1a 被 mba 膨胀 10+ 倍）；
+#   后果：① 主页卡 8 秒（fnv1a 在热路径循环里，被混淆后每字节都要多付代价）；
 #         ② 密钥链被意外免混淆（与设计意图相反，无人发现）。
 #   纪律：只此一处定义，正则只写函数名，别处只能引用变量。
 #   回归：scripts/string-enc/tests/test-cstrdec.sh 的「免混淆白名单」段

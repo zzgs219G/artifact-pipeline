@@ -288,7 +288,7 @@ keyByte(JJ)I               --dynamic-register 时 dex 内 Java 调用一律按
   非冷启动主因（详见 `docs/变更历史/03-stringenc与anti-diff.md`）；L1 保留的理由是
   无回归 + CPU/PSS 改善 + intern 语义，而非当初的 ~200ms 假设
 - ⚠️ **C 桩（`nc_strdec_jni.c`）的缓存路径另有前提**：`nc_fnv1a` 等热路径小函数
-  必须留在 `+no_obf` 白名单里。漏一个就被 mba 膨胀成主页 8 秒卡顿，
+  必须留在 `+no_obf` 白名单里。漏一个就可能变成主页 8 秒卡顿，
   见上方「性能：真机实测」节
 
 ## 桩随机化（2026-10-13,防引擎固定签名）
@@ -462,23 +462,31 @@ NKEYS=4        ：块密钥流 = XOR over t of mix64(key[t] + (blk+t)*gamma[t])
 | 解密线程 pool-10 CPU | 805 ticks = **8.05 s** | 50~60 ticks = **0.5~0.6 s** | 无此线程 |
 | 首个网络请求延迟 | **8.5 s** | **0.7~0.9 s** | ~1 s |
 
-三次冷启动复测（`am force-stop` → 启动 → 读 `/proc/<tid>/stat`）：稳定。
+五次冷启动复测（`am force-stop` → 启动 → 读 `/proc/<tid>/stat`）：50/60/70/70/50 ticks，稳定。
 
 #### 唯一的根因：`nc_fnv1a` 漏出 `+no_obf` 免混淆白名单
 
 `nc_fnv1a` 是 L1 缓存的哈希函数，按**每字节**做一次 64 位乘法
 （`h ^= s[i]; h *= 0x100000001b3;`）。密文 60~200 字节 → 单次 120~400 条指令。
-它不在白名单里 → mba 把那条乘法膨胀 10+ 倍 → 单次哈希 0.04μs 涨到 0.5μs。
-调用量 111835 串 ×（`cache_get` + `cache_put`）各一次 = 22 万次 → **11 秒**，
-与实测 `total=12.5s` 精确吻合。
+它不在白名单里 → 被混淆 pass 处理 → 主页卡 8 秒。
+
+为什么慢：`mba` 只处理 Add/Sub/And/Or/Xor（上游 Amice 仓库 `crates/amice/src/aotu/mba/region.rs:24`，该目录零处 `Op::Mul`；
+amice 源码不在本仓库，引用行号为 2026-11-26 核对时的状态），**不碰乘法**；真正放大它的是 `vm_flatten` —— 它把基本块改成状态机，每次块转移都要经 `.amice.vm_flatten_dispatcher` 重算混淆后的目标地址（`index_program.rs` / `target_table.rs` 里 3~7 个含 Multiply/Rotate 的运算）。fnv1a 是**按字节的循环**，每轮都要过一次分发 → 单字节开销 × 密文长度 × 调用次数。⚠️ 如实记录：具体到 70μs/次这个量级，我**无法从源码精确推出**，上面的机制是与实测现象一致的唯一候选，不是被我验证过的完整解释。
+
+**与 so 四项全开的关系不是设计联动，是配置遗漏**：混淆 pass 按函数处理，
+不知道 `nc_fnv1a` 是缓存用的。而 `AMICE_OBF_SKIP_SECTIONS` 默认只排除 `.ncx`，
+`.text` 里的函数默认全部被处理 —— 所以凡是留在 `.text` 的热路径函数，
+**必须显式打 `annotate("+no_obf")`**，否则就吃混淆代价。
 
 #### 两条纪律
 
 1. **免混淆/免 VMP 白名单要按「调用链」列，不能只列入口函数。**
    事故时 `decrypt` / `cache_get` / `cache_put` 都豁免了，唯独它们调的
-   `nc_fnv1a` 没豁免——等于没豁免。`tests/test-cstrdec.sh` 现有断言钉住
-   白名单必须含 `nc_fnv1a`/`nc_cache_get`/`nc_cache_put`/`nc_jstr_chars`
-   （反向验证：删 `nc_fnv1a` 断言变红）。
+   `nc_fnv1a` 没豁免——等于没豁免。现在由
+   `tests/check-obf-whitelist.py` **从源码派生调用链闭包**逐成员校验
+   （不是 grep 白名单文本：那种断言在函数改名后仍然全绿 = 什么都没测）。
+   四条反向验证：删 `fnv1a` / 函数改名 / 加拼错成员 / 删掉一次性守卫
+   → 各自变红。
 2. **埋点只能证明「包住的那段」快，不能证明整条路径快。**
    哈希发生在 `nc_cache_get` 第一行之前，永远落在埋点圈外，所以实测一直是
    「探测 1.46 个槽却有 64μs」而无法解释。判定这类问题用**改代码看窗口时间**
