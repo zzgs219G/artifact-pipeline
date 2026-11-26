@@ -1796,71 +1796,57 @@ fi
 #   nc_strdec_set_key      只在 <clinit> 调一次
 if [[ $WANT_NATIVE_STUB -eq 1 && "${TMP_NOMARK:-0}" != "1" ]]; then
   echo "[mark] 段标记：纯 C 解密桩【算法层】→ .ncx"
-  # ── VMP（2026-11-11）：--vmp 时同时打 +vm_virtualize ──────────────
-  # 这 5 个函数是 stringenc 的全部算法（Base64/密钥流/UTF-8），
-  # 都不取地址、寄存器需求小，是最可能真正被虚拟化的目标
-  # （对照：dex2c 产物因寄存器超限 100% 被跳过）。
+  # ── 解密桩整体明文 + 免混淆（2026-11-26，性能定案）────────────────
   #
-  # ⚠️ 走 so_section_mark 的 --annotate 而不是手写 attribute：
-  #    它会自动去掉 used/retain（那两个会产生 @llvm.used → Amice 跳过）。
-  # ═══ VMP 范围实验开关（2026-11-11）═══════════════════════════════
-  # NC_VMP_CSTUB=0（默认）→ 不给 stringenc 算法层打 VMP 注解
-  # NC_VMP_CSTUB=1         → 打（旧行为，实测真机栈溢出）
+  # 实测（ART 方法采样 + /proc CPU ticks，同 App 同输入对照）：
+  #   全开（VMP+混淆压解密）  pool-10 线程 6.48s CPU
+  #   仅 vm（无三混淆无桩VMP） pool-10 线程 0.06s CPU
+  #   → 差 108 倍，全部花在解密调用的 native 包装上
+  #     （VMP 解释分发 + mba 算术膨胀 + param_aggregate + vm_flatten 状态机）
+  #   main 线程同期 94% 在等绘制（转圈圈），网络请求晚发 8 秒。
   #
-  # 为什么默认关：真机实测（sigcheck+dex2c+stringenc+vmp，两个 algo 档
-  # 都试过）应用启动页 SIGSEGV/SEGV_ACCERR，栈溢出：
-  #   guard page 0x...e000-0x...f000 权限 ---
-  #   崩溃 sp 恰在 guard page 上边界（再压 16B 即越界）
-  #   x29 与 sp 相差整整 1.01MB
-  # 而同一份代码只 VMP sigcheck（derive_expected）则完全正常。
+  # 决策：解密桩（算法 + 服务层）整体明文 + 免混淆。
+  #   · 算法是公开的 splitmix64 / ChaCha20 —— 混淆它不增加攻击成本
+  #   · 真正的秘密是密钥：壳 so 的 ncg_strkey()（运行期派生），
+  #     编译期常量分支在包壳时不编进来 —— 密钥保护不变
+  #   · .ncxr 密钥常量保留
+  #   · sigcheck 等其它模块的 .ncx/VMP 保护不变
   #
-  # 注意：这不是"stringenc 不能 VMP"的普适结论 —— nox 自己的解密链
-  # 14 个函数全上 VMP 且真机可用。差别在字节码规模：这里 5 个函数
-  # 含 Base64/UTF-8/密钥流，字节码远长于 nox 那些 19~31 条指令的小函数。
-  # 根因待查（dispatcher 内 61 处 bl 回自身，疑似递归分派）。
-  if [[ $WANT_VMP -eq 1 && "$NC_VMP_CSTUB" == "1" ]]; then
-    echo "[mark] VMP: 密钥流函数稍后单独打注解（NC_VMP_CSTUB=1）"
-  elif [[ $WANT_VMP -eq 1 ]]; then
-    echo "[mark] VMP: 纯 C 桩算法层【不】打注解（NC_VMP_CSTUB=0，实测真机栈溢出）"
+  #代价如实：objdump 可读解密算法与密钥流结构（README 已记录的已知边界：
+  # NKEYS=1 时拿到算法+猜中一条明文即可反推种子）。性能收益 6.4 秒。
+  if [[ $WANT_NATIVE_STUB -eq 1 ]]; then
+    echo "[mark] 解密桩 → .text 明文 + annotate(\"+no_obf\")（2026-11-26 性能定案）"
+    # 6 个算法函数：不进 .ncx（留 .text）+ 免混淆
+    python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec.c" \
+      --pattern '^[ \t]*((?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_strdec_decrypt|nc_strdec_b64_decode|nc_strdec_utf8_to_utf16|nc_block_ks|nc_mix64|nc_chacha20_keystream64)[ \t]*\()' \
+      --section .text \
+      --annotate '+no_obf' \
+      -v 2>&1 | sed 's/^/  [mark] /' || {
+      echo "❌ 解密桩明文+免混淆标记失败" >&2
+      exit 1
+    }
+    _cstub_marked=$(grep -cF 'annotate("+no_obf")' "$_cstub_jni_dst/nc_strdec.c" 2>/dev/null || true)
+    _cstub_marked="${_cstub_marked:-0}"
+    if [[ -z "$_cstub_marked" || "$_cstub_marked" -lt 6 ]]; then
+      echo "❌ 解密桩 no_obf 只命中 ${_cstub_marked:-0} 处（应为 6）" >&2
+      echo "   → nc_strdec.c 函数头形态变了，正则已脱节" >&2
+      exit 1
+    fi
+    echo "[mark] 完成：$_cstub_marked 处明文+免混淆（解密桩算法层）"
+
+    # JNI 服务层：同样明文 + 免混淆（热路径 5 函数 + 密钥链函数）
+    python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec_jni.c" \
+      --pattern '^[ \t]*((?:static[ \t]+)?[A-Za-z_][A-Za-z0-9_ \*]*[ \t]+\**((nc_strdec_jni_decrypt|nc_jstr_chars|nc_cache_get|nc_cache_put|nc_jni_fail|nc_ensure_key|nc_find_shell_symbol|nc_phdr_cb|nc_find_apk_path|nc_strdec_fail_count))[ \t]*\()' \
+      --section .text \
+      --annotate '+no_obf' \
+      -v 2>&1 | sed 's/^/  [mark] /' || {
+      echo "❌ JNI 服务层 no_obf 标记失败（不阻断）" >&2
+    }
+    _jni_marked=$(grep -cF 'annotate("+no_obf")' "$_cstub_jni_dst/nc_strdec_jni.c" 2>/dev/null || true)
+    echo "[mark] JNI 服务层：$_jni_marked 处明文+免混淆"
+    # ⚠️ 密钥常量 nc_strdec_key_cipher 仍在 .ncxr（源码硬编码 section 属性），
+    #    密钥保护不变。
   fi
-  # 一次调用同时做两件事（2026-11-11 改）：
-  #   --pattern           → 6 个算法函数全部进 .ncx（受锁箱保护）
-  #   --annotate-pattern  → 只有 3 个密钥流函数追加 VMP 注解
-  #
-  # 为什么不分成两次调用：so_section_mark 的幂等判断会认为"已标过段"，
-  # 第二次补 annotate 时命中 0 个（实测）。工具明确写着"不做增量补注，
-  # 同一函数请一次标全"，所以加了 --annotate-pattern 参数来支持
-  # "一次调用、不同函数不同 annotation"。
-  _MARK_ARGS=()
-  if [[ $WANT_VMP -eq 1 && "$NC_VMP_CSTUB" == "1" ]]; then
-    _MARK_ARGS=(
-      --annotate '+vm_virtualize'
-      --annotate-pattern '^[ \t]*(?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_block_ks|nc_chacha20_keystream64|nc_mix64)[ \t]*\('
-    )
-  fi
-  python3 "$GUARD_SRC/so_section_mark.py" "$_cstub_jni_dst/nc_strdec.c" \
-    --pattern '^[ \t]*((?:static[ \t]+)?(?:inline[ \t]+)?(?:uint64_t|int)[ \t]+(nc_strdec_decrypt|nc_strdec_b64_decode|nc_strdec_utf8_to_utf16|nc_block_ks|nc_mix64|nc_chacha20_keystream64)[ \t]*\()' \
-    --section .ncx \
-    "${_MARK_ARGS[@]+"${_MARK_ARGS[@]}"}" \
-    -v 2>&1 | sed 's/^/  [mark] /' || {
-    echo "❌ 纯 C 解密桩段标记失败 —— 算法将以明文留在 .text" >&2
-    exit 1
-  }
-  # 静默失防守卫：算法层 5 个函数必须全部标上。
-  # 少标一个 = 那部分算法明文可读，而这不会有任何运行期症状
-  # （功能完全正常），属于最难发现的"假绿"。
-  # 计数用固定串（-F）：'section(".ncx")' 里的引号/点号在正则下都要转义，
-  # 手写正则极易与 so_section_mark.py 的实际输出形式错开（本次就错了：
-  # 写成 section("\\.ncx") → grep 收到 \.ncx → 一个都匹配不到 → 假红）。
-  _cstub_marked=$(grep -cF 'section(".ncx")' "$_cstub_jni_dst/nc_strdec.c" 2>/dev/null || true)
-  _cstub_marked="${_cstub_marked:-0}"
-  if [[ -z "$_cstub_marked" || "$_cstub_marked" -lt 6 ]]; then
-    echo "❌ 纯 C 桩段标记只命中 ${_cstub_marked:-0} 处（应为 6：decrypt/b64_decode/utf8/block_ks/mix64/chacha20_keystream64）" >&2
-    echo "   → nc_strdec.c 的函数头形态变了，正则已脱节" >&2
-    echo "   → 不许静默放行：那等于算法以明文进产物" >&2
-    exit 1
-  fi
-  echo "[mark] 完成：$_cstub_marked 处 .ncx 标记（纯 C 桩算法层）"
 
   # ── JNI 服务层（nc_strdec_jni.c）→ annotate("+no_obf")（2026-11-26）──
   #
