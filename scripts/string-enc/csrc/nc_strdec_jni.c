@@ -146,6 +146,7 @@ static volatile unsigned long nc_prof_cacheput = 0;
 static volatile unsigned long nc_prof_worst_us = 0;
 static volatile unsigned long nc_prof_full_scan = 0;
 static volatile unsigned long nc_prof_probes = 0;
+static volatile unsigned long nc_prof_getchars_n = 0;  /* cache_get 内 GetStringUTFChars 次数 */
 
 static unsigned long nc_prof_now_ns(void)
 {
@@ -167,13 +168,14 @@ void nc_strdec_profile_dump(void)
                         nc_prof_mallocns / 1e6, nc_prof_newstr / 1e6,
                         nc_prof_cacheput / 1e6, nc_prof_keyns / 1e6);
     __android_log_print(ANDROID_LOG_INFO, NC_SD_TAG,
-                        "prof2: worst=%.1fms fullscan=%lu probes=%lu avg=%.1f",
+                        "prof2: worst=%.1fms fullscan=%lu probes=%lu avg=%.1f gcalls=%lu",
                         nc_prof_worst_us / 1000.0,
                         nc_prof_full_scan,
                         nc_prof_probes,
                         nc_prof_calls
                             ? (double) nc_prof_probes / (double) nc_prof_calls
-                            : 0.0);
+                            : 0.0,
+                        nc_prof_getchars_n);
 }
 #endif
 
@@ -229,6 +231,9 @@ static jstring nc_cache_get(JNIEnv *env, const char *payload, size_t n)
         }
         if (s->hash == h) {
             /* hash 相同还要比内容：hash 碰撞是可能的，不能只比 hash */
+#ifdef NC_STRDEC_PROFILE
+            nc_prof_getchars_n++;
+#endif
             const char *k = (*env)->GetStringUTFChars(env, s->key, NULL);
             if (k == NULL) {
 #ifdef NC_STRDEC_PROFILE
