@@ -53,7 +53,7 @@ APP_STL := c++_static
 # NC_GUARD_SECTIONED: 让判决核心（nc_verify_t1）与签名表进 .ncx 加密段。
 # 为什么是显式宏而不是 __ANDROID__ 自动判断：宿主端任何一次"想验证段布局"
 # 的编译都会因为"标了段却没人解锁"而读到密文 → 假红。见 nc_link.c 的注释。
-# ⚠️ 2026-11-12 瘦身（照抄 dpt-shell 的已验证结论，见 docs/变更历史.md 2026-11-10 条）：
+# ⚠️ 2026-11-12 瘦身（照抄 dpt-shell 的已验证结论，见 docs/变更历史/ 2026-11-10 条）：
 #   -fno-exceptions -fno-rtti -fno-unwind-tables
 #   实测 dpt-shell 上这三项省 32,360 B（442,312 → 409,952 的那一步）。
 #   libnc.so 此前没加，导致 libc++abi 的异常表和 RTTI 全被链进来。

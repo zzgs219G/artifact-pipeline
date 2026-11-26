@@ -3,7 +3,7 @@
 
 【为什么补这个测试】
   冻结模块，53 条历史报错里涉及它 11 次，却没有脚本级独立测试。
-  事故类型（见 docs/变更历史.md）：
+  事故类型（见 docs/变更历史/）：
     · 报错十：方法名解析用贪婪正则 → access$000(Lcom/A;->onCreate(...))V
       这类参数内嵌方法引用的行会把名字解析成参数里的 onCreate，误杀无关方法
     · 报错十三：.end method 被一并吞掉 → 回编报 missing END_METHOD_DIRECTORY

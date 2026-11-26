@@ -303,7 +303,7 @@ check(first_invoke is not None and 'ensureLoaded' in first_invoke,
       f'Guard.c 第一条调用不是 ensureLoaded(报错四十二): {first_invoke}')
 # 报错四十九(2026-10-16):心跳喂食必须前置到测量链之前,与"测量是否成功"解耦。
 # 旧形态放在 ncVerify 之后 → 测量抛非 ULE 异常经 :catch_skip 静默返回 → 一次不喂
-# → env_watchdog 误判"壳被删" → 正常包冷启动必杀(证据存档于 docs/变更历史.md 报错四十九)。
+# → env_watchdog 误判"壳被删" → 正常包冷启动必杀(证据存档于 docs/变更历史/ 报错四十九)。
 invokes = [i.get_output() for i in gcode.get_bc().get_instructions()
            if i.get_name().startswith('invoke-')]
 def _idx(needle):

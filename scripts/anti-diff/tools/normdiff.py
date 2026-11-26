@@ -42,7 +42,7 @@ smali)逐方法对比,只看**语义层**差异。MT 管理器自带的 dex 对�
 
 【验证记录】
   2026-09-17 报错三十二:用本工具 + dex 层 diff 定位处理版 13 处
-  `move vN, vN` 读未初始化寄存器(见 docs/变更历史.md)。
+  `move vN, vN` 读未初始化寄存器(见 docs/变更历史/)。
 """
 import difflib
 import re
