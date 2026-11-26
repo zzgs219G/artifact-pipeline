@@ -129,6 +129,14 @@ unsigned nc_strdec_fail_count(void)
 static volatile unsigned long nc_prof_calls = 0;
 static volatile unsigned long nc_prof_ns = 0;
 static volatile unsigned long nc_prof_keyns = 0;
+/* 2026-11-26：把 JNI 边界各步骤分开计时 —— 8.78s 的归属必须逐段量出来，
+ * 不能只测 decrypt（那是 0.2ms，占 0.002%）。六段 + 总计 = 无处可藏。 */
+static volatile unsigned long nc_prof_entry = 0;   /* 入口到取串前 */
+static volatile unsigned long nc_prof_getchars = 0;
+static volatile unsigned long nc_prof_cacheget = 0;
+static volatile unsigned long nc_prof_mallocns = 0;
+static volatile unsigned long nc_prof_newstr = 0;
+static volatile unsigned long nc_prof_cacheput = 0;
 
 static unsigned long nc_prof_now_ns(void)
 {
@@ -142,8 +150,13 @@ void nc_strdec_profile_dump(void);
 void nc_strdec_profile_dump(void)
 {
     __android_log_print(ANDROID_LOG_INFO, NC_SD_TAG,
-                        "prof: calls=%lu decrypt=%.1fms key=%.1fms",
-                        nc_prof_calls, nc_prof_ns / 1e6, nc_prof_keyns / 1e6);
+                        "prof: calls=%lu | getchars=%.1fms cacheget=%.1fms "
+                        "decrypt=%.1fms malloc=%.1fms newstr=%.1fms "
+                        "cacheput=%.1fms key=%.1fms",
+                        nc_prof_calls, nc_prof_getchars / 1e6,
+                        nc_prof_cacheget / 1e6, nc_prof_ns / 1e6,
+                        nc_prof_mallocns / 1e6, nc_prof_newstr / 1e6,
+                        nc_prof_cacheput / 1e6, nc_prof_keyns / 1e6);
 }
 #endif
 
@@ -475,13 +488,25 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
     }
 
     jsize plen = 0;
+#ifdef NC_STRDEC_PROFILE
+    unsigned long _t_g = nc_prof_now_ns();
+#endif
     const char *pchars = nc_jstr_chars(env, payload, &plen);
+#ifdef NC_STRDEC_PROFILE
+    nc_prof_getchars += nc_prof_now_ns() - _t_g;
+#endif
     if (pchars == NULL) {
         return nc_jni_fail(env, payload);
     }
 
     /* ── 缓存命中：直接返回（intern 语义由 Java 回填链负责，不在这里做）── */
+#ifdef NC_STRDEC_PROFILE
+    unsigned long _t_cg = nc_prof_now_ns();
+#endif
     jstring hit = nc_cache_get(env, pchars, (size_t)plen);
+#ifdef NC_STRDEC_PROFILE
+    nc_prof_cacheget += nc_prof_now_ns() - _t_cg;
+#endif
     if (hit != NULL) {
         (*env)->ReleaseStringUTFChars(env, payload, pchars);
         return hit;
@@ -506,7 +531,13 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
      * 现在：一律走堆分配。解密是低频路径（首次 + 缓存未命中），
      * 一次 malloc 的开销远小于栈溢出的风险。 */
     const size_t cap = ((size_t)plen / 4) * 3 + 8;
+#ifdef NC_STRDEC_PROFILE
+    unsigned long _t_m = nc_prof_now_ns();
+#endif
     uint8_t *decoded = (uint8_t *)malloc(cap);
+#ifdef NC_STRDEC_PROFILE
+    nc_prof_mallocns += nc_prof_now_ns() - _t_m;
+#endif
     if (decoded == NULL) {
         (*env)->ReleaseStringUTFChars(env, payload, pchars);
         return nc_jni_fail(env, payload);
@@ -583,7 +614,13 @@ jstring nc_strdec_jni_decrypt(JNIEnv *env, jclass clazz, jstring payload)
     }
 
     /* 只缓存成功结果（防毒缓存，与 Java 侧语义一致） */
+#ifdef NC_STRDEC_PROFILE
+    unsigned long _t_cp = nc_prof_now_ns();
+#endif
     nc_cache_put(env, payload, out);
+#ifdef NC_STRDEC_PROFILE
+    nc_prof_cacheput += nc_prof_now_ns() - _t_cp;
+#endif
     return out;
 }
 
