@@ -332,13 +332,8 @@ def describe_plan(cfg_json: str) -> str:
          if c.get("dex2c", {}).get("enabled") else ""),
         ("字符串加密",
          bool(c.get("stringenc", {}).get("enabled")),
-         ("规则: %s%s" % (
-             c["stringenc"].get("rules_file", ""),
-             # 判 "c"（choice 形态）。历史：flag 时代这里判 == "native"，
-             # 与写入值 True 不匹配导致回执恒不显示（4a1ba9c 漏改读点）。
-             "，解密桩=纯C（算法进 libnc.so）"
-             if c["stringenc"].get("stub_impl") == "c"
-             else ("，解密桩抽进 so" if c["stringenc"].get("dex2c_stub") else "")))
+         ("规则: %s，解密桩=纯C（算法进 libnc.so）"
+          % c["stringenc"].get("rules_file", ""))
          if c.get("stringenc", {}).get("enabled") else ""),
         ("防对比混淆", bool(c.get("antidiff")), ""),
         ("环境检测", bool(c.get("envcheck")), ""),
@@ -350,13 +345,13 @@ def describe_plan(cfg_json: str) -> str:
         #    这里显式列出来并说明"本脚本无法设置"，避免用户以为 --all 包含了它。
         ("代码混淆(Amice)",
          bool(c.get("obfuscate", {}).get("enabled")),
-         "本脚本不控制；VMP 已烧进 libnox.a，与此项无关"
+         "本脚本不控制，VMP 在 libnox.a 里"
          if not c.get("obfuscate", {}).get("enabled") else ""),
         # vmp（2026-11-10）：指令级虚拟化。自动联动关掉动态注册
         # （动态注册的 JNINativeMethod 表取函数地址 → Amice 静默跳过）。
         ("指令级VMP",
          bool(c.get("vmp")),
-         "保护 sigcheck/stringenc 的小函数；dex2c 产物实测寄存器超限打不了"),
+         "只覆盖 sigcheck/stringenc 小函数，dex2c 产物打不了"),
     ]
 
     out = []

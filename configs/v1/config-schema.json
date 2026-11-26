@@ -15,7 +15,7 @@
     {
       "key": "sigcheck",
       "label": "签名校验",
-      "desc": "签名不匹配直接拒绝启动。性能损耗：几乎为零",
+      "desc": "签名不匹配直接拒绝启动。",
       "type": "leaf",
       "default": true,
       "arg": "--sigcheck"
@@ -23,7 +23,7 @@
     {
       "key": "dex2c",
       "label": "Dex2C",
-      "desc": "Java 方法转成 C 编译进 so。性能：比原版更快（不再走解释执行）",
+      "desc": "Java 方法转成 C 编译进 so，比解释执行更快。",
       "type": "parent",
       "default": false,
       "arg": "--dex2c",
@@ -43,7 +43,7 @@
     {
       "key": "soguard",
       "label": "so层保护",
-      "desc": "so 层的两项工作合在一个开关下：\n① VMP 虚拟化（默认开，可关）：把关键函数编译成自定义 VM 字节码，解锁后内存里不是明文 ARM64，挡住动态 dump。这是强度最高的一层，体积约 +470KB。\n② 附加混淆（可选）：VMP 只管函数体【内部】，管不了「谁调用谁」「跳到哪」—— 那是逆向分析的第一步。混淆补的正是这个盲区。\n\n⚠️ VMP 与「隐藏调用关系 / 隐藏跳转目标」实测冲突：开那两个会让 VMP 少覆盖 4 个函数（9→5）。要开它们建议先把 VMP 关掉。",
+      "desc": "VMP 虚拟化 + 附加混淆。VMP 挡动态 dump，混淆补调用关系。",
       "type": "parent",
       "default": true,
       "arg": "--vmp",
@@ -52,7 +52,7 @@
         {
           "key": "vm",
           "label": "VMP 虚拟化",
-          "desc": "把关键函数编译成 VM 字节码，解锁后内存里不是明文 ARM64 —— 这是挡动态 dump 的唯一手段。当前保护：签名校验的 4 个函数 + 字符串加密的 5 个算法函数。关掉可省约 470KB，但签名校验就只剩混淆保护了（攻击成本从「逆 VM 几周」降回「改一条指令几分钟」）。⚠️ dex2c 抽出的业务方法保护不了：寄存器预算超限，实测 4/4 被跳过",
+          "desc": "关键函数编译成 VM 字节码，挡动态 dump。约 +470KB。",
           "type": "checkbox",
           "default": true,
           "value_kind": "flag",
@@ -61,7 +61,7 @@
         {
           "key": "mba",
           "label": "算术混淆（MBA）",
-          "desc": "把算术/逻辑运算换成等价但难读的形式。可被 souper 类工具自动化简，强度低。性能：轻微",
+          "desc": "算术运算换成等价但难读的形式。强度低。",
           "type": "checkbox",
           "default": true,
           "value_kind": "flag",
@@ -70,7 +70,7 @@
         {
           "key": "param_aggregate",
           "label": "参数聚合",
-          "desc": "把函数的多个参数打包成一个结构体传入。攻击者读反汇编时靠「参数类型和顺序」推断函数语义，打包后每个字段都变成栈偏移访问 —— 必须先逆出结构体布局才能理解函数在干什么。✅ 不修改控制流，与 VMP 无冲突（VMP 目标函数会被自动跳过）；体积代价小（结构体在栈上，不复制代码）。",
+          "desc": "参数打包成结构体。不影响控制流，可与 VMP 共用。",
           "type": "checkbox",
           "default": true,
           "value_kind": "flag",
@@ -79,7 +79,7 @@
         {
           "key": "vm_flatten",
           "label": "动态控制流（抗动态分析）",
-          "desc": "每次运行的控制流都不同 —— 跳转目标由运行时随机种子与调用状态共同决定。这是唯一能对抗「在模拟器里反复跑、观察路径再针对性 patch」的手段。体积与编译开销高于普通扁平化",
+          "desc": "每次运行控制流不同，抗反复试跑。编译开销较大。",
           "type": "checkbox",
           "default": true,
           "value_kind": "flag",
@@ -90,7 +90,7 @@
     {
       "key": "stringenc",
       "label": "字符串加密",
-      "desc": "dex 字符串常量加密，运行时自动解密。性能损耗：几乎为零（首次解密后走缓存）",
+      "desc": "字符串常量加密，运行时自动解密。",
       "type": "parent",
       "default": false,
       "arg": "--stringenc",
@@ -121,7 +121,7 @@
           "key": "dex2c_stub",
           "hidden": true,
           "label": "解密桩也抽进 so",
-          "desc": "【UI 隐藏，接口保留】把【流水线中途注入的 Java 代码】交给 dex2c 内部接口转译进 libnc.so。**当前无作用对象**：Java 解密桩 2026-11-22 已下线（docs/备份/java桩-归档-2026-11-22/），--stringenc 现在强制纯 C 桩，而 C 桩没有 Java 内核可转译 —— 勾了会 fail-fast。保留 CLI 与联动实现（LINK_STUB 那套手术）供将来的 Java 插桩模块复用，所以不删代码、只从选配界面隐藏。",
+          "desc": "把注入的 Java 解密桩也交给 dex2c 转译。当前无作用对象。",
           "type": "checkbox",
           "default": false,
           "value_kind": "flag",
@@ -144,7 +144,7 @@
     {
       "key": "antidiff",
       "label": "防对比混淆",
-      "desc": "改写 dex 结构，原版与加固版无法直接比对。性能损耗：零（只改文件结构）",
+      "desc": "改写 dex 结构，原版与加固版无法直接对比。",
       "type": "leaf",
       "default": false,
       "arg": "--anti-diff"
@@ -152,7 +152,7 @@
     {
       "key": "envcheck",
       "label": "环境检测",
-      "desc": "检测 Frida / Xposed / 调试器，发现即处置。性能损耗：几乎为零",
+      "desc": "检测 Frida / Xposed / 调试器，发现即处置。",
       "type": "leaf",
       "default": false,
       "arg": "--envcheck"
@@ -160,7 +160,7 @@
     {
       "key": "packer",
       "label": "基础加壳",
-      "desc": "整个 dex 加密。性能代价：启动变慢（系统无法预编译 dex，代码解释执行）",
+      "desc": "整个 dex 加密。启动会变慢（无法预编译）。",
       "type": "parent",
       "default": false,
       "arg": "--packer",
@@ -169,7 +169,7 @@
         {
           "key": "smaller",
           "label": "体积优化",
-          "desc": "压缩产物体积。性能：无影响",
+          "desc": "压缩产物体积。",
           "type": "checkbox",
           "default": true,
           "value_kind": "flag",
@@ -178,7 +178,7 @@
         {
           "key": "exclude_x86",
           "label": "排除模拟器架构",
-          "desc": "产物不带 x86 / x86_64。真机性能：无影响（只是少两个架构的 so）",
+          "desc": "不带 x86 / x86_64（真机几乎不用）。",
           "type": "checkbox",
           "default": true,
           "value_kind": "arg_value",
