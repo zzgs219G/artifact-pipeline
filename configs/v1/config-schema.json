@@ -119,8 +119,9 @@
         },
         {
           "key": "dex2c_stub",
+          "hidden": true,
           "label": "解密桩也抽进 so",
-          "desc": "把【流水线中途注入的 Java 代码】交给 dex2c 内部接口转译进 libnc.so。⚠️ 与当前的纯 C 解密桩互斥（C 桩没有 Java 内核可转译），勾了会 fail-fast；该开关留给之后的 Java 插桩模块。性能：构建 +30~60s（解包/回编变 2 次）",
+          "desc": "【UI 隐藏，接口保留】把【流水线中途注入的 Java 代码】交给 dex2c 内部接口转译进 libnc.so。**当前无作用对象**：Java 解密桩 2026-11-22 已下线（docs/备份/java桩-归档-2026-11-22/），--stringenc 现在强制纯 C 桩，而 C 桩没有 Java 内核可转译 —— 勾了会 fail-fast。保留 CLI 与联动实现（LINK_STUB 那套手术）供将来的 Java 插桩模块复用，所以不删代码、只从选配界面隐藏。",
           "type": "checkbox",
           "default": false,
           "value_kind": "flag",

@@ -17,6 +17,7 @@ set -euo pipefail
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WANT_UNCHECK=0
+JAVA_ONLY=0
 
 log_info() { printf '\033[32m[uncheck]\033[0m %s\n' "$*"; }
 log_warn() { printf '\033[33m[uncheck]\033[0m %s\n' "$*"; }
@@ -27,6 +28,11 @@ usage() {
 用法: uncheck.sh <输入.apk> <输出_未签名.apk> --uncheck
 
   --uncheck       执行去校验（必填）
+  --java-only     只做 Java 层（不投放 libusign.so）
+                  默认是「Java + native」两层。某些 App（尤其 WebView /
+                  Capacitor / Flutter 类）被 native 层 libc 重定向影响后
+                  会出现网络或图片加载失败 —— 那类 App 多半只用
+                  PackageManager 校验，Java 层就够了。
 
   （原 --full-origin 全量副本参数已于 2026-11-24 移除：该分支从未被
     实现，恒走数据复用打包，见 docs/交接-2026-11-24.md §6.4）
@@ -45,6 +51,7 @@ OUT_APK="$(cd "$(dirname "$OUT_APK")" && pwd)/$(basename "$OUT_APK")"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --uncheck) WANT_UNCHECK=1; shift ;;
+    --java-only) JAVA_ONLY=1; shift ;;
     *) log_err "未知参数: $1"; usage ;;
   esac
 done
@@ -54,7 +61,12 @@ if [[ $WANT_UNCHECK -eq 0 ]]; then
   exit 1
 fi
 
-log_info "注入签名伪造载荷"
+if [[ $JAVA_ONLY -eq 1 ]]; then
+  log_info "注入签名伪造载荷（仅 Java 层：不投放 libusign.so）"
+  export USIGN_NO_NATIVE=1
+else
+  log_info "注入签名伪造载荷（Java + native 两层）"
+fi
 python3 "$_HERE/run.py" "$IN_APK" "$OUT_APK"
 
 # ── 产物自检（不签名，只验证结构合法）──────────────────────────────────

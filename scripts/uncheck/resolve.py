@@ -65,7 +65,20 @@ def load_schema():
 
 
 def build_args(schema, cfg):
-    """配置 → 参数列表。单模块，没有子项，逻辑只有一条分支。"""
+    """配置 → 参数列表。
+
+    形状：{ "schema_version": 2,
+             "uncheck": { "enabled": true, "layer": "java" } }
+
+    `layer`（2026-11-27 新增）：
+      both（默认）/ java —— java 会追加 --java-only，不投放 libusign.so。
+    为什么加这个：WebView / Capacitor / Flutter 类 App 的图片与网络走
+    Chromium 或自带 IO 栈，被全局 libc 重定向（open/stat/readlink）影响后
+    会出现资源加载失败。这类 App 通常只用 PackageManager 校验，Java 层够用。
+
+    兼容：`uncheck` 允许是布尔（旧 App 快照只发 true/false），
+    布尔时按 schema default（both）处理。
+    """
     if not isinstance(cfg, dict):
         die('配置顶层必须是 JSON 对象')
 
@@ -77,24 +90,53 @@ def build_args(schema, cfg):
     module = schema['modules'][0]
     key = module['key']
     arg = module['arg']
+    children = {c['key']: c for c in module.get('children', [])}
 
     known = {key, 'schema_version'}
     unknown = sorted(set(cfg) - known)
     if unknown:
-        # 已下线/从未存在的键一律拒绝。这里不再为历史配置做兼容 ——
-        # v2 卡片从上线就只有一个开关，不存在"老配置"这个概念。
+        # 已下线/从未存在的键一律拒绝（file_redirect 那类未实现选项
+        # 曾经勾了就必然失败，宁可报错也不静默忽略）。
         die(f'出现 schema 未定义的顶层 key: {unknown}（拒绝执行）')
 
     if key not in cfg:
         die(f'配置缺少 {key} 字段')
-    enabled = cfg[key]
-    if not isinstance(enabled, bool):
-        die(f'{key} 必须是布尔，实际 {enabled!r}')
+
+    # ── 归一化：布尔 → {enabled, <子项默认值>} ──────────────────────
+    raw = cfg[key]
+    if isinstance(raw, bool):
+        sub = {ck: c.get('default') for ck, c in children.items()}
+        enabled = raw
+    elif isinstance(raw, dict):
+        enabled = raw.get('enabled', True)
+        if not isinstance(enabled, bool):
+            die(f'{key}.enabled 必须是布尔，实际 {enabled!r}')
+        unknown_sub = sorted(set(raw) - {'enabled'} - set(children))
+        if unknown_sub:
+            die(f'{key} 出现未定义的子项: {unknown_sub}'
+                f'（已定义: {sorted(children) or "无"}）')
+        sub = dict(raw)
+    else:
+        die(f'{key} 必须是布尔或对象，实际 {type(raw).__name__}')
+
     if not enabled:
-        die('配置里 uncheck=false —— 这条流水线没有别的能力，'
+        die('配置里 uncheck 关掉了 —— 这条流水线没有别的能力，'
             '关掉它就没有任何作用，不应出包')
 
-    return [arg]
+    out = [arg]
+
+    # ── layer：both（默认）| java ─────────────────────────────────
+    layer_item = children.get('layer')
+    if layer_item is not None:
+        val = sub.get('layer', layer_item.get('default'))
+        opts = {o['value']: o for o in layer_item.get('options', [])}
+        if val not in opts:
+            die(f'{key}.layer={val!r} 不是合法选项（可选: {sorted(opts)}）')
+        extra = opts[val].get('arg_on', '')
+        if extra:
+            out.append(extra)
+
+    return out
 
 
 def main(argv):
@@ -105,8 +147,11 @@ def main(argv):
         return 0
 
     if len(argv) >= 2 and argv[1] == '--defaults':
+        m0 = schema['modules'][0]
         cfg = {'schema_version': schema['schema_version'],
-               schema['modules'][0]['key']: True}
+               m0['key']: {'enabled': True,
+                           **{c['key']: c.get('default')
+                              for c in m0.get('children', [])}}}
     elif len(argv) == 2 and argv[1] == '-':
         try:
             cfg = json.load(sys.stdin)

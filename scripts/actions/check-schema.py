@@ -95,6 +95,25 @@ for m in d["modules"]:
                 assert "visible_when" not in dep, (
                     f"{k}.{c['key']}: visible_when 不支持链式（{vw['key']} 自己也有 visible_when）")
 
+            # hidden（2026-11-27）：UI 不渲染，但 resolver 仍然认这个键。
+            # 与 visible_when 的区别（别混用）：
+            #   visible_when = 「依赖某取值才出现」，依赖满足就会出现
+            #   hidden       = 「没有作用对象，暂时别让用户选」，无条件下场
+            # 为什么不复用它：visible_when 依赖一个 choice 子项，而
+            # dex2c_stub 原本依赖的 stub_impl 已随 Java 桩下线被删除；
+            # 且 jian_box 的 childVisible() 对「依赖键取不到值」是 fail-open
+            # （显示），指向不存在的 key 反而恒显示。
+            if "hidden" in c:
+                assert c["hidden"] is True, (
+                    f"{k}.{c['key']}: hidden 只允许 true（要显示就直接删掉该字段，"
+                    f"写 false 会让读者以为它可能是动态的）")
+                assert not c.get("required"), (
+                    f"{k}.{c['key']}: hidden 的子项不能 required —— "
+                    f"UI 不渲染它，用户无法填必填项，提交必然校验失败")
+                assert "visible_when" not in c, (
+                    f"{k}.{c['key']}: hidden 与 visible_when 互斥（前者无条件隐藏，"
+                    f"后者有条件显示，同时写语义冲突）")
+
 assert len(keys) == len(set(keys)), "模块 key 重复"
 
 # ── 模块清单：卡片自描述（2026-11-21 改为自动识别）────────────────────

@@ -540,6 +540,19 @@ fi
 # 接口也要启动，只转译桩的 4 个方法。两模块可同时勾，filter 合并。
 LINK_STUB=0
 if [[ $WANT_STRINGENC -eq 1 && $WANT_DEX2C_STUB -eq 1 ]]; then
+  # ⚠️ 2026-11-27 fail-fast：纯 C 桩（当前唯一实现）没有 Java 内核可转译。
+  # 不拦的后果是"静默空转"而非报错 —— --emit-stub-filter 无论桩有几种方法
+  # 都写固定 4 条规则（d/dn/mix64/keyByte），而 native 桩只有 1 个方法；
+  # filter 文件非空 → 下面的"联动前提校验"不触发 → dex2c 转译时 3 条规则
+  # 匹配不到类 → 构建全绿但联动从未生效，产物未经验证。
+  # 判据放在这里而不是 trigger_build.py：CLI 直调 protect.sh 也要拦住。
+  if [[ "${STUB_IMPL:-native}" == "native" ]]; then
+    log_err "--dex2c-stub 需要 Java 解密桩内核，但当前是纯 C 桩（--stringenc 强制 native）"
+    log_err "     C 桩没有 Java 内核可转译 → 联动会静默空转，产出未经验证的包"
+    log_err "     Java 桩已于 2026-11-22 下线（docs/备份/java桩-归档-2026-11-22/）"
+    log_err "     该开关保留给将来的 Java 插桩模块，当前请去掉 --dex2c-stub"
+    exit 1
+  fi
   LINK_STUB=1
 fi
 if [[ $LINK_STUB -eq 1 ]]; then

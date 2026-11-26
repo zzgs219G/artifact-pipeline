@@ -1,18 +1,41 @@
 {
-    "schema_version": 2,
-    "modules_expected": [
-        "uncheck"
-    ],
-    "label": "去签名校验",
-    "desc": "把 APK 改成「签名校验必然通过」的包。产物未签名，用你自己的 keystore 签。",
-    "modules": [
+  "schema_version": 2,
+  "modules_expected": [
+    "uncheck"
+  ],
+  "label": "去签名校验",
+  "desc": "把 APK 改成「签名校验必然通过」的包。产物未签名，用你自己的 keystore 签。",
+  "modules": [
+    {
+      "key": "uncheck",
+      "label": "去签名校验",
+      "desc": "选这条流水线就是要做这件事，没有额外开关。\n\n原理：改「App 问系统要签名」这一层 —— 在 IPackageManager 接口上挂代理，让 App 拿到原版证书。App 自己的校验代码一个字都不动，所以它用什么方式写校验、混淆成什么样都不影响。\n\n覆盖：\n✅ App 通过系统接口查签名（PackageManager / checkSignatures / getPackageArchiveInfo）\n✅ App 自己打开 APK 文件解析（sourceDir + ZipFile / Signing Block 解析）—— 2026-11-23 新增 native 层 IO 重定向（shadowhook inline hook）\n✅ native so 读 APK（open/fopen/__open_2/mmap）—— 同上\n❌ native 裸 svc #0 / 硬编码证书哈希 —— 需逆向，本工具不做\n❌ 上报服务端裁决 / Play Integrity / 硬件证明 —— 结构性无解，本工具不尝试\n\n注意：本模块只做签名校验绕过，不含任何业务补丁（广告/任务/弹窗/反检测等）。",
+      "type": "parent",
+      "default": true,
+      "arg": "--uncheck",
+      "children": [
         {
-            "key": "uncheck",
-            "label": "去签名校验",
-            "desc": "选这条流水线就是要做这件事，没有额外开关。\n\n原理：改「App 问系统要签名」这一层 —— 在 IPackageManager 接口上挂代理，让 App 拿到原版证书。App 自己的校验代码一个字都不动，所以它用什么方式写校验、混淆成什么样都不影响。\n\n覆盖：\n✅ App 通过系统接口查签名（PackageManager / checkSignatures / getPackageArchiveInfo）\n✅ App 自己打开 APK 文件解析（sourceDir + ZipFile / Signing Block 解析）—— 2026-11-23 新增 native 层 IO 重定向（shadowhook inline hook）\n✅ native so 读 APK（open/fopen/__open_2/mmap）—— 同上\n❌ native 裸 svc #0 / 硬编码证书哈希 —— 需逆向，本工具不做\n❌ 上报服务端裁决 / Play Integrity / 硬件证明 —— 结构性无解，本工具不尝试\n\n注意：本模块只做签名校验绕过，不含任何业务补丁（广告/任务/弹窗/反检测等）。",
-            "type": "leaf",
-            "default": true,
-            "arg": "--uncheck"
+          "key": "layer",
+          "label": "去校验层次",
+          "type": "radio",
+          "value_kind": "choice",
+          "default": "both",
+          "options": [
+            {
+              "value": "both",
+              "label": "Java + native（默认，覆盖面最广）",
+              "desc": "两层都做。Java 层挂 IPackageManager 代理；native 层用 libusign.so 重定向 libc 读 APK 的路径。适合绝大多数普通 App。",
+              "arg_on": ""
+            },
+            {
+              "value": "java",
+              "label": "仅 Java 层（不投放 libusign.so）",
+              "desc": "只挂 IPackageManager 代理，不动 libc。**WebView / Capacitor / Flutter 类 App 用这个** —— 它们的图片、网络走 Chromium 或自带的 IO 栈，被全局 libc 重定向影响后会出现资源加载失败。代价：App 若在 native 里自己 open(base.apk) 解析签名块，这条路的校验绕不过。",
+              "arg_on": "--java-only"
+            }
+          ]
         }
-    ]
+      ]
+    }
+  ]
 }

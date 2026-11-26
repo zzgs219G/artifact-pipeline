@@ -298,7 +298,12 @@ def build_config(args) -> str:
             # 不传 = schema default("splitmix64")，与历史行为一致。
             if args.stringenc_chacha20:
                 cfg["stringenc"]["algo"] = "chacha20"
-        elif args.dex2c_stub or args.all:
+        elif args.dex2c_stub:
+            # ⚠️ 2026-11-27：--all 不再带 dex2c_stub。
+            # 原因：Java 解密桩 2026-11-22 已下线，--stringenc 强制纯 C 桩，
+            # 而 C 桩没有 Java 内核可转译 → 联动路径空转（4 条 filter 规则里
+            # 3 条匹配不到类），产出的包未经验证。
+            # 它已从 schema 隐藏（hidden:true），接口保留给将来的 Java 插桩模块。
             cfg["stringenc"]["dex2c_stub"] = True
 
     return json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
