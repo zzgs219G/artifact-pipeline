@@ -550,8 +550,22 @@ if ! clang -I"$WORK" -c "$WORK/main.c" -o "$WORK/main.o" 2>>"$WORK/build.log"; t
     tail -20 "$WORK/build.log" >&2
     exit 1
 fi
+# ⚠️ 链接库按平台选（2026-11-27 修）。
+# 原来无条件 `-lpthread -llog`，而那是【Android NDK】的库名：
+#   · Android 上 pthread 是独立的 libpthread.so，log 是 liblog.so
+#   · glibc 上 pthread 已并入 libc，且没有 liblog → ld.lld 报
+#     `unable to find library -lpthread`
+# 症状：本脚本在 Termux（Android）上绿，在 Ubuntu CI 上从未跑通过
+#   （实测 GitHub Actions 2026-11-26 / 11-27 两次都是同一个错）。
+# 这不是偶发环境问题，是库名硬编码 —— 与本仓库 .comment 那次
+# 「CI 没有 GNU objcopy、失败但继续」属同一类：本地绿、CI 红的假象。
+if [ "$(uname -s)" = "Linux" ] && [ -d /system/bin ]; then
+    _LIBS="-lpthread -llog"      # Android（Termux 宿主 / 真机）
+else
+    _LIBS=""                     # glibc：pthread 在 libc 内，无 liblog
+fi
 if ! clang "$WORK/env_probes.o" "$WORK/harness.o" "$WORK/main.o" \
-        -o "$WORK/t" -lpthread -llog 2>>"$WORK/build.log"; then
+        -o "$WORK/t" $_LIBS 2>>"$WORK/build.log"; then
     echo "✗ 链接失败：" >&2
     tail -20 "$WORK/build.log" >&2
     exit 1
