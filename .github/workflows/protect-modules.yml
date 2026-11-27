@@ -650,8 +650,14 @@ jobs:
 
           # 只取锁箱四件套 + 契约头（不取 sig_check/nc_link，那个组合要 JNI 表，
           # 本步骤只验"结构 + 解锁"，与 sigcheck 无关）
+          # ⚠️ nc_guard_decoy.c（2026-11-27）：诱饵段定义。必须拷 ——
+          #    漏拷的症状是产物里零诱饵段（.ncx/.ncxh 只有一组），
+          #    而锁箱器检测不到诱饵段会静默跳过（不报错），
+          #    于是本 job 「验证通过」但实际没验到诱饵，属假绿。
+          #    本文件的段声明全部 used+retain，不含逻辑、不参与解锁链。
           cp "$G/nc_guard_boot.c" "$G/nc_guard_probe.c" "$G/nc_guard_key.c" \
-             "$G/nc_guard_paths.c" "$G/nc_guard_jni.c" "$W/jni/"
+             "$G/nc_guard_paths.c" "$G/nc_guard_jni.c" "$G/nc_guard_decoy.c" \
+             "$W/jni/"
           cp "$G/nc_guard_layout.h" "$G/nc_guard_key.h" "$G/nc_guard_paths.h" "$W/jni/"
 
           cd "$W/jni"
@@ -731,8 +737,12 @@ jobs:
             2>&1 | tee /tmp/lock1.log | tail -8
 
           echo "=== 步骤 2/3：二级锁箱 --lock-head（.ncxh）==="
-          python3 so-section-lock.py "$SO" "$SO" --lock-head \
-            2>&1 | tee /tmp/lock2.log | tail -8
+          # ⚠️ 必须传 --from-apk（2026-11-27 加）：诱饵 .ncx 要用
+          #    【真证书 + 真包名】派生 k_so。不传的话诱饵只能用全零证书，
+          #    攻击者拿真证书解得乱码 → 立刻排除诱饵组 → 诱饵失效。
+          #    这一参数与步骤 1 的 --from-apk 同一个 APK，保持一致。
+          python3 so-section-lock.py "$SO" "$SO" --lock-head --from-apk "$APK" \
+            2>&1 | tee /tmp/lock2.log | tail -12
 
           echo "=== 步骤 3/3：元数据清理 --strip-meta ==="
           python3 so-section-lock.py "$SO" "$SO" --strip-meta \
@@ -756,6 +766,72 @@ jobs:
           #      按内存算的不同，正常包也解不开（test-so-lock.sh T31 同一前提）
           #   ② .text 非空且 addr==off（自绑定按文件偏移算）
           python3 scripts/repack/verify_text_crc_ready.py /tmp/ncbuild/jni/libnc.so
+
+      - name: 断言诱饵组与真段不可区分（静态）
+        run: |
+          set -euo pipefail
+          # 诱饵的全部价值在于【攻击者无法用静态手段区分真假】。
+          # 一旦某条属性不一致，诱饵失效且【静默】——产物照样能跑。
+          # 所以必须在产物侧断言，不能只看锁箱日志。
+          #
+          # 断言三条（与 nox 侧 test.sh 的 V18a/b 同构）：
+          #   ① 诱饵组存在（≥1 组）—— 确认 nc_guard_decoy.c 真编进去了
+          #   ② 诱饵 head/slot/master/code 四件套齐全
+          #   ③ 尺寸与真段逐项相同（大小是最好认的破绽）
+          SO=/tmp/ncbuild/jni/libnc.so
+          python3 - "$SO" <<'PY'
+          import sys, struct
+          d = open(sys.argv[1], 'rb').read()
+          e_shoff = struct.unpack_from('<Q', d, 0x28)[0]
+          e_shentsize = struct.unpack_from('<H', d, 0x3a)[0]
+          e_shnum = struct.unpack_from('<H', d, 0x3c)[0]
+          e_shstrndx = struct.unpack_from('<H', d, 0x3e)[0]
+          def sh(i):
+              o = e_shoff + i * e_shentsize
+              return struct.unpack_from('<IIQQQQ', d, o)
+          stroff = sh(e_shstrndx)[4]
+          info = {}
+          for i in range(e_shnum):
+              s = sh(i)
+              nm = d[stroff + s[0]: d.index(b'\0', stroff + s[0])].decode('latin1')
+              info[nm] = (s[5], s[2])          # (size, flags)
+
+          real = {k: info.get(k) for k in ('.ncx', '.ncxh', '.ncks', '.ncxhr')}
+          missing = [k for k, v in real.items() if v is None]
+          if missing:
+              print('  ❌ 真段缺失: %s' % missing); sys.exit(1)
+
+          ngroups = 0
+          i = 0
+          while '.ncxh%d' % i in info:
+              need = ['.ncxh%d' % i, '.ncks%d' % i, '.ncxhr%d' % i, '.ncx%d' % i]
+              lack = [n for n in need if n not in info]
+              if lack:
+                  print('  ❌ 诱饵组 %d 不完整，缺 %s' % (i, lack)); sys.exit(1)
+              ngroups += 1
+              i += 1
+
+          if ngroups == 0:
+              print('  ❌ 零诱饵组 —— nc_guard_decoy.c 没编进去？')
+              print('     （漏拷本文件时锁箱器静默跳过诱饵，不会报错）')
+              sys.exit(1)
+          print('  ✅ 诱饵组数 = %d' % ngroups)
+
+          bad = []
+          for i in range(ngroups):
+              for base, suffix in (('.ncxh', '.ncxh%d' % i),
+                                   ('.ncx', '.ncx%d' % i),
+                                   ('.ncxhr', '.ncxhr%d' % i),
+                                   ('.ncks', '.ncks%d' % i)):
+                  if info[suffix] != real[base]:
+                      bad.append('%s 诱饵=%s 真=%s' % (base, info[suffix], real[base]))
+          if bad:
+              print('  ❌ 诱饵暴露破绽（攻击者可 sort -k6 排序识破）:')
+              for b in bad:
+                  print('     %s' % b)
+              sys.exit(1)
+          print('  ✅ 诱饵与真段同尺寸同权限 —— 段表上无法区分')
+          PY
 
       - name: 断言锁箱后结构正确（静态；执行类须真机，见步骤内说明）
         run: |
