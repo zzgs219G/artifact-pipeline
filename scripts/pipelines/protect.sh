@@ -1078,6 +1078,13 @@ if [[ -n "$_guard_dst" ]]; then
     # 显式列出是给 test_nox_copy_list.py 的正则看的（它从本文件抽取
     # nc_guard_*.c 清单与 nox 的 LIB_SRCS 对比）。
     cp "$GUARD_SRC/nc_guard_report.c" "$_guard_dst/"
+    # nc_guard_decoy.c（2026-11-27）：诱饵段定义（占位段，零逻辑）。
+    # ⚠️ 漏拷的症状是产物里零诱饵段 —— 而锁箱器检测不到诱饵段会【静默
+    #    跳过】（bait_groups 只在段存在时才填），于是构建全绿、测试全绿，
+    #    只是防护归零。本仓库"静默降级"清单里又一类。
+    # ⚠️ 下面那道扫描兜底其实已经能带上它，但显式列出必须同步 ——
+    #    test_nox_copy_list.py 校验的是显式清单，漏了会红（2026-11-27 实测）。
+    cp "$GUARD_SRC/nc_guard_decoy.c" "$_guard_dst/"
     #
     # ⚠️⚠️ 但显式清单每次都有人忘（2026-11-13 在 nox 侧连踩三次，
     #    这里是第四次）。所以再加一道【扫描兜底】：把 GUARD_SRC 下
