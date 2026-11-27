@@ -59,7 +59,44 @@ echo "════════════════════════�
 echo "探针判断逻辑回归（无需真机 / 无需 root）"
 echo "══════════════════════════════════════════════════════════════"
 
-command -v clang >/dev/null 2>&1 || { echo "✗ 缺 clang"; exit 1; }
+# ⚠️ clang 必须选【宿主原生】的，不能用 PATH 里的第一个（2026-11-27 修）。
+#
+# 为什么：本脚本编译出的是【要当场运行】的可执行文件。GitHub runner 上
+# setup-toolchain 把 NDK 加进了 PATH，于是 `command -v clang` 拿到的是
+# ARM 交叉编译器 —— 编出来的 t 是 aarch64 机器码，在 x86_64 runner 上
+# 运行报 `cannot execute binary file: Exec format error`（exit 126）。
+#
+# 症状与 -lpthread 那个是同一类：Termux（本身就是 Android/ARM）上
+# 完全正常，Ubuntu CI 上从未跑通过。
+#
+# 选法：优先用 `cc`（宿主原生），拿不到再退 clang；并显式排除 NDK 路径。
+CLANG=""
+for _c in "${CC:-}" cc gcc clang; do
+    [ -n "$_c" ] || continue
+    _p=$(command -v "$_c" 2>/dev/null) || continue
+    case "$_p" in
+        *android*|*ndk*|*toolchains/llvm*) continue ;;   # 交叉编译器，跳过
+    esac
+    CLANG="$_p"; break
+done
+# 兜底：显式用已知的宿主 clang 绝对路径
+if [ -z "$CLANG" ] && [ -x /usr/bin/clang ]; then CLANG=/usr/bin/clang; fi
+[ -n "$CLANG" ] || { echo "✗ 找不到宿主原生 C 编译器（试过 cc/gcc/clang）" >&2; exit 1; }
+echo "编译器: $CLANG"
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/tpl.XXXXXX" 2>/dev/null || mktemp -d "$HOME/.tpl.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+# 自检：编一个空 main 并【真的运行】，确认产物能在本机执行。
+# 只检查"编译成功"不够 —— 交叉编译器也能编译成功，问题在运行期
+# （CI 上编出 aarch64 可执行文件，在 x86_64 runner 上 exit 126）。
+if ! printf 'int main(void){return 0;}\n' | "$CLANG" -x c - -o "$WORK/_cc_probe" \
+        >/dev/null 2>&1 || ! "$WORK/_cc_probe" >/dev/null 2>&1; then
+    echo "✗ $CLANG 无法产出可在本机执行的文件（是不是交叉编译器？）" >&2
+    echo "  本脚本要运行编译产物，必须用宿主原生编译器。" >&2
+    echo "  若在 CI 上且已设 ANDROID_NDK_HOME，请先 export CC=\$(command -v cc)。" >&2
+    exit 1
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/tpl.XXXXXX" 2>/dev/null || mktemp -d "$HOME/.tpl.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
@@ -533,19 +570,19 @@ MEOF
 # ── 编译 ────────────────────────────────────────────────────────────
 # -Dstatic= ：让探针函数可被外部调用（生产源码文件本身不动）
 # 注意：这也会把 static inline 变成普通函数，故 harness 提供了对应实现
-if ! clang -Dstatic= -DNC_GUARD_SECTIONED -I"$WORK" \
+if ! "$CLANG" -Dstatic= -DNC_GUARD_SECTIONED -I"$WORK" \
         -c "$WORK/env_probes.c" -o "$WORK/env_probes.o" 2>"$WORK/build.log"; then
     echo "✗ env_probes.c 编译失败：" >&2
     head -20 "$WORK/build.log" >&2
     exit 1
 fi
-if ! clang -Dstatic= -DNC_GUARD_SECTIONED -I"$WORK" \
+if ! "$CLANG" -Dstatic= -DNC_GUARD_SECTIONED -I"$WORK" \
         -c "$WORK/harness.c" -o "$WORK/harness.o" 2>>"$WORK/build.log"; then
     echo "✗ harness.c 编译失败：" >&2
     tail -20 "$WORK/build.log" >&2
     exit 1
 fi
-if ! clang -I"$WORK" -c "$WORK/main.c" -o "$WORK/main.o" 2>>"$WORK/build.log"; then
+if ! "$CLANG" -I"$WORK" -c "$WORK/main.c" -o "$WORK/main.o" 2>>"$WORK/build.log"; then
     echo "✗ main.c 编译失败：" >&2
     tail -20 "$WORK/build.log" >&2
     exit 1
@@ -564,7 +601,7 @@ if [ "$(uname -s)" = "Linux" ] && [ -d /system/bin ]; then
 else
     _LIBS=""                     # glibc：pthread 在 libc 内，无 liblog
 fi
-if ! clang "$WORK/env_probes.o" "$WORK/harness.o" "$WORK/main.o" \
+if ! "$CLANG" "$WORK/env_probes.o" "$WORK/harness.o" "$WORK/main.o" \
         -o "$WORK/t" $_LIBS 2>>"$WORK/build.log"; then
     echo "✗ 链接失败：" >&2
     tail -20 "$WORK/build.log" >&2
