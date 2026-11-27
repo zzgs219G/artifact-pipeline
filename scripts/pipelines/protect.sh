@@ -1085,6 +1085,12 @@ if [[ -n "$_guard_dst" ]]; then
     # ⚠️ 下面那道扫描兜底其实已经能带上它，但显式列出必须同步 ——
     #    test_nox_copy_list.py 校验的是显式清单，漏了会红（2026-11-27 实测）。
     cp "$GUARD_SRC/nc_guard_decoy.c" "$_guard_dst/"
+    # nc_guard_strdec.c（2026-11-28）：.ncxs 字符串段运行期解密。
+    # ⚠️ 漏拷的症状：业务代码调 ncguard_str() 时链接失败
+    #    `undefined symbol: ncguard_str`（分 TU 编译不报错，链接才炸）。
+    # ⚠️ 本文件的段若不存在（没人标记字符串），锁箱器会跳过 --strsec，
+    #    产物里就没有 .ncxs 段 —— 那是合法状态，不是错误。
+    cp "$GUARD_SRC/nc_guard_strdec.c" "$_guard_dst/"
     #
     # ⚠️⚠️ 但显式清单每次都有人忘（2026-11-13 在 nox 侧连踩三次，
     #    这里是第四次）。所以再加一道【扫描兜底】：把 GUARD_SRC 下
@@ -2346,6 +2352,51 @@ if [[ "${TMP_NOLOCK:-0}" != "1" && "${TMP_NONOX:-0}" != "1" && -d "$WORK/project
     #    云端实测证据（v0.9.65，run 09tu0ozl9yz）：诱饵 .ncx 解出
     #    5a92292a...（非法指令），而真段是 ff0301d1（sub sp,sp,#0x40）。
     #    这种"一眼假"的诱饵比不做更糟 —— 它反过来成了真段的路标。
+    # ── 字符串段（.ncxs）加密（2026-11-28）─────────────────────────
+    # 只加密【显式标记】的字符串，不碰 .rodata —— 用户约束：
+    # 「不能大量加密（否则无法利用压缩）」。
+    #   整段 .rodata 加密(134KB) → zlib +242%，APK 涨 95KB
+    #   只加密字符串(4.7KB)      → +4.3%，APK 涨 1.7KB
+    #
+    # ⚠️ 必须在【一级锁箱之后】：需要 master，而 master 由 lock() 写进
+    #    .ncxhr。这里从产物里读回来（不解析日志 —— 日志格式会变）。
+    # ⚠️ 必须在【二级锁箱之前或之后都行】（改的是不同段），但放在
+    #    lock-head 之前更整齐：lock-head 失败时能早一点失败。
+    # ⚠️ 段不存在 = 本产物不用字符串加密，锁箱器会打印"跳过"并返回 0。
+    #    那是合法状态，不能当错误。
+    if readelf -SW "$so" 2>/dev/null | grep -q '\.ncxs'; then
+      _MASTER_HEX=$(python3 - "$so" <<'PYEOF'
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+sh = struct.unpack_from('<Q', d, 0x28)[0]
+es = struct.unpack_from('<H', d, 0x3a)[0]
+en = struct.unpack_from('<H', d, 0x3c)[0]
+si = struct.unpack_from('<H', d, 0x3e)[0]
+def hdr(i): return struct.unpack_from('<IIQQQQ', d, sh + i * es)
+so = hdr(si)[4]
+for i in range(en):
+    f = hdr(i)
+    n = d[so + f[0]: d.index(b'\0', so + f[0])].decode('latin1')
+    if n == '.ncxhr':
+        print(d[f[4]:f[4] + 32].hex())
+        break
+PYEOF
+)
+      if [[ -n "$_MASTER_HEX" ]]; then
+        python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" --strsec \
+          --master-hex "$_MASTER_HEX" --from-apk "$IN_APK" \
+          2>&1 | sed 's/^/  [strsec] /' || {
+          echo "❌ .ncxs 字符串段加密失败 —— 段存在却没加密，明文会留在产物里" >&2
+          exit 1
+        }
+      else
+        echo "❌ 取不到 master（.ncxhr 段缺失？）—— .ncxs 无法加密" >&2
+        exit 1
+      fi
+    else
+      echo "  [strsec] 无 .ncxs 段 —— 本产物不启用字符串加密（跳过）"
+    fi
+
     python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" --lock-head \
       --from-apk "$IN_APK" \
       2>&1 | sed 's/^/  [lock2] /' || {
