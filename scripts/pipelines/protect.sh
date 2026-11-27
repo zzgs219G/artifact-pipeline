@@ -2340,7 +2340,14 @@ if [[ "${TMP_NOLOCK:-0}" != "1" && "${TMP_NONOX:-0}" != "1" && -d "$WORK/project
     # ⚠️ 二级失败必须 fail-fast：stub 见 slot 无 magic 会静默放行，
     #    head 段保持明文 → 自解谜没发生 → 静态攻击者照旧读 unlock 本体。
     #    那种"以为防了其实没防"的静默降级正是本机制最该避免的。
+    # ⚠️ 必须传 --from-apk（2026-11-27 加）：诱饵 .ncx 要用【真证书 + 真包名】
+    #    派生 k_so。不传的话诱饵只能用全零证书加密 → 攻击者拿真证书解出
+    #    乱码 → 立刻排除诱饵组 → 诱饵完全失效。
+    #    云端实测证据（v0.9.65，run 09tu0ozl9yz）：诱饵 .ncx 解出
+    #    5a92292a...（非法指令），而真段是 ff0301d1（sub sp,sp,#0x40）。
+    #    这种"一眼假"的诱饵比不做更糟 —— 它反过来成了真段的路标。
     python3 "$GUARD_SRC/so-section-lock.py" "$so" "$so" --lock-head \
+      --from-apk "$IN_APK" \
       2>&1 | sed 's/^/  [lock2] /' || {
       echo "❌ 二级锁箱失败（.ncxh 未标记？符号被 strip？）——unlock 本体仍可静态读取" >&2
       exit 1
