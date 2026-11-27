@@ -101,6 +101,33 @@ fi
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/tpl.XXXXXX" 2>/dev/null || mktemp -d "$HOME/.tpl.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
+# ── 平台门槛：本测试只能在 ARM 宿主上跑 ──────────────────────────────
+#
+# 为什么（2026-11-27）：本脚本测的是【ARM 探针】的判断逻辑，源码里
+# `#include <arm_acle.h>`（ARM ACLE 内建函数），且桩数据模仿
+# /proc/self/task 的 Android 布局。在 x86_64 上既编不过（没有 arm_acle.h），
+# 就算编过也测不到真实语义。
+#
+# 实测：本脚本在 Termux（aarch64）上 41 通过，在 GitHub 的 x86_64 runner
+# 上【从未】跑通过 —— 先后撞过三个错（-lpthread → Exec format error →
+# arm_acle.h）。前两个是脚本自身缺陷（已修），第三个是物理限制。
+#
+# 处理方式照本仓库既有纪律：**能力不足必须显式 skip + 说明原因**，
+# 不能静默当通过（那会变成"CI 绿但没测"的假绿，比红危险）。
+# 真机/ARM 侧验证靠 nox 的 test.sh（它本来就跑在 ARM 上）。
+if [ "$(uname -m)" != "aarch64" ] && [ "$(uname -m)" != "arm64" ] \
+        && [ "$(uname -m)" != "armv7l" ] && [ "$(uname -m)" != "armv8l" ]; then
+    echo ""
+    echo "── 探针判断逻辑回归（ARM 专用）──"
+    echo "  ⏭ 跳过：本测试需要 ARM 宿主（当前 $(uname -m)）"
+    echo "     原因：源码 #include <arm_acle.h>，且桩数据模仿 Android"
+    echo "           /proc/self/task 布局，x86 上既编不过也测不到真实语义。"
+    echo "     ARM 侧覆盖：nox/test.sh + 真机（本脚本在 Termux 上 41 通过）。"
+    echo "     其他三套（dex 重排 / profileable / 不透明失败）已在上方跑过。"
+    echo ""
+    exit 0
+fi
+
 # ── 准备：拷源码 + 生成 LSGS 头 ─────────────────────────────────────
 cp "$SRC_GUARD/env_probes.c" "$WORK/"
 cp "$SRC_GUARD/env_internal.h" "$WORK/"
